@@ -46,7 +46,7 @@ const TOOLS = [
   },
   {
     name: 'test_intelligence',
-    description: 'Lance le banc d’intelligence de Harn sur un modèle installé (24 épreuves : raisonnement, usage des outils, débogage, honnêteté) et rend la note sur 100, le détail et le marqueur de réflexion. Le modèle est chargé si besoin. Plusieurs minutes.',
+    description: 'Lance le banc d’intelligence de Harn sur un modèle installé (test adaptatif par paliers en cinq domaines : outils, code, raisonnement, long contexte, honnêteté) et rend la note sur 100, le palier atteint par domaine et le marqueur de réflexion. Le modèle est chargé si besoin. Une à deux minutes.',
     inputSchema: { type: 'object', properties: { model_id: { type: 'string' } }, required: ['model_id'] },
   },
 ];

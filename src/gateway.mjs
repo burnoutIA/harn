@@ -1,4 +1,4 @@
-import { modelById } from './catalog.mjs';
+import { displayName, modelById } from './catalog.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { getState } from './state.mjs';
 
@@ -38,7 +38,7 @@ export function modelsList() {
       object: 'model',
       owned_by: 'harn',
       created: Math.floor(new Date(state.models[id].installedAt).getTime() / 1000),
-      meta: { name: `${model.name} ${model.variant}`, context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision },
+      meta: { name: displayName(model), context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision },
     };
   });
   return { object: 'list', data };
@@ -57,6 +57,10 @@ function sendJson(res, status, payload) {
 
 export async function handleV1(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList());
+  if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
+    const found = modelsList().data.find((m) => m.id === decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
+    return found ? sendJson(res, 200, found) : sendJson(res, 404, { error: { message: 'Modèle inconnu ou non installé', type: 'invalid_request_error' } });
+  }
 
   const raw = await readBody(req);
   let body = null;

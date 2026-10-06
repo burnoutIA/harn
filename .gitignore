@@ -3,3 +3,28 @@ models/
 data/
 workspace/
 node_modules/
+
+# Système et éditeurs
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Réglages locaux de Claude Code (permissions propres à la machine)
+.claude/settings.local.json
+
+# Secrets éventuels (jetons Hugging Face, etc.)
+.env
+.env.*
+
+# Filets : un modèle ou un log posé hors des dossiers prévus
+*.gguf
+*.safetensors
+*.part
+*.log
+npm-debug.log*
+
+# Notes et rapports locaux
+roadmap.md
+docs/machines/

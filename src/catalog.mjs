@@ -173,3 +173,24 @@ export function contextFor(model, vramGiB) {
   for (const [threshold, value] of model.contextByVram) if (vramGiB >= threshold) context = value;
   return context;
 }
+
+// Deux modèles au même nom (« Qwen3.8-27B · Q4_K_M ») : on affiche ce qui les distingue, dans
+// l'ordre l'auteur du dépôt, puis les particularités (DFlash, vision, MTP) ; un numéro en dernier
+// recours. Le premier arrivé garde son nom tel quel quand rien d'autre ne le distingue.
+export function distinctionOf(model) {
+  const key = (m) => `${m.name} · ${m.variant}`.toLowerCase();
+  const twins = MODELS.filter((m) => key(m) === key(model));
+  if (twins.length < 2) return null;
+  const author = (m) => m.repo?.split('/')[0] ?? '';
+  const traits = (m) => [m.dflash && 'DFlash', m.vision && 'vision', m.mtp && !/MTP/i.test(m.variant) && 'MTP'].filter(Boolean);
+  const shared = traits(twins[0]).filter((t) => twins.every((m) => traits(m).includes(t)));
+  const authorsDiffer = new Set(twins.map(author)).size > 1;
+  const label = (m) => [authorsDiffer && author(m), ...traits(m).filter((t) => !shared.includes(t))].filter(Boolean).join(' · ');
+  const mine = label(model);
+  const same = twins.filter((m) => label(m) === mine);
+  const rank = same.indexOf(model) + 1;
+  return [mine, rank > 1 && String(rank)].filter(Boolean).join(' · ') || null;
+}
+
+export const variantOf = (model) => { const d = distinctionOf(model); return d ? `${model.variant} · ${d}` : model.variant; };
+export const displayName = (model) => `${model.name} · ${variantOf(model)}`;

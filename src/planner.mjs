@@ -1,5 +1,6 @@
 import { MODELS, totalBytes } from './catalog.mjs';
 import { backendCandidates, gpuProfile } from './levers.mjs';
+import { RATING_WEIGHTS, globalRating, ratingFrom } from './rating.mjs';
 
 // L'objectif : entre 100k et 150k de contexte, le modèle le plus intelligent que la machine
 // porte, et le plus rapide possible, sachant que sous 40 tok/s c'est lent. Le planificateur
@@ -123,21 +124,34 @@ export function intelligence(model, scores = {}) {
   return scores[model.id] ?? model.quality ?? 0;
 }
 
-export function makePlan(hardware, scores = {}) {
+export function makePlan(hardware, scores = {}, profiles = {}) {
   const q = (model) => intelligence(model, scores);
   const backend = pickBackend(hardware);
   const verdicts = MODELS.map((model) => ({ id: model.id, ...assess(model, hardware), intelligence: q(model), tested: scores[model.id] !== undefined }));
   const verdict = (id) => verdicts.find((entry) => entry.id === id);
+  // Note globale : mesurée pour un modèle passé aux bancs, sinon estimée (intelligence, vitesse et
+  // contexte attendus ici). C'est elle qui départage les modèles qui tiennent l'objectif.
+  for (const entry of verdicts) {
+    const model = MODELS.find((m) => m.id === entry.id);
+    const measured = globalRating(model, profiles[entry.id]);
+    const rating = measured ?? ratingFrom(model, { iq: entry.intelligence, tps: entry.tps, context: entry.context });
+    entry.rating = rating.score;
+    entry.ratingParts = rating.parts;
+    entry.ratingMeasured = Boolean(measured);
+  }
+  const r = (model) => verdict(model.id).rating;
   const usable = MODELS.filter((model) => verdict(model.id).fit !== 'no');
 
-  // La cible : le plus intelligent qui tient 100k et 40 tok/s ; sinon, parmi ceux qui tiennent
+  // La cible : la meilleure note globale parmi ceux qui tiennent 100k et 40 tok/s ; sinon, parmi ceux qui tiennent
   // 100k, le plus rapide (sous 40 tok/s c'est la vitesse qui manque) ; sinon le plus grand contexte.
   const both = usable.filter((m) => verdict(m.id).meetsContext && verdict(m.id).meetsSpeed);
   const contextOnly = usable.filter((m) => verdict(m.id).meetsContext);
-  const target = both.sort((a, b) => q(b) - q(a) || verdict(b.id).tps - verdict(a.id).tps)[0]
+  const target = both.sort((a, b) => r(b) - r(a) || q(b) - q(a))[0]
     ?? contextOnly.sort((a, b) => (verdict(b.id).tps ?? 0) - (verdict(a.id).tps ?? 0) || q(b) - q(a))[0]
     ?? usable.sort((a, b) => verdict(b.id).context - verdict(a.id).context || q(b) - q(a))[0]
     ?? null;
+
+  const targetWhy = target && both.includes(target) ? explainTarget(target, both, verdict, q, profiles) : null;
 
   // Le premier modèle : la cible si elle s'installe vite (pas Strata, 70 Go) ; sinon le meilleur
   // modèle llama.cpp qui tient sur la carte, pour avoir une IA qui marche pendant le reste.
@@ -161,10 +175,25 @@ export function makePlan(hardware, scores = {}) {
     firstModel: first?.id ?? null,
     upgradeModel: upgrade?.id ?? null,
     targetModel: target?.id ?? null,
+    targetWhy,
     verdicts,
     summary: summarize(hardware, backend, first, upgrade, target ? verdict(target.id) : null),
     advice: ramAdvice(hardware),
   };
+}
+
+// Pourquoi la cible passe devant un modèle plus intelligent : on le dit, avec le critère qui l'a
+// emporté (la note globale peut préférer la vitesse, la taille ou le contexte à l'intelligence).
+const RATING_LABELS = { taille: 'la taille', vitesse: 'la vitesse', contexte: 'le contexte' };
+function explainTarget(target, candidates, verdict, q, profiles) {
+  const smartest = [...candidates].sort((a, b) => q(b) - q(a) || verdict(b.id).rating - verdict(a.id).rating)[0];
+  if (!smartest || smartest.id === target.id || q(smartest) <= q(target)) return null;
+  const parts = (m) => verdict(m.id).ratingParts;
+  const gains = Object.keys(RATING_LABELS).map((k) => [k, (parts(target)[k] - parts(smartest)[k]) * RATING_WEIGHTS[k]]).sort((a, b) => b[1] - a[1]);
+  const [winner] = gains[0];
+  const tps = (m) => Math.round(profiles[m.id]?.bench?.winner?.tps ?? verdict(m.id).tps ?? 0);
+  const detail = { vitesse: `${tps(target)} tok/s contre ${tps(smartest)}`, contexte: `${Math.round(verdict(target.id).context / 1024)}k contre ${Math.round(verdict(smartest.id).context / 1024)}k`, taille: 'un modèle plus gros' }[winner];
+  return `Note globale ${verdict(target.id).rating} contre ${verdict(smartest.id).rating} pour ${smartest.name} · ${smartest.variant}, plus intelligent (${q(smartest)} contre ${q(target)}) : la note privilégie ici ${RATING_LABELS[winner]} (${detail}).`;
 }
 
 // Ce qu'un ajout de RAM débloquerait : Strata + Flash-Next donne de beaux résultats même sur

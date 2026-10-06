@@ -1,6 +1,8 @@
+import { IQ_VERSION } from './iq-test.mjs';
+
 // La note globale d'un modèle installé : ce qu'il vaut vraiment sur cette machine. Le banc
-// d'intelligence dit s'il répond juste (100 % est normal pour un modèle qui a tout bon, quelle
-// que soit sa taille) ; la note globale y ajoute sa taille, sa vitesse mesurée et son contexte.
+// d'intelligence dit jusqu'où il répond juste (100 est rare : il faut réussir les paliers limite) ;
+// la note globale y ajoute sa taille, sa vitesse mesurée et son contexte.
 
 export const RATING_WEIGHTS = { intelligence: 40, taille: 25, vitesse: 20, contexte: 15 };
 
@@ -30,16 +32,22 @@ export function paramsOf(model) {
   return null;
 }
 
-// Note sur 100, ou null tant que le banc d'intelligence et le banc de vitesse n'ont pas tourné.
-export function globalRating(model, profile) {
-  if (profile?.iq?.version !== 2 || !profile.bench?.winner?.tps) return null;
+// Note sur 100 à partir d'une intelligence (sur 100), d'une vitesse et d'un contexte : mesurés
+// (globalRating) ou estimés par le planificateur pour un modèle pas encore installé.
+export function ratingFrom(model, { iq, tps, context }) {
   const paramsB = paramsOf(model);
   const parts = {
-    intelligence: profile.iq.score / 100,
+    intelligence: (iq ?? 0) / 100,
     taille: paramsB ? sizeRatio(paramsB * (isMoe(model) ? MOE_FACTOR : 1)) : 0,
-    vitesse: speedRatio(profile.bench.winner.tps),
-    contexte: contextRatio(profile.tuning?.context ?? 0),
+    vitesse: tps ? speedRatio(tps) : 0,
+    contexte: contextRatio(context ?? 0),
   };
   const score = Math.round(Object.entries(RATING_WEIGHTS).reduce((sum, [name, weight]) => sum + parts[name] * weight, 0));
   return { score, parts, paramsB, moe: isMoe(model) };
+}
+
+// La note mesurée, ou null tant que le banc d'intelligence et le banc de vitesse n'ont pas tourné.
+export function globalRating(model, profile) {
+  if (profile?.iq?.version !== IQ_VERSION || !profile.bench?.winner?.tps) return null;
+  return ratingFrom(model, { iq: profile.iq.score, tps: profile.bench.winner.tps, context: profile.tuning?.context });
 }

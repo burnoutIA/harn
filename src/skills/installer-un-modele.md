@@ -49,7 +49,7 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
    tournes).
 
 6. **Rendre compte.** Donne la vitesse mesurée, le réglage retenu, le contexte, la note du banc
-   d'intelligence et son détail (outils, débogage, honnêteté, réflexion), et compare au modèle actuel (`harn_status`). Recommande de l'adopter ou non
+   d'intelligence et son détail (palier atteint en outils, code, raisonnement, long contexte, honnêteté ; réflexion), et compare au modèle actuel (`harn_status`). Recommande de l'adopter ou non
    selon l'objectif. L'utilisateur l'active d'un clic dans Harn (vue Modèles).
 
 ## Limites à dire franchement
@@ -59,6 +59,7 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
   Harn ne le gère pas encore.
 - Une architecture trop récente peut ne pas se charger avec le moteur installé : l'erreur du banc
   le dira. Signale-le plutôt que de réessayer.
-- Le banc d'intelligence (24 épreuves : raisonnement, outils, débogage, honnêteté) donne une note
-  sur 100 commune à tous les modèles. Ce n'est pas un benchmark public, mais il compare bien.
+- Le banc d'intelligence (test adaptatif par paliers : plancher, difficile, limite, en cinq domaines)
+  donne une note sur 100 commune à tous les modèles. 100 est rare : il faut réussir les paliers
+  limite. Ce n'est pas un benchmark public, mais il départage bien.
   Signale aussi le marqueur de réflexion : un modèle « bavard » répond plus lentement à l'usage.

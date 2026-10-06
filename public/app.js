@@ -35,17 +35,25 @@ function duration(seconds) {
 }
 const modelOf = (id) => catalog.find((m) => m.id === id);
 const verdictOf = (id) => state.plan?.verdicts?.find((v) => v.id === id);
+// Note globale (mesurée ou estimée) et, pour la cible, pourquoi elle passe devant un modèle plus intelligent.
+const ratingFact = (id) => { const v = verdictOf(id); return v?.rating != null ? `<div class="fact" title="Intelligence 40 % · taille 25 % · vitesse 20 % · contexte 15 %"><b>${v.rating}</b>note globale${v.ratingMeasured ? '' : ' estimée'}</div>` : ''; };
+const whyTarget = (id) => (state.plan?.targetWhy && state.plan.targetModel === id ? `<p class="why">${esc(state.plan.targetWhy)}</p>` : '');
+const moeOf = (model) => Boolean(model?.rating?.moe ?? (model?.sparse || model?.moe));
 const nameOf = (id) => modelOf(id)?.name ?? id;
 const iqOf = (id) => { const v = verdictOf(id); return { value: v?.intelligence ?? modelOf(id)?.quality ?? null, tested: Boolean(v?.tested) }; };
 // Même règle que le serveur : la meilleure note globale parmi les modèles installés, autre que celui en cause, qui savent manier des outils.
 const ratingOf = (id) => modelOf(id)?.rating?.score ?? state.profiles[id].iq.score * 0.4;
 const helperFor = (failedId) => Object.entries(state.profiles ?? {})
-  .filter(([id, p]) => id !== failedId && state.models[id]?.installedAt && p.iq?.version === 2 && p.iq.categories.outils.points >= 5)
+  .filter(([id, p]) => id !== failedId && state.models[id]?.installedAt && p.iq?.version === IQ_VERSION && p.iq.categories.outils.ratio >= 0.4)
   .sort(([a], [b]) => ratingOf(b) - ratingOf(a))[0]?.[0] ?? null;
-const iqResult = (id) => (state.profiles[id]?.iq?.version === 2 ? state.profiles[id].iq : null);
+// Même version que src/iq-test.mjs : les résultats d'un ancien banc sont à refaire.
+const IQ_VERSION = 3;
+const iqResult = (id) => (state.profiles[id]?.iq?.version === IQ_VERSION ? state.profiles[id].iq : null);
 const clientOf = (ua = '') => (/^pi/i.test(ua) ? 'pi agent' : ua.includes('harn') ? 'Harn' : ua.split(/[/ (]/)[0] || 'client');
 
 const icon = {
+  heart: '<svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 13.8S1.8 10.2 1.8 5.9A3.2 3.2 0 0 1 8 4.4a3.2 3.2 0 0 1 6.2 1.5C14.2 10.2 8 13.8 8 13.8z"/></svg>',
+  eye: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg>',
   trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v4.5M9.2 6.5v4.5"/></svg>',
   check: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>',
   cross: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
@@ -102,6 +110,34 @@ function progressBlock(items) {
       <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
       <div class="progress-meta"><span class="num">${d.total ? `${gb(d.received)} / ${gb(d.total)}` : gb(d.received)}</span><span>${right}</span></div></div>`;
   }).join('')}</div>`;
+}
+
+// L'avancement d'une installation : les quatre étapes, la courante en avant, et ce qu'elle fait.
+const PHASES = [
+  ['download', 'Téléchargement', 'Téléchargement des fichiers'],
+  ['tune', 'Réglages', 'Recherche des meilleurs réglages'],
+  ['iq', 'Intelligence', 'Test de l’intelligence'],
+  ['analysis', 'Analyse', 'Analyse des mesures par l’IA locale'],
+];
+function phaseBlock(id) {
+  const entry = state.models[id] ?? {};
+  const phase = entry.phase ?? (entry.installing ? 'download' : entry.tuning ? 'tune' : null);
+  if (!phase) return '';
+  const current = PHASES.findIndex(([key]) => key === phase);
+  const model = modelOf(id);
+  let detail = '';
+  if (phase === 'download') {
+    const items = downloadsFor(`model:${id}`).concat(model?.engine === 'strata' ? downloadsFor('runtime:strata') : []).filter((d) => !d.done);
+    detail = progressBlock(items) || `<span class="phase-detail">${esc(entry.phaseDetail ?? entry.detail ?? 'Préparation…')}</span>`;
+  } else {
+    const text = phase === 'tune' ? (entry.tuneDetail ?? 'Chargement du modèle') : phase === 'iq' ? (state.profiles[id]?.iqRunning ?? 'Préparation') : 'L’IA locale relit ses mesures et l’écrit dans le carnet';
+    detail = `<span class="phase-detail">${esc(text)}</span>`;
+  }
+  return `<div class="phases">
+    <ol>${PHASES.map(([, short], i) => `<li class="${i < current ? 'done' : i === current ? 'now' : ''}">${i < current ? icon.check : `<b>${i + 1}</b>`}${short}</li>`).join('')}</ol>
+    <div class="phase-now"><span class="dot"></span>Étape ${current + 1}/4 · ${PHASES[current][2]}</div>
+    ${detail}
+  </div>`;
 }
 
 const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
@@ -415,17 +451,15 @@ function renderNext() {
     const verdict = verdictOf(id);
     const current = modelOf(state.active?.modelId);
     let side = `<button class="btn violet big" data-action="install" data-id="${id}">${icon.bolt} Installer et régler</button><small>${gb(model.totalBytes)} · en arrière-plan, votre IA reste disponible</small>`;
-    if (entry.tuning) side = `<span class="pill prefill"><span class="dot"></span>${esc(entry.tuneDetail ?? 'Réglage…')}</span>`;
-    else if (entry.installing) {
-      const items = downloadsFor(`model:${id}`).concat(model.engine === 'strata' ? downloadsFor('runtime:strata') : []).filter((d) => !d.done);
-      side = `<div class="progress">${progressBlock(items) || '<span class="pill prefill"><span class="dot"></span>Préparation…</span>'}</div>`;
-    }
+    if (entry.phase || entry.installing || entry.tuning) side = phaseBlock(id);
     paint('next', `<section class="card next">
       <div>
         <div class="label">Prochaine étape</div>
         <h2>Une IA plus forte tient sur votre machine</h2>
         <p>${esc(model.name)} · ${esc(model.variant)}. ${esc(model.tagline)}</p>
+        ${whyTarget(id)}
         <div class="facts">
+          ${ratingFact(id)}
           <div class="fact"><b>${iqOf(id).value ?? '?'}${current ? ` <span style="color:var(--faint);font-weight:400">vs ${iqOf(current.id).value ?? '?'}</span>` : ''}</b>intelligence${iqOf(id).tested ? '' : ' (estimée)'}</div>
           <div class="fact"><b>~${verdict?.tps ?? '?'} tok/s</b>estimés à 100k</div>
           <div class="fact"><b>${verdict?.context ? kTokens(verdict.context) : '—'}</b>de contexte</div>
@@ -448,7 +482,9 @@ function renderNext() {
         <div class="label">Prochaine étape</div>
         <h2>Un meilleur modèle est déjà installé</h2>
         <p>${esc(model.name)} · ${esc(model.variant)}. Il fait mieux que le modèle actuel sur votre machine.</p>
+        ${whyTarget(best)}
         <div class="facts">
+          ${ratingFact(best)}
           <div class="fact"><b>${iqOf(best).value ?? '?'}${current ? ` <span style="color:var(--faint);font-weight:400">vs ${iqOf(current.id).value ?? '?'}</span>` : ''}</b>intelligence</div>
           <div class="fact"><b>${bench ? fr(bench.tps) : '~' + (verdict?.tps ?? '?')} tok/s</b>${bench ? 'mesurés ici' : 'estimés'}</div>
           <div class="fact"><b>${verdict?.context ? kTokens(verdict.context) : '—'}</b>de contexte</div>
@@ -541,9 +577,9 @@ function modelCard(model) {
   if (isActive) badges.push(state.active.status === 'ready' || loading ? `<span class="badge active">${loading ? 'Chargement…' : 'Actif'}</span>` : '<span class="badge">En pause</span>');
   else if (entry.installedAt) badges.push('<span class="badge">Installé</span>');
   if (isUpgrade) badges.push('<span class="badge upgrade">Recommandé pour vous</span>');
-  else if (isTarget && !isActive) badges.push('<span class="badge upgrade">Meilleur choix ici</span>');
+  else if (isTarget && !isActive) badges.push('<span class="badge upgrade" title="Meilleure note globale parmi les modèles qui tiennent 100k de contexte et 40 tok/s">Meilleur choix ici</span>');
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
-  if (model.vision) badges.push('<span class="badge">Images</span>');
+  if (model.vision) badges.push(`<span class="badge icon" title="Vision : comprend les images" aria-label="Vision : comprend les images">${icon.eye}</span>`);
   if (verdict.fit === 'partial' && !entry.installedAt) badges.push('<span class="badge warn">En partie sur le processeur</span>');
   if (iqResult(model.id)?.verbosity.label === 'bavard') badges.push('<span class="badge warn" title="Réfléchit longtemps avant de répondre">Bavard</span>');
 
@@ -552,23 +588,27 @@ function modelCard(model) {
     : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}">~${verdict.tps}<small>estimé</small></div>` : '<div class="v est">—</div>';
 
   let action = '';
-  if (entry.installing || entry.tuning) {
-    const items = downloadsFor(`model:${model.id}`).concat(model.engine === 'strata' ? downloadsFor('runtime:strata') : []).filter((d) => !d.done);
-    action = entry.tuning ? `<span class="pill prefill"><span class="dot"></span>${esc(entry.tuneDetail ?? 'Réglage…')}</span>` : `<div style="width:100%">${progressBlock(items) || '<span class="pill prefill"><span class="dot"></span>Préparation…</span>'}</div>`;
-  } else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
+  if (entry.phase || entry.installing || entry.tuning) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
+  else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
   else if (isActive && !loading) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">${icon.power} Recharger</button>`;
   else if (entry.installedAt) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">Utiliser ce modèle</button>`;
+  // Le banc d'intelligence se lance depuis la carte : le modèle est chargé si besoin.
+  const iqRun = state.profiles[model.id]?.iqRunning;
+  if (entry.installedAt && !entry.phase && !entry.installing && !entry.tuning) action += `<button class="btn ghost" data-action="iq" data-id="${model.id}" ${iqRun ? 'disabled' : ''} title="${iqRun ? esc(iqRun) : 'Une à deux minutes, le modèle est chargé si besoin'}">${iqRun ? 'Banc en cours…' : iqResult(model.id) ? 'Retester l’intelligence' : 'Tester l’intelligence'}</button>`;
   else if (!off) action = `<button class="btn ${isUpgrade ? 'violet' : ''}" data-action="install" data-id="${model.id}">${icon.bolt} Installer et régler</button>`;
 
   return `<article class="card model ${isActive ? 'active' : ''} ${isUpgrade ? 'upgrade' : ''} ${off ? 'off' : ''}">
     ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
-    <div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div></div>
+    <div class="title-row"><div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div></div>${entry.installedAt ? `<button class="heart ${state.favorite === model.id ? 'on' : ''}" data-action="favorite" data-id="${model.id}" title="${state.favorite === model.id ? 'Modèle par défaut · cliquer pour retirer' : 'En faire le modèle par défaut'}" aria-pressed="${state.favorite === model.id}">${icon.heart}</button>` : ''}</div>
     <p class="tagline">${esc(model.tagline)}</p>
     <div class="facts">
+      <div title="Nombre de paramètres${moeOf(model) ? ' (tous les experts du MoE)' : ''}"><div class="k">Taille</div>${model.paramsB ? `<div class="v">${fr(model.paramsB, model.paramsB % 1 ? 1 : 0)}B${moeOf(model) ? '<small>MoE</small>' : ''}</div>` : '<div class="v est">—</div>'}</div>
       <div><div class="k">Intelligence</div>${iqOf(model.id).value != null ? `<div class="v ${iqOf(model.id).tested ? '' : 'est'}">${iqOf(model.id).tested ? '' : '~'}${iqOf(model.id).value}<small>${iqOf(model.id).tested ? '/100' : 'estimée'}</small></div>` : '<div class="v est">à tester</div>'}</div>
       <div><div class="k">Vitesse ici</div>${speed}</div>
       <div><div class="k">Contexte ici</div><div class="v ${verdict.context && verdict.context < 102400 ? 'bad' : ''}">${verdict.context ? kTokens(verdict.context) : '—'}</div></div>
+      <div title="Intelligence 40 % · taille 25 % · vitesse 20 % · contexte 15 %"><div class="k">Note globale</div>${verdict.rating != null ? `<div class="v ${verdict.ratingMeasured ? '' : 'est'}">${verdict.ratingMeasured ? '' : '~'}${verdict.rating}<small>${verdict.ratingMeasured ? '/100' : 'estimée'}</small></div>` : '<div class="v est">—</div>'}</div>
     </div>
+    ${isTarget ? whyTarget(model.id) : ''}
     ${off ? `<p class="why">Pas pour cette machine : ${esc(verdict.reasons.join(', '))}.</p>` : ''}
     ${entry.installing && entry.detail ? `<p class="why">${esc(entry.detail)}</p>` : ''}
     ${entry.error ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
@@ -637,23 +677,24 @@ function renderTuning() {
   }
   const profileIq = state.profiles[id] ?? {};
   const iq = iqResult(id);
-  const CATS = [['raisonnement', 'Raisonnement', 40], ['outils', 'Outils', 25], ['debogage', 'Débogage', 20], ['honnetete', 'Honnêteté', 15]];
+  const CATS = [['outils', 'Outils', 35], ['code', 'Code', 25], ['raisonnement', 'Raisonnement', 20], ['contexte', 'Long contexte', 10], ['honnetete', 'Honnêteté', 10]];
+  const LEVEL = { aucun: 'aucun palier', plancher: 'plancher', difficile: 'palier difficile', limite: 'palier limite' };
   const VERB = { concis: 'Réflexion concise', normal: 'Réflexion normale', bavard: 'Réflexion trop longue' };
   paint('tune-iq', `<div class="view-head" style="margin-bottom:6px"><div><div class="label">Banc d’intelligence</div>
-      <p style="margin-top:6px;font-size:calc(13.5px * var(--fs))">24 épreuves corrigées automatiquement : raisonnement piégé, usage des outils, chasse aux erreurs dans du code, honnêteté. Une seule note sur 100 pour comparer tous les modèles.</p></div>
+      <p style="margin-top:6px;font-size:calc(13.5px * var(--fs))">Épreuves corrigées automatiquement en cinq domaines : outils, code, raisonnement, long contexte, honnêteté. Chaque domaine commence au palier difficile, monte au palier limite s’il le réussit, redescend au plancher sinon. Une seule note sur 100 pour comparer tous les modèles : 100 est rare.</p></div>
       ${id ? `<button class="btn" data-action="iq" data-id="${id}" ${profileIq.iqRunning || state.active?.status !== 'ready' ? 'disabled' : ''}>${iq ? 'Relancer' : 'Lancer le banc'}</button>` : ''}</div>
     ${profileIq.iqRunning ? `<span class="pill prefill"><span class="dot"></span>${esc(profileIq.iqRunning)}</span>` : ''}
     ${iq ? `<div class="iq-score"><span class="num">${iq.score}<small>/100</small></span><span>${iq.seconds} s · ${clock(iq.at)}</span>
         ${modelOf(id)?.rating ? `<span class="badge" title="Intelligence 40 % · taille ${modelOf(id).rating.paramsB ?? '?'}B${modelOf(id).rating.moe ? ' MoE' : ''} 25 % · vitesse mesurée 20 % · contexte 15 %">Note globale ${modelOf(id).rating.score}/100</span>` : ''}
         <span class="badge ${iq.verbosity.label === 'bavard' ? 'warn' : ''}" title="${iq.verbosity.avgTokens} tokens par réponse en moyenne${iq.verbosity.truncated ? ` · ${iq.verbosity.truncated} réponse(s) coupée(s) faute de budget` : ''}">${VERB[iq.verbosity.label]} · ${fr(iq.verbosity.avgTokens)} tokens/réponse</span></div>
-      <div class="iq-cats">${CATS.map(([key, label, weight]) => { const c = iq.categories[key]; return `<div class="iq-cat"><div class="top"><span>${label} <small>${weight} %</small></span><b>${key === 'debogage' ? `${Math.round(c.ratio * 100)} %` : `${c.points}/${c.total}`}</b></div><div class="bar"><i style="width:${(c.ratio * 100).toFixed(0)}%"></i></div></div>`; }).join('')}</div>
+      <div class="iq-cats">${CATS.map(([key, label, weight]) => { const c = iq.categories[key]; return `<div class="iq-cat"><div class="top"><span>${label} <small>${weight} %</small></span><b>${c.points}/100</b></div><div class="bar"><i style="width:${c.points}%"></i></div><div class="iq-mini">${LEVEL[c.level]}${c.tiers.plancher.played ? '' : ' · plancher acquis'}</div></div>`; }).join('')}</div>
       <div class="iq-grid">${iq.answers.map((x) => {
         const cls = x.score >= 1 ? 'ok' : x.long ? 'long' : x.score > 0 ? 'part' : 'ko';
         const mark = x.score >= 1 ? '✓' : x.long ? '…' : x.score > 0 ? '½' : '✗';
-        const extra = x.category === 'debogage' ? ` · ${x.found}/${x.total}${x.invented ? `, ${x.invented} inventée(s)` : ''}` : '';
+        const extra = x.total ? ` · ${x.found}/${x.total}${x.invented ? `, ${x.invented} inventée(s)` : ''}` : '';
         const tip = x.error ?? (x.long ? 'Réflexion trop longue : budget épuisé' : x.given ?? '');
-        return `<div class="iq-item ${cls}" title="${esc(tip)}"><span>${mark}</span>${esc(x.theme)}${extra}</div>`;
-      }).join('')}</div>` : (profileIq.iqRunning ? '' : '<p class="empty">Pas encore passé. Comptez quelques minutes.</p>')}`);
+        return `<div class="iq-item ${cls}" title="${esc(tip)}"><span>${mark}</span>${esc(x.theme)}${extra}<small class="tier">${esc(x.tier)}</small></div>`;
+      }).join('')}</div>` : (profileIq.iqRunning ? '' : '<p class="empty">Pas encore passé. Comptez une à deux minutes.</p>')}`);
   paint('tune-explain', `<h3>Comment lire</h3>
     <p>Chaque réglage est mesuré sur trois tâches : écrire du code, écrire du texte, et répondre avec un long contexte (~20 000 tokens). Le score est la moyenne des deux premières (et de la troisième quand elle est mesurée).</p>
     <dl class="glossary">
@@ -854,9 +895,10 @@ app.addEventListener('click', async (event) => {
   try {
     if (action === 'pi') {
       if (state.active && state.active.status !== 'ready') post(`/api/models/${state.active.modelId}/activate`);
-      const r = await post('/api/pi/launch', { model: state.active?.modelId }); toast(`pi agent s’ouvre avec ${nameOf(r.model)}`); }
+      const r = await post('/api/pi/launch', {}); toast(`pi agent s’ouvre avec ${nameOf(r.model)}`); }
     if (action === 'retry') await post('/api/setup/start');
     if (action === 'install') { await post(`/api/models/${id}/install`); toast('Téléchargement lancé · votre IA actuelle reste disponible'); }
+    if (action === 'favorite') { const r = await post(`/api/models/${id}/favorite`); toast(r.favorite ? `${nameOf(id)} est le modèle par défaut` : 'Plus de modèle par défaut'); }
     if (action === 'delete-model') {
       const m = modelOf(id);
       const warn = state.active?.modelId === id ? '\n\nC’est le modèle chargé : il sera déchargé.' : '';

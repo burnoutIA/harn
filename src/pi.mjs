@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { modelById } from './catalog.mjs';
+import { displayName, modelById } from './catalog.mjs';
 import { agentInstructions } from './machine-doc.mjs';
 import { DIRS, PORTS, fromRoot } from './paths.mjs';
 import { getState, update } from './state.mjs';
@@ -47,7 +47,7 @@ export async function configurePi(preferredModel = null) {
     const context = state.profiles[id]?.tuning?.context ?? model.contextByVram[0][1];
     return {
       id,
-      name: `${model.name} · ${model.variant}`,
+      name: displayName(model),
       reasoning: model.reasoning,
       input: model.vision ? ['text', 'image'] : ['text'],
       contextWindow: context,
@@ -65,7 +65,9 @@ export async function configurePi(preferredModel = null) {
 
   const settingsFile = path.join(DIRS.piAgent, 'settings.json');
   const settings = await readJson(settingsFile);
-  const defaultModel = preferredModel ?? state.active?.modelId ?? installed[0];
+  // Un modèle demandé explicitement (lancement de pi), sinon le modèle par défaut (cœur), sinon le chargé.
+  const favorite = installed.includes(state.favorite) ? state.favorite : null;
+  const defaultModel = preferredModel ?? favorite ?? state.active?.modelId ?? installed[0];
   Object.assign(settings, { defaultProvider: 'harn', defaultModel, defaultThinkingLevel: settings.defaultThinkingLevel ?? 'medium' });
   await writeFile(settingsFile, JSON.stringify(settings, null, 2));
   // Consignes globales de pi : la référence des leviers et le carnet de cette machine.

@@ -38,6 +38,8 @@ export async function loadState() {
   if (state.active) state.active = { ...state.active, status: 'stopped' };
   for (const download of Object.values(state.downloads)) if (!download.done) download.paused = true;
   if (state.setup.phase === 'running') state.setup.phase = 'interrupted';
+  for (const model of Object.values(state.models ?? {})) Object.assign(model, { phase: null, phaseDetail: null, tuning: false, tuneDetail: null });
+  for (const profile of Object.values(state.profiles ?? {})) profile.iqRunning = null;
   return state;
 }
 

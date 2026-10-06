@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { modelById } from './catalog.mjs';
+import { displayName, modelById } from './catalog.mjs';
 import { PORTS, fromRoot } from './paths.mjs';
 import { OBJECTIVE } from './planner.mjs';
 import { getState } from './state.mjs';
@@ -74,14 +74,14 @@ export function factsMarkdown(state) {
     const model = modelById(verdict.id);
     const bench = state.profiles[verdict.id]?.bench?.winner;
     const role = verdict.id === plan.targetModel ? '**visé**' : verdict.role === 'first' ? 'installé d’abord' : verdict.fit === 'no' ? 'hors de portée' : 'compatible';
-    lines.push(`| ${model.name} ${model.variant} | ${verdict.tested ? verdict.intelligence : `~${model.quality ?? '?'} (estimée)`} | ${role} | ${verdict.context ? `${Math.round(verdict.context / 1024)}k` : '—'} | ${verdict.kv ?? '—'} | ${verdict.tps ? `~${verdict.tps}` : '—'} | ${bench ? `${fr(bench.tps)} tok/s` : '—'} |`);
+    lines.push(`| ${displayName(model)} | ${verdict.tested ? verdict.intelligence : `~${model.quality ?? '?'} (estimée)`} | ${role} | ${verdict.context ? `${Math.round(verdict.context / 1024)}k` : '—'} | ${verdict.kv ?? '—'} | ${verdict.tps ? `~${verdict.tps}` : '—'} | ${bench ? `${fr(bench.tps)} tok/s` : '—'} |`);
   }
   if (plan.advice) lines.push('', `> ${plan.advice}`);
 
   for (const [id, profile] of Object.entries(state.profiles)) {
     if (!profile.bench) continue;
     const model = modelById(id);
-    lines.push('', `### Banc : ${model.name} ${model.variant} (${new Date(profile.bench.at).toLocaleString('fr-FR')})`, '');
+    lines.push('', `### Banc : ${displayName(model)} (${new Date(profile.bench.at).toLocaleString('fr-FR')})`, '');
     lines.push('| Levier | Variante | Code | Texte | Contexte long | Score | VRAM libre | Retenu |', '|---|---|---|---|---|---|---|---|');
     for (const arm of profile.bench.arms) {
       const w = (name) => arm.workloads?.find((x) => x.workload === name)?.tps;
@@ -140,7 +140,7 @@ export async function askLocalAnalysis() {
   const content = answer.choices?.[0]?.message?.content?.trim();
   if (!content) throw new Error('Analyse vide (budget de sortie épuisé pendant la réflexion ?)');
   const model = modelById(modelId);
-  const body = `${content.replace(/^#+\s*Analyse de l'IA locale\s*\n/i, "## Analyse de l'IA locale\n")}\n\n*Rédigé par ${model.name} ${model.variant} le ${new Date().toLocaleString('fr-FR')}, à partir des mesures ci-dessus.*`;
+  const body = `${content.replace(/^#+\s*Analyse de l'IA locale\s*\n/i, "## Analyse de l'IA locale\n")}\n\n*Rédigé par ${displayName(model)} le ${new Date().toLocaleString('fr-FR')}, à partir des mesures ci-dessus.*`;
   let text = await readFile(file, 'utf8');
   text = replaceBlock(text, 'analyse', body) ?? `${text}\n\n${MARK('analyse')[0]}\n${body}\n${MARK('analyse')[1]}\n`;
   await writeFile(file, text);

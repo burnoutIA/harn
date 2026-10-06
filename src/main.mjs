@@ -2,15 +2,16 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { MODELS, modelById, totalBytes } from './catalog.mjs';
+import { MODELS, displayName, modelById, totalBytes, variantOf } from './catalog.mjs';
 import { globalRating, paramsOf } from './rating.mjs';
+import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
 import { handleV1, setActivator } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, openInEditor } from './pi.mjs';
 import { installKetch } from './runtimes.mjs';
-import { activate, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
+import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
 import { loadCustomModels } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
@@ -20,7 +21,7 @@ const ORIGIN = `http://127.0.0.1:${PORTS.app}`;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
 
 // Le catalogue inclut les modèles ajoutés depuis Hugging Face : il se recalcule à chaque lecture.
-const catalog = () => MODELS.map((model) => ({ ...model, totalBytes: totalBytes(model), paramsB: paramsOf(model), rating: globalRating(model, getState().profiles?.[model.id]) }));
+const catalog = () => MODELS.map((model) => ({ ...model, variant: variantOf(model), totalBytes: totalBytes(model), paramsB: paramsOf(model), rating: globalRating(model, getState().profiles?.[model.id]) }));
 
 function json(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -52,7 +53,7 @@ function compactStatus() {
   const downloads = Object.entries(s.downloads).filter(([, d]) => !d.done).map(([id, d]) => ({ id, file: d.label, percent: d.total ? Math.round((d.received / d.total) * 100) : null, speedMBps: d.speed ? +(d.speed / 1e6).toFixed(0) : null }));
   const models = MODELS.filter((m) => s.models[m.id]?.installedAt || s.models[m.id]?.installing).map((m) => {
     const p = s.profiles[m.id] ?? {};
-    return { id: m.id, name: `${m.name} · ${m.variant}`, installed: Boolean(s.models[m.id]?.installedAt), installing: Boolean(s.models[m.id]?.installing), tuning: s.models[m.id]?.tuneDetail ?? null, benchTps: p.bench?.winner?.tps ?? null, setting: p.bench?.winner?.label ?? null, context: p.tuning?.context ?? null, paramsB: paramsOf(m), noteGlobale: globalRating(m, p)?.score ?? null, intelligence: p.iq?.version === 2 ? { score: p.iq.score, raisonnement: `${p.iq.categories.raisonnement.points}/${p.iq.categories.raisonnement.total}`, outils: `${p.iq.categories.outils.points}/${p.iq.categories.outils.total}`, debogage: `${Math.round(p.iq.categories.debogage.ratio * 100)} %`, honnetete: `${p.iq.categories.honnetete.points}/${p.iq.categories.honnetete.total}`, reflexion: p.iq.verbosity.label } : null, iqRunning: p.iqRunning ?? null, quality: m.quality, error: s.models[m.id]?.error ?? null };
+    return { id: m.id, name: displayName(m), installed: Boolean(s.models[m.id]?.installedAt), installing: Boolean(s.models[m.id]?.installing), tuning: s.models[m.id]?.tuneDetail ?? null, benchTps: p.bench?.winner?.tps ?? null, setting: p.bench?.winner?.label ?? null, context: p.tuning?.context ?? null, paramsB: paramsOf(m), noteGlobale: globalRating(m, p)?.score ?? null, intelligence: p.iq?.version === IQ_VERSION ? { score: p.iq.score, ...Object.fromEntries(Object.entries(p.iq.categories).map(([k, c]) => [k, `${c.points}/100, palier ${c.level}`])), reflexion: p.iq.verbosity.label } : null, iqRunning: p.iqRunning ?? null, quality: m.quality, error: s.models[m.id]?.error ?? null };
   });
   return { machine: s.plan?.summary?.machine, objective: '100k-150k de contexte, 40 tok/s minimum, le modèle le plus intelligent possible', active: s.active ? { model: s.active.modelId, status: s.active.status } : null, busyWith: busyWith(), downloads, models };
 }
@@ -80,7 +81,7 @@ function events(req, res) {
 // requête d'inférence en vol. Sert à « npm run stop » et « npm run restart ».
 function activity() {
   const s = getState();
-  const name = (id) => { const m = modelById(id); return m ? `${m.name} · ${m.variant}` : id; };
+  const name = (id) => { const m = modelById(id); return m ? displayName(m) : id; };
   const out = [];
   if (s.setup?.phase === 'running') out.push('Première installation de Harn');
   const job = customJobState();
@@ -180,7 +181,20 @@ async function api(req, res, url) {
   if (parts[1] === 'models' && parts[2] && modelById(parts[2])) {
     const id = parts[2];
     if (parts[3] === 'install') { background(installAndTune(id)); return json(res, 202, { ok: true }); }
-    if (parts[3] === 'activate') { background(activate(id)); return json(res, 202, { ok: true }); }
+    if (parts[3] === 'activate') {
+      // Refus immédiat (banc d'un autre modèle en cours) : l'interface l'affiche au lieu de rien.
+      const blocked = activationBlocker(id);
+      if (blocked) return json(res, 409, { error: blocked });
+      background(activate(id));
+      return json(res, 202, { ok: true });
+    }
+    if (parts[3] === 'favorite' && req.method === 'POST') {
+      // Le cœur : modèle par défaut (chargé au démarrage, proposé à pi). Un second clic le retire.
+      if (!getState().models[id]?.installedAt) return json(res, 409, { error: 'Seul un modèle installé peut être le modèle par défaut' });
+      update((s) => { s.favorite = s.favorite === id ? null : id; });
+      if (getState().pi.installed) background(configurePi());
+      return json(res, 200, { favorite: getState().favorite });
+    }
     if (parts[3] === 'delete' && req.method === 'POST') {
       try { return json(res, 200, await deleteModel(id)); } catch (error) { return json(res, 409, { error: error.message }); }
     }
@@ -197,7 +211,7 @@ async function api(req, res, url) {
       if (!helper) return json(res, 409, { error: 'Aucun modèle installé n’a prouvé qu’il sait manier des outils : pi ne peut pas dépanner de façon fiable ici.' });
       await activate(helper);
       const failed = modelById(id);
-      const launched = await launchPi(helper, `L’installation de « ${failed.name} · ${failed.variant} » (identifiant ${id}) a échoué. Utilise le skill depanner-une-installation pour comprendre pourquoi et la relancer si c’est possible.`);
+      const launched = await launchPi(helper, `L’installation de « ${displayName(failed)} » (identifiant ${id}) a échoué. Utilise le skill depanner-une-installation pour comprendre pourquoi et la relancer si c’est possible.`);
       return json(res, 200, { ...launched, helper });
     }
     if (parts[3] === 'iq') { background(runIq(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
@@ -259,7 +273,8 @@ async function main() {
       if (state.pi.installed && !state.ketch) background(installKetch().then(() => configurePi()));
       else if (state.pi.installed) background(configurePi());
       // L'inférence est servie dès l'ouverture : le dernier modèle actif est rechargé.
-      const last = state.active?.modelId ?? Object.keys(state.models).find((id) => state.models[id].installedAt);
+      // Le modèle par défaut (cœur) s'il y en a un, sinon le dernier chargé.
+      const last = (state.models[state.favorite]?.installedAt ? state.favorite : null) ?? state.active?.modelId ?? Object.keys(state.models).find((id) => state.models[id].installedAt);
       if (last && state.models[last]?.installedAt && !state.active?.unloadedByUser) background(activate(last));
     }
   });

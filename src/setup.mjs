@@ -1,6 +1,7 @@
+import { readFileSync, writeFileSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { MODELS, downloadUrl, modelById, totalBytes } from './catalog.mjs';
+import { MODELS, displayName, downloadUrl, modelById, totalBytes } from './catalog.mjs';
 import { download } from './download.mjs';
 import { defaultTuning, describe, llamaArgs, modelFiles, startEngine, stopEngine } from './engine.mjs';
 import { detectHardware, sampleGpu } from './hardware.mjs';
@@ -15,7 +16,7 @@ import { askLocalAnalysis, machineDocPath, writeMachineFacts } from './machine-d
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { appendFile, mkdir as makeDir } from 'node:fs/promises';
 import { HEADROOM_MIN_MIB, measure } from './tuner.mjs';
-import { runIqTest } from './iq-test.mjs';
+import { IQ_VERSION, runIqTest } from './iq-test.mjs';
 import { RATING_WEIGHTS, globalRating } from './rating.mjs';
 import { buildEntry, inspectRepo, registerModel, setModelQuality, unregisterModel } from './custom-models.mjs';
 
@@ -42,7 +43,7 @@ function step(id, patch) {
 // Les scores du banc d'intelligence (format actuel uniquement : les anciens sont à refaire).
 export function iqScores(state = getState()) {
   const scores = {};
-  for (const [id, profile] of Object.entries(state.profiles ?? {})) if (profile.iq?.version === 2) scores[id] = profile.iq.score;
+  for (const [id, profile] of Object.entries(state.profiles ?? {})) if (profile.iq?.version === IQ_VERSION) scores[id] = profile.iq.score;
   return scores;
 }
 
@@ -50,7 +51,7 @@ export async function refreshHardware() {
   const hardware = await detectHardware();
   const ours = getState().active?.status === 'ready' || getState().active?.status === 'loading';
   hardware.vramBaselineMiB = ours ? getState().vramBaselineMiB ?? null : (hardware.primary?.freeMiB != null ? hardware.primary.vramMiB - hardware.primary.freeMiB : null);
-  const plan = makePlan(hardware, iqScores());
+  const plan = makePlan(hardware, iqScores(), getState().profiles);
   // La VRAM prise par les autres applications se lit avant qu'on charge quoi que ce soit.
   const checks = await systemChecks(hardware, { vramBaselineMiB: ours ? getState().vramBaselineMiB ?? 0 : null });
   update((s) => {
@@ -154,7 +155,7 @@ async function firstSetup() {
     step('tune', { status: 'done', detail: `${profile.bench.winner.tps} tok/s · ${profile.bench.winner.label}` });
 
     await piJob;
-    if (getState().pi.installed) await configurePi(model.id);
+    if (getState().pi.installed) await configurePi();
     update((s) => { s.setup.phase = 'done'; s.setup.finishedAt = Date.now(); });
     // Le banc d'intelligence suit en arrière-plan : c'est lui qui rend pi éligible au dépannage.
     runIq(model.id).catch(() => {}).finally(() => runAnalysis());
@@ -178,7 +179,7 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   const logFile = installLogPath(model.id);
   await makeDir(DIRS.logs, { recursive: true });
   const log = (text) => appendFile(logFile, String(text).endsWith('\n') ? String(text) : `${text}\n`).catch(() => {});
-  await log(`\n# ${new Date().toISOString()} · installation de ${model.name} · ${model.variant}`);
+  await log(`\n# ${new Date().toISOString()} · installation de ${displayName(model)}`);
   const note = (detail) => { log(detail); update((s) => { s.models[model.id].detail = detail; }); };
   update((s) => { s.models[model.id] = { ...(s.models[model.id] ?? {}), installing: true, error: null, detail: 'Recherche de fichiers déjà présents' }; });
   const files = model.files.map((file) => ({ repo: model.repo, ...file }));
@@ -233,13 +234,23 @@ function downloadFile(model, file) {
   });
 }
 
+// Strata répond sous le `model_name` de sa config (« swift-1.5-iq3_xxs ») : on y met l'identifiant
+// Harn, comme l'alias de llama-server, pour que les clients retrouvent le nom qu'ils ont demandé.
+// Refait à chaque lancement : l'installeur Strata peut régénérer la config.
+function nameStrataConfig(file, modelId) {
+  const config = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  if (config.model_name === modelId) return;
+  writeFileSync(file, JSON.stringify({ ...config, model_name: modelId }, null, 2));
+}
+
 function recipeFor(model, tuning) {
   const state = getState();
   if (model.engine === 'strata') {
     const runtime = state.runtimes[`strata-${model.strataModel}`];
+    nameStrataConfig(path.join(runtime.dir, tuning.strataConfig ?? runtime.config), model.id);
     return {
       modelId: model.id,
-      label: `${model.name} · ${model.variant}`,
+      label: displayName(model),
       command: runtime.python,
       args: ['serve/server.py', '--engine', 'strata', '--config', tuning.strataConfig ?? runtime.config, '--port', String(PORTS.strata)],
       cwd: runtime.dir,
@@ -251,7 +262,7 @@ function recipeFor(model, tuning) {
   if (!runtime) throw new Error(`Moteur ${tuning.backend} non installé`);
   return {
     modelId: model.id,
-    label: `${model.name} · ${model.variant}`,
+    label: displayName(model),
     command: runtime.serverPath,
     args: llamaArgs(model, modelFiles(model.id), tuning, state.hardware),
     cwd: runtime.dir,
@@ -272,13 +283,21 @@ function smaller(tuning) {
   return { ...tuning, context: Math.max(16384, Math.floor(tuning.context / 2 / 4096) * 4096) };
 }
 
+// Chaque chargement prend un numéro : si un autre modèle est demandé entre-temps, celui-ci
+// abandonne au lieu de réessayer (sinon les deux se tueraient le moteur à tour de rôle).
+let loadTicket = 0;
+const superseded = () => new Error('Chargement remplacé par celui d’un autre modèle');
+
 async function loadWithHeadroom(model, tuning) {
+  const ticket = ++loadTicket;
   let current = { ...tuning };
   for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (ticket !== loadTicket) throw superseded();
     let active;
     try {
       active = await startEngine(recipeFor(model, current));
     } catch (error) {
+      if (ticket !== loadTicket) throw superseded();
       if (current.context <= 16384 || model.engine === 'strata') throw error;
       current = smaller(current);
       continue;
@@ -320,7 +339,12 @@ export const busyWith = () => busy;
 export async function tuneModel(modelId, options = {}) {
   const previous = busy;
   busy = modelId;
-  try { return await tuneModelInner(modelId, options); } finally { busy = previous; }
+  try {
+    const result = await tuneModelInner(modelId, options);
+    // La vitesse et le contexte mesurés changent la note globale : le plan est recalculé.
+    update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
+    return result;
+  } finally { busy = previous; }
 }
 
 async function tuneModelInner(modelId, { startFrom = null, onProgress = () => {} } = {}) {
@@ -464,7 +488,13 @@ async function strataArms(model, baseTuning) {
 
 // Activer un modèle installé avec ses réglages gagnants (ou ceux par défaut s'il n'a pas de banc).
 const activations = new Map();
+// Charger un modèle décharge celui qui tourne (startEngine arrête l'ancien moteur). Refusé
+// pendant le banc ou le test d'un autre modèle : la carte lui appartient.
+export const activationBlocker = (modelId) => (busy && busy !== modelId ? `Harn mesure « ${modelById(busy)?.name ?? busy} » : attendez la fin du banc pour changer de modèle` : null);
+
 export function activate(modelId) {
+  const blocked = activationBlocker(modelId);
+  if (blocked) return Promise.reject(new Error(blocked));
   if (!activations.has(modelId)) {
     activations.set(modelId, (async () => {
       const model = modelById(modelId);
@@ -474,7 +504,7 @@ export function activate(modelId) {
       const tuning = saved?.backend || model.engine === 'strata' ? saved : startingTuning(model, state.hardware);
       const loaded = await loadWithHeadroom(model, tuning ?? {});
       // Une réduction faite au chargement reste ponctuelle : seul le banc fixe les réglages.
-      if (getState().pi.installed) await configurePi(modelId).catch(() => {});
+      if (getState().pi.installed) await configurePi().catch(() => {});
       return loaded.active;
     })().finally(() => activations.delete(modelId)));
   }
@@ -484,20 +514,32 @@ export function activate(modelId) {
 // Installer un modèle proposé, puis le régler. Le modèle courant reste servi pendant le
 // téléchargement ; il ne cède la carte qu'au moment du banc.
 const installs = new Map();
+// La phase d'une installation, pour l'interface : download → tune → iq → analysis, puis null.
+const setPhase = (modelId, phase, detail = null) => update((s) => { Object.assign(s.models[modelId] ??= {}, { phase, phaseDetail: detail }); });
+
 export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = false, ggufDir = null } = {}) {
   if (!installs.has(modelId)) {
     installs.set(modelId, (async () => {
       const model = modelById(modelId);
       const plan = getState().plan;
-      if (model.engine !== 'strata') await installLlama(runtimeKind(model), plan.backend.id);
+      if (model.engine !== 'strata') {
+        setPhase(modelId, 'download', 'Préparation du moteur llama.cpp');
+        await installLlama(runtimeKind(model), plan.backend.id);
+      }
+      setPhase(modelId, 'download');
       await installModelFiles(model, { ggufDir });
+      setPhase(modelId, 'tune');
       update((s) => { s.models[modelId].tuning = true; });
       await tuneModel(modelId, { onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
       update((s) => { s.models[modelId].tuning = false; s.models[modelId].tuneDetail = null; });
-      if (getState().pi.installed) await configurePi(modelId);
-      if (!fromCustomJob) { await runIq(modelId).catch(() => {}); runAnalysis(); }
+      if (getState().pi.installed) await configurePi();
+      if (fromCustomJob) return; // la suite (test, analyse) est menée par installCustom
+      setPhase(modelId, 'iq');
+      await runIq(modelId).catch(() => {});
+      setPhase(modelId, 'analysis');
+      runAnalysis().finally(() => setPhase(modelId, null));
     })().catch((error) => {
-      update((s) => { s.models[modelId] = { ...(s.models[modelId] ?? {}), installing: false, tuning: false, error: error.message }; });
+      update((s) => { s.models[modelId] = { ...(s.models[modelId] ?? {}), installing: false, tuning: false, phase: null, error: error.message }; });
       throw error;
     }).finally(() => installs.delete(modelId)));
   }
@@ -515,11 +557,15 @@ export function runIq(modelId) {
       update((s) => { (s.profiles[modelId] ??= {}).iqRunning = 'Préparation'; });
       try {
         if (getState().active?.modelId !== modelId || getState().active?.status !== 'ready') await activate(modelId);
-        const result = await runIqTest(modelId, { onProgress: (detail) => update((s) => { s.profiles[modelId].iqRunning = detail; }) });
+        // Le contexte réellement chargé (argument -c du moteur) borne la taille du journal du banc.
+        const engineArgs = getState().active?.args ?? [];
+        const loaded = engineArgs.includes('-c') ? Number(engineArgs[engineArgs.indexOf('-c') + 1]) : null;
+        const context = loaded || getState().profiles[modelId]?.tuning?.context || 32768;
+        const result = await runIqTest(modelId, { context, onProgress: (detail) => update((s) => { s.profiles[modelId].iqRunning = detail; }) });
         update((s) => { s.profiles[modelId].iq = result; s.profiles[modelId].iqRunning = null; s.profiles[modelId].iqError = null; });
         await setModelQuality(modelId, result.score);
         // Le classement des modèles dépend du score : le plan est recalculé.
-        update((s) => { s.plan = makePlan(s.hardware, iqScores(s)); });
+        update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
         await writeMachineFacts().catch(() => {});
         return result;
       } catch (error) {
@@ -563,17 +609,22 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     if (!chosen) throw new Error(`Quantification « ${quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}`);
     const projector = mmproj ? report.mmproj.find((m) => m.name === mmproj) : null;
     if (mmproj && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
+    // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.
+    const { id } = buildEntry({ repo: report.repo, quant: chosen, profile: report.profile });
+    if (getState().models[id]?.installedAt) throw new Error(`Ce modèle est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
     const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, sampling });
     const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
     await refreshHardware();
     onProgress({ step: 'download', detail: `Téléchargement de ${(chosen.bytes / 1e9).toFixed(1)} Go` });
     await installAndTune(entry.id, (detail) => onProgress({ step: 'bench', detail: `Banc · ${detail}` }), { fromCustomJob: true });
     onProgress({ step: 'iq', detail: 'Test d’intelligence' });
-    const iq = await runIq(entry.id);
+    setPhase(entry.id, 'iq');
+    const iq = await runIq(entry.id).catch((error) => { setPhase(entry.id, null); throw error; });
+    setPhase(entry.id, 'analysis');
     onProgress({ step: 'analysis', detail: 'Analyse des mesures par l’IA locale' });
-    await runAnalysis();
+    await runAnalysis().finally(() => setPhase(entry.id, null));
     const profile = getState().profiles[entry.id];
-    const result = { id: entry.id, name: `${entry.name} · ${entry.variant}`, tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity } };
+    const result = { id: entry.id, name: displayName(entry), tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity } };
     if (before && before !== entry.id) {
       onProgress({ step: 'restore', detail: 'Retour au modèle précédent' });
       await activate(before).catch(() => {});
@@ -654,10 +705,11 @@ export async function deleteModel(modelId) {
     delete s.models[modelId];
     delete s.profiles[modelId];
     if (model.engine === 'strata') delete s.runtimes[`strata-${model.strataModel}`];
+    if (s.favorite === modelId) s.favorite = null;
     for (const id of Object.keys(s.downloads ?? {})) if (id.startsWith(`model:${modelId}:`)) delete s.downloads[id];
   });
   if (model.custom) await unregisterModel(modelId);
-  update((s) => { s.plan = makePlan(s.hardware, iqScores(s)); });
+  update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
   return { freedBytes: freed, kept: Object.values(entry.paths ?? {}) };
 }
 
@@ -673,11 +725,12 @@ async function dirSize(target) {
 }
 
 // Qui peut dépanner une installation ? Le modèle installé à la meilleure note globale, autre que
-// celui en cause, à condition qu'il ait prouvé au banc qu'il sait manier des outils (au moins 5 sur 6).
+// celui en cause, à condition qu'il ait prouvé au banc qu'il sait manier des outils (au moins 40 %
+// en outils : le plancher réussi, ou mieux).
 export function pickHelper(exceptId = null, state = getState()) {
   const rating = (id, p) => globalRating(modelById(id), p)?.score ?? p.iq.score * RATING_WEIGHTS.intelligence / 100;
   const candidates = Object.entries(state.profiles ?? {})
-    .filter(([id, p]) => id !== exceptId && state.models[id]?.installedAt && p.iq?.version === 2 && p.iq.categories.outils.points >= 5)
+    .filter(([id, p]) => id !== exceptId && state.models[id]?.installedAt && p.iq?.version === IQ_VERSION && p.iq.categories.outils.ratio >= 0.4)
     .sort(([idA, a], [idB, b]) => rating(idB, b) - rating(idA, a));
   return candidates[0]?.[0] ?? null;
 }

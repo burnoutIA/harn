@@ -33,7 +33,8 @@ test('petite carte + beaucoup de RAM : Flash-Next via Strata visé', () => {
 test('24 Go : IQ3_S d’abord, Flash-Next Strata proposé si la RAM suit', () => {
   const plan = makePlan(machine(24, 128));
   assert.equal(plan.firstModel, 'swift15-q27-iq3s-mtp');
-  assert.equal(plan.upgradeModel, 'swift15-flashnext-iq3xxs-strata');
+  // Sans mesure, la note globale estimée préfère l'IQ2_XS (bien plus rapide, à peine moins juste).
+  assert.equal(plan.upgradeModel, 'swift15-flashnext-iq2xs-strata');
   assert.equal(makePlan(machine(24, 32)).upgradeModel, null);
   assert.equal(makePlan(machine(24, 32)).targetModel, 'swift15-q27-iq3s-mtp');
 });
@@ -89,4 +90,25 @@ test('échelle commune : le score du banc remplace la note estimée', () => {
   const plan = makePlan(m, { 'swift15-q27-iq3s-mtp': 60 });
   assert.notEqual(plan.targetModel, 'swift15-q27-iq3s-mtp');
   assert.equal(plan.verdicts.find((v) => v.id === 'swift15-q27-iq3s-mtp').tested, true);
+});
+
+test('deux modèles au même nom : on affiche ce qui les distingue', async () => {
+  const { MODELS, variantOf } = await import('../src/catalog.mjs');
+  const twin = (id, repo, extra = {}) => ({ id, name: 'Qwen3.8-27B', variant: 'Q4_K_M', repo, files: [], ...extra });
+  const added = [twin('a', 'unsloth/Qwen3.8-27B-GGUF'), twin('b', 'bartowski/Qwen3.8-27B-GGUF'), twin('c', 'bartowski/Qwen3.8-27B-GGUF', { dflash: {} }), twin('d', 'bartowski/Qwen3.8-27B-GGUF')];
+  MODELS.push(...added);
+  try {
+    assert.deepEqual(added.map(variantOf), ['Q4_K_M · unsloth', 'Q4_K_M · bartowski', 'Q4_K_M · bartowski · DFlash', 'Q4_K_M · bartowski · 2']);
+    assert.equal(variantOf(MODELS[0]), MODELS[0].variant);
+  } finally {
+    MODELS.splice(MODELS.length - added.length, added.length);
+  }
+});
+
+test('« Meilleur choix ici » suit la note globale mesurée, pas l’intelligence seule', () => {
+  const profile = (score, tps, context) => ({ iq: { version: 3, score }, bench: { winner: { tps } }, tuning: { context } });
+  // Même intelligence mesurée : le plus gros (125B) passe devant le plus rapide (27B).
+  const profiles = { 'swift15-flashnext-iq3xxs-strata': profile(100, 90, 131072), 'swift15-q27-iq2xs-mtp': profile(100, 190, 153600) };
+  const scores = { 'swift15-flashnext-iq3xxs-strata': 100, 'swift15-q27-iq2xs-mtp': 100 };
+  assert.equal(makePlan(machine(24, 128), scores, profiles).targetModel, 'swift15-flashnext-iq3xxs-strata');
 });

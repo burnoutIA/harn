@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { globalRating, paramsOf } from '../src/rating.mjs';
 
-const profile = (score, tps, context) => ({ iq: { version: 2, score }, bench: { winner: { tps } }, tuning: { context } });
+const profile = (score, tps, context) => ({ iq: { version: 3, score }, bench: { winner: { tps } }, tuning: { context } });
 
 test('taille lue dans le catalogue, l’étiquette GGUF ou le nom', () => {
   assert.equal(paramsOf({ paramsB: 125 }), 125);
@@ -19,7 +19,7 @@ test('à intelligence égale, le plus gros modèle passe devant', () => {
 });
 
 test('pas de note globale sans banc de vitesse', () => {
-  assert.equal(globalRating({ paramsB: 27 }, { iq: { version: 2, score: 100 } }), null);
+  assert.equal(globalRating({ paramsB: 27 }, { iq: { version: 3, score: 100 } }), null);
 });
 
 test('un MoE de 35B pèse un peu moins qu’un 27B dense', () => {
