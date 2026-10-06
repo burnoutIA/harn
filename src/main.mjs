@@ -12,10 +12,13 @@ import { DIRS, PORTS } from './paths.mjs';
 import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, openInEditor } from './pi.mjs';
 import { installKetch } from './runtimes.mjs';
 import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
-import { loadCustomModels } from './custom-models.mjs';
+import { inspectRepo, loadCustomModels } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
+import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
+import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
+import { lanDetails, startLan, stopLan } from './lan.mjs';
 
 const ORIGIN = `http://127.0.0.1:${PORTS.app}`;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -31,8 +34,56 @@ function json(res, status, payload) {
 // Les actions de contrôle ne viennent que de notre propre page : une autre page web ouverte
 // dans le navigateur ne doit pas pouvoir lancer un téléchargement de 70 Go.
 function sameOrigin(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false;
   const origin = req.headers.origin;
   return !origin || origin === ORIGIN || origin === `http://localhost:${PORTS.app}`;
+}
+
+// Un clic dans notre fenêtre, et pas un programme local (pi, son outil bash, un script) : le
+// navigateur seul pose ces deux en-têtes. Un programme peut les imiter, mais il faut le vouloir ;
+// c'est la frontière entre ce que pi demande et ce que l'utilisateur accorde.
+function fromOurPage(req) {
+  return req.headers['sec-fetch-site'] === 'same-origin' && Boolean(req.headers.origin) && sameOrigin(req);
+}
+
+// DNS rebinding : un site piégé dont le nom pointe vers 127.0.0.1 devient « même origine » pour
+// le navigateur et pourrait lire l'état, les chemins, le carnet. Il garde son propre nom dans
+// l'en-tête Host : on ne répond qu'aux noms de la boucle locale.
+const LOCAL_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+function localHost(req) {
+  try { return LOCAL_NAMES.has(new URL(`http://${req.headers.host ?? ''}`).hostname); } catch { return false; }
+}
+
+function accessReport(keys) {
+  return { ...keys, localUrl: `${ORIGIN}/v1`, lan: { enabled: Boolean(getState().lan), ...lanDetails() } };
+}
+
+// Le port réseau ne sert que /v1 (et /k/<clé>/v1) ; tout le reste n'existe pas pour lui.
+async function lanHandler(req, res) {
+  const url = new URL(req.url, 'http://lan');
+  // Un client distant qui échoue ne dit souvent rien d'utile : chaque réponse en erreur laisse
+  // une ligne (chemin sans la clé), pour voir s'il frappe à la bonne adresse.
+  res.on('finish', () => {
+    if (res.statusCode < 400 || res.statusCode === 401) return; // 401 : déjà détaillé par gateway.mjs
+    console.warn(`[harn] réseau ${new Date().toLocaleTimeString('fr-FR')} ${req.method} ${url.pathname.replace(/^\/k\/[^/]+/, '/k/<clé>')} → ${res.statusCode} depuis ${req.socket.remoteAddress} (${req.headers['user-agent'] ?? '?'})`);
+  });
+  try {
+    if (url.pathname.startsWith('/v1/') || url.pathname.startsWith('/k/')) return await handleV1(req, res, url, { lan: true });
+    json(res, 404, { error: 'introuvable' });
+  } catch (error) {
+    if (!res.headersSent) json(res, 500, { error: error.message });
+    else res.end();
+  }
+}
+
+async function setLan(enabled) {
+  if (enabled) {
+    if (!keysEnforced()) throw Object.assign(new Error('Créez d’abord une clé API : le réseau local l’exige.'), { status: 409 });
+    await startLan(lanHandler);
+  } else {
+    await stopLan();
+  }
+  update((s) => { s.lan = enabled; });
 }
 
 async function serveStatic(res, pathname) {
@@ -129,8 +180,34 @@ async function api(req, res, url) {
     const text = file ? await readFile(file, 'utf8').catch(() => '') : '';
     return json(res, 200, { file, text });
   }
+  if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
+  if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
+    const entry = approvalOf(parts[2]);
+    return entry ? json(res, 200, entry) : json(res, 404, { error: 'Demande inconnue ou expirée (Harn a-t-il redémarré ?)' });
+  }
   if (req.method !== 'POST') return json(res, 405, { error: 'méthode' });
   if (!sameOrigin(req)) return json(res, 403, { error: 'origine refusée' });
+
+  // Clés API et réseau local : réservés à la fenêtre de Harn.
+  if (parts[1] === 'access' || parts[1] === 'approvals') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    const body = await new Response(req).json().catch(() => ({}));
+    try {
+      if (url.pathname === '/api/access/keys') return json(res, 200, await createKey(body.label));
+      if (parts[2] === 'keys' && parts[3] && parts[4] === 'revoke') {
+        const revoked = await revokeKey(parts[3], { keepOne: Boolean(getState().lan) });
+        return json(res, 200, { revoked, access: accessReport(await listKeys()) });
+      }
+      if (url.pathname === '/api/access/lan') {
+        await setLan(body.enabled === true);
+        return json(res, 200, accessReport(await listKeys()));
+      }
+      if (parts[1] === 'approvals' && parts[2] && ['accept', 'refuse'].includes(parts[3])) return json(res, 200, decideApproval(parts[2], parts[3] === 'accept'));
+    } catch (error) {
+      return json(res, error.status ?? 500, { error: error.message });
+    }
+    return json(res, 404, { error: 'inconnu' });
+  }
 
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());
@@ -148,10 +225,27 @@ async function api(req, res, url) {
     try { return json(res, 200, await inspectForMachine(body.url)); } catch (error) { return json(res, 400, { error: error.message }); }
   }
   if (url.pathname === '/api/custom/install') {
-    // Lancement immédiat ; l'avancement se lit sur /api/custom/job (l'outil MCP de pi l'attend).
+    // Depuis notre page : lancement immédiat. Depuis pi (outil MCP) : une demande que
+    // l'utilisateur accepte ou refuse dans la fenêtre. L'avancement se lit sur /api/custom/job.
     const body = await new Response(req).json().catch(() => ({}));
-    if (body.user_confirmed !== true) return json(res, 400, { error: 'Installation refusée : il faut la confirmation explicite de l’utilisateur (user_confirmed: true).' });
-    try { installCustom(body); return json(res, 202, customJobState()); } catch (error) { return json(res, 409, { error: error.message }); }
+    const options = { url: body.url, quant: body.quant, mmproj: body.mmproj ?? null, sampling: body.sampling ?? null };
+    if (fromOurPage(req)) {
+      try { installCustom(options); return json(res, 202, customJobState()); } catch (error) { return json(res, 409, { error: error.message }); }
+    }
+    // La taille annoncée vient du dépôt, pas de ce que pi en dit.
+    let report;
+    try { report = await inspectRepo(options.url); } catch (error) { return json(res, 400, { error: error.message }); }
+    const chosen = report.quants.find((q) => q.quant.toUpperCase() === String(options.quant).toUpperCase());
+    if (!chosen) return json(res, 400, { error: `Quantification « ${options.quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}` });
+    const projector = options.mmproj ? report.mmproj.find((m) => m.name === options.mmproj) : null;
+    const bytes = chosen.bytes + (projector?.bytes ?? 0);
+    const approval = requestApproval({
+      kind: 'install',
+      title: `Installer ${report.repo} · ${chosen.quant}`,
+      detail: `${(bytes / 1e9).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go à télécharger depuis huggingface.co${projector ? ' (vision comprise)' : ''}, puis réglage, banc et test d’intelligence. Licence : ${report.license ?? 'non précisée'}.`,
+      run: () => installCustom(options),
+    });
+    return json(res, 202, { approval, status: 'pending' });
   }
   if (url.pathname === '/api/pi/system/open') {
     await ensureAppendSystem();
@@ -202,8 +296,16 @@ async function api(req, res, url) {
     if (parts[3] === 'log' && req.method === 'POST') { return json(res, 200, { editor: await openInEditor(installLogPath(id)) }); }
     if (parts[3] === 'retry') {
       const body = await new Response(req).json().catch(() => ({}));
-      background(installAndTune(id, () => {}, { ggufDir: body.gguf_dir ?? null }));
-      return json(res, 202, { ok: true });
+      const run = () => background(installAndTune(id, () => {}, { ggufDir: body.gguf_dir ?? null }));
+      if (fromOurPage(req)) { run(); return json(res, 202, { ok: true }); }
+      const model = modelById(id);
+      const approval = requestApproval({
+        kind: 'retry',
+        title: `Relancer l’installation de ${displayName(model)}`,
+        detail: body.gguf_dir ? `Avec les fichiers déjà présents dans ${body.gguf_dir}.` : `Jusqu’à ${(totalBytes(model) / 1e9).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go à télécharger, puis réglage et banc.`,
+        run,
+      });
+      return json(res, 202, { approval, status: 'pending' });
     }
     if (parts[3] === 'ask-pi') {
       // pi dépanne avec le meilleur modèle installé qui sait manier des outils ; jamais avec le modèle en cause.
@@ -222,8 +324,9 @@ async function api(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, ORIGIN);
+  if (!localHost(req)) return json(res, 403, { error: 'Harn ne répond qu’aux adresses de cette machine (127.0.0.1, localhost)' });
   try {
-    if (url.pathname.startsWith('/v1/')) return await handleV1(req, res, url);
+    if (url.pathname.startsWith('/v1/') || url.pathname.startsWith('/k/')) return await handleV1(req, res, url);
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     return await serveStatic(res, url.pathname);
   } catch (error) {
@@ -248,6 +351,8 @@ async function main() {
   await loadState();
   await loadCustomModels();
   await loadRecent();
+  await loadKeys();
+  await internalKey();
   setActivator(activate, busyWith);
 
   server.on('error', (error) => {
@@ -264,6 +369,11 @@ async function main() {
     openWindow();
     await reapOrphans();
     const state = getState();
+    // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
+    if (state.lan) {
+      setLan(true).then(() => console.log(`Harn · API réseau local sur le port ${PORTS.lan}`))
+        .catch((error) => { console.error(`[harn] réseau local non rouvert : ${error.message}`); update((s) => { s.lan = false; }); });
+    }
     if (process.argv.includes('--no-setup')) {
       background(refreshHardware());
     } else if (!state.hardware || state.setup.phase !== 'done') {
@@ -281,6 +391,8 @@ async function main() {
 }
 
 async function shutdown() {
+  await stopLan().catch(() => {});
+  await flushKeys().catch(() => {});
   await stopEngine().catch(() => {});
   await save().catch(() => {});
   process.exit(0);

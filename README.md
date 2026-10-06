@@ -77,6 +77,29 @@ change pas. Il reste à valider la qualité, la présence de la tête MTP et la 
 - Interface : <http://127.0.0.1:4747>
 - API OpenAI : `http://127.0.0.1:4747/v1`. Si le champ `model` désigne un autre modèle installé,
   celui-ci est chargé.
+
+## Sécurité de l'inférence
+
+- **Clés API** (Machine → Brancher une application, ou `npm run keys -- create "Portable — Copilot"`,
+  `list`, `revoke <id>`). Tant qu'aucune clé n'existe, `/v1` répond sans clé, à cette machine
+  seulement. La première clé ferme la porte, en local aussi. Seule l'empreinte SHA-256 est gardée
+  (`data/api-keys.json`). pi agent, le banc et l'analyse utilisent la clé interne de Harn
+  (`data/harn.key`), qui ne compte pas comme une clé créée et n'ouvre jamais le réseau.
+- **Clé dans l'URL** pour les clients qui ne laissent pas saisir de clé (Copilot) :
+  `http://127.0.0.1:4747/k/<clé>/v1`. L'adresse peut finir dans les journaux du client.
+- **Réseau local** : un port à part (`4748`, `HARN_LAN_PORT`) qui ne sert que `/v1`, avec une clé
+  toujours exigée. L'interface et l'API de contrôle restent sur la boucle locale.
+- **Moteur** : llama-server reçoit une clé neuve à chaque lancement de Harn (`--api-key-file`).
+  Sans elle, n'importe quelle page web ouverte dans le navigateur pouvait l'interroger et lire
+  `/slots`.
+- **Navigateur** : Harn ne répond qu'aux noms `127.0.0.1`, `localhost` (parade au DNS rebinding),
+  et refuse un POST sur `/v1` qui n'est pas du JSON (seule forme qu'une page web envoie sans
+  permission).
+- **Ce que pi demande** (installer depuis Hugging Face, relancer une installation) s'affiche dans
+  la fenêtre de Harn et n'est lancé qu'après un clic sur Accepter.
+- **Intégrité** : chaque GGUF est vérifié contre l'empreinte SHA-256 publiée par Hugging Face
+  (copies locales réutilisées comprises), les binaires contre le digest des releases GitHub quand
+  il existe. Strata est figé sur un commit (`STRATA_COMMIT` dans `src/runtimes.mjs`).
 - `node src/main.mjs --no-open --no-setup` pour développer sans lancer l'installation.
 - `npm run check` pour les tests.
 

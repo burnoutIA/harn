@@ -1,3 +1,4 @@
+import { internalKey } from './api-keys.mjs';
 import { PORTS } from './paths.mjs';
 
 // Le banc d'intelligence de Harn : une note sur 100, commune à tous les modèles, en cinq
@@ -296,7 +297,7 @@ async function chat(modelId, messages, maxTokens, tools = undefined) {
   const started = Date.now();
   const response = await fetch(`http://127.0.0.1:${PORTS.app}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'harn-test' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'harn-test', Authorization: `Bearer ${await internalKey()}` },
     body: JSON.stringify({ model: modelId, messages, tools, temperature: 0, seed: 42, max_tokens: maxTokens, reasoning_effort: 'medium' }),
   });
   const body = await response.json();

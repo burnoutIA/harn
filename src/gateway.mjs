@@ -1,9 +1,12 @@
+import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
+import { engineHeaders } from './engine.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { getState } from './state.mjs';
 
 // L'endpoint OpenAI unique (/v1) que pi agent et toute autre application utilisent. Il relaie
 // au moteur actif, active à la demande un autre modèle installé, et mesure chaque requête.
+// Servi sur la boucle locale, et sur le réseau local quand l'utilisateur l'ouvre (clé exigée).
 
 let activate = async () => { throw new Error('Aucun moteur'); };
 let busyWith = () => null;
@@ -50,22 +53,49 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+function sendJson(res, status, payload, headers = {}) {
+  res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
   res.end(JSON.stringify(payload));
 }
 
-export async function handleV1(req, res, url) {
-  if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList());
+// lan : la requête arrive par le port ouvert au réseau. Là seulement, les pages web d'une autre
+// origine sont admises (CORS) : une clé y est toujours exigée, une page ne peut pas la deviner.
+// Sur la boucle locale, pas de CORS : une page web ne lit jamais une réponse de /v1.
+export async function handleV1(req, res, url, { lan = false } = {}) {
+  const cors = lan ? { 'Access-Control-Allow-Origin': '*' } : {};
+  if (lan && req.method === 'OPTIONS') {
+    res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'authorization, content-type' });
+    return res.end();
+  }
+  const pathKey = extractPathKey(url.pathname);
+  url.pathname = pathKey.pathname;
+  if (!url.pathname.startsWith('/v1/')) return sendJson(res, 404, { error: { message: 'Introuvable : l’API est sous /v1' } }, cors);
+
+  const token = pathKey.token ?? bearerToken(req.headers);
+  const decision = await authorize(token, { lan });
+  if (!decision.ok) {
+    // Sans cette trace, « ça ne marche pas côté client » ne se diagnostique pas. La clé n'y
+    // figure que par son début.
+    console.warn(`[harn] accès refusé ${req.method} ${pathKey.token ? '/k/<clé>' : ''}${url.pathname} depuis ${req.socket.remoteAddress} : ${decision.message} (clé : ${fingerprint(token)}, client : ${req.headers['user-agent'] ?? '?'})`);
+    return sendJson(res, decision.status, { error: { message: decision.message, type: 'authentication_error', code: 'invalid_api_key' } }, { ...cors, 'WWW-Authenticate': 'Bearer realm="harn"' });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList(), cors);
   if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
     const found = modelsList().data.find((m) => m.id === decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
-    return found ? sendJson(res, 200, found) : sendJson(res, 404, { error: { message: 'Modèle inconnu ou non installé', type: 'invalid_request_error' } });
+    return found ? sendJson(res, 200, found, cors) : sendJson(res, 404, { error: { message: 'Modèle inconnu ou non installé', type: 'invalid_request_error' } }, cors);
+  }
+  // Un POST sans JSON est la seule forme qu'une page web peut envoyer sans demander la permission
+  // (formulaire, fetch « no-cors ») : il chargerait un modèle et occuperait la carte. Aucun client
+  // OpenAI n'envoie autre chose que du JSON.
+  if (req.method === 'POST' && !(req.headers['content-type'] ?? '').includes('json')) {
+    return sendJson(res, 415, { error: { message: 'Corps attendu en JSON (Content-Type: application/json)' } }, cors);
   }
 
   const raw = await readBody(req);
   let body = null;
   if (raw.length && (req.headers['content-type'] ?? '').includes('json')) {
-    try { body = JSON.parse(raw); } catch { return sendJson(res, 400, { error: { message: 'JSON invalide' } }); }
+    try { body = JSON.parse(raw); } catch { return sendJson(res, 400, { error: { message: 'JSON invalide' } }, cors); }
   }
 
   // Le modèle demandé : s'il est installé mais pas chargé, on le charge (une requête suffit
@@ -73,14 +103,13 @@ export async function handleV1(req, res, url) {
   const state = getState();
   let modelId = state.active?.modelId ?? null;
   if (body?.model && state.models[body.model]?.installedAt) modelId = body.model;
-  if (!modelId) return sendJson(res, 503, { error: { message: 'Aucun modèle installé pour l’instant.' } });
+  if (!modelId) return sendJson(res, 503, { error: { message: 'Aucun modèle installé pour l’instant.' } }, cors);
   const busy = busyWith();
   if (busy && busy !== modelId) {
-    res.setHeader('Retry-After', '60');
-    return sendJson(res, 503, { error: { message: `Harn mesure le modèle « ${busy} » : la carte graphique est occupée. Réessayez dans quelques minutes.` } });
+    return sendJson(res, 503, { error: { message: `Harn mesure le modèle « ${busy} » : la carte graphique est occupée. Réessayez dans quelques minutes.` } }, { ...cors, 'Retry-After': '60' });
   }
   if (state.active?.modelId !== modelId || state.active?.status !== 'ready') {
-    try { await activate(modelId); } catch (error) { return sendJson(res, 503, { error: { message: error.message } }); }
+    try { await activate(modelId); } catch (error) { return sendJson(res, 503, { error: { message: error.message } }, cors); }
   }
   const active = getState().active;
   const model = modelById(modelId);
@@ -89,7 +118,7 @@ export async function handleV1(req, res, url) {
 
   const generative = body && /\/(chat\/)?completions$/.test(url.pathname);
   const payload = generative ? Buffer.from(JSON.stringify(shapeRequest(body, model))) : raw;
-  const request = generative ? beginRequest({ model: modelId, client: req.headers['user-agent'] ?? 'client', endpoint: active.endpoint, engine }) : null;
+  const request = generative ? beginRequest({ model: modelId, client: req.headers['user-agent'] ?? 'client', key: decision.key?.label ?? null, endpoint: active.endpoint, engine }) : null;
 
   const controller = new AbortController();
   res.on('close', () => { if (!res.writableFinished) controller.abort(); });
@@ -98,18 +127,19 @@ export async function handleV1(req, res, url) {
   try {
     upstream = await fetch(target, {
       method: req.method,
-      headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', Authorization: 'Bearer harn' },
+      headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', ...engineHeaders() },
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : payload,
       signal: controller.signal,
     });
   } catch (error) {
     if (request) await endRequest(request, { error: error.message });
-    return sendJson(res, 502, { error: { message: `Moteur injoignable : ${error.message}` } });
+    return sendJson(res, 502, { error: { message: `Moteur injoignable : ${error.message}` } }, cors);
   }
 
   res.writeHead(upstream.status, {
     'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
     'Cache-Control': 'no-cache',
+    ...cors,
   });
 
   if (!request) {
@@ -155,4 +185,5 @@ export async function handleV1(req, res, url) {
   if (upstream.status >= 400) error ??= `HTTP ${upstream.status}`;
   res.end();
   await endRequest(request, { timings, usage, error });
+  if (decision.key) recordUsage(decision.key.id, timings?.predicted_n ?? usage?.completion_tokens ?? request.decoded);
 }

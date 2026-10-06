@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { MODELS, displayName, downloadUrl, modelById, totalBytes } from './catalog.mjs';
-import { download } from './download.mjs';
+import { MODELS, displayName, downloadUrl, hfSha256, modelById, totalBytes } from './catalog.mjs';
+import { download, hashFile } from './download.mjs';
 import { defaultTuning, describe, llamaArgs, modelFiles, startEngine, stopEngine } from './engine.mjs';
 import { detectHardware, sampleGpu } from './hardware.mjs';
 import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
@@ -196,6 +196,16 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
       await installStrata(model, context, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); }, { ggufDir });
     } else {
       for (const file of files) {
+        // Une copie trouvée sur le disque n'a que le bon nom et la bonne taille : son empreinte
+        // doit aussi correspondre, sinon on télécharge l'original.
+        if (local[file.name]) {
+          note(`${file.name} trouvé dans ${local[file.name]} : vérification de l’empreinte`);
+          const actual = (await hashFile(local[file.name])).digest('hex');
+          if (actual !== await expectedSha(file)) {
+            note(`${file.name} (${local[file.name]}) ne correspond pas à l’original : ignoré`);
+            delete local[file.name];
+          }
+        }
         if (local[file.name]) {
           const used = await adoptLocalCopy(local[file.name], path.join(dir, file.name));
           if (used !== path.join(dir, file.name)) paths[file.name] = used;
@@ -224,13 +234,23 @@ async function lastLines(file, count = 3) {
   return pick.length ? ` — ${pick.join(' · ').slice(0, 400)}` : '';
 }
 
-function downloadFile(model, file) {
+// L'empreinte d'un fichier de modèle : celle notée à l'ajout depuis Hugging Face, sinon celle que
+// Hugging Face publie. Sans empreinte, pas de téléchargement : un GGUF est lu par le parseur
+// du moteur, qui a déjà eu des failles exploitables par un fichier piégé.
+async function expectedSha(file) {
+  const sha = file.sha256 ?? await hfSha256(file.repo, file.name);
+  if (!sha) throw new Error(`Hugging Face ne publie pas d’empreinte SHA-256 pour ${file.name} (${file.repo}) : fichier non vérifiable, téléchargement refusé.`);
+  return sha;
+}
+
+async function downloadFile(model, file) {
   return download({
     id: `model:${model.id}:${file.name}`,
     label: file.name,
     url: downloadUrl(file.repo, file.name),
     dest: path.join(DIRS.models, model.id, file.name),
     expectedBytes: file.bytes,
+    sha256: await expectedSha(file),
   });
 }
 

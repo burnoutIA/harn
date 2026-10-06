@@ -270,6 +270,10 @@ main { padding: 8px clamp(16px, 4vw, 48px) 72px; max-width: 1180px; width: 100%;
 .model.off { opacity: .55; }
 .model .badges { display: flex; gap: 6px; flex-wrap: wrap; }
 .model .title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.model-id { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin-top: 8px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--muted); font: calc(12px * var(--fs)) var(--mono); cursor: pointer; }
+.model-id span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-id svg { width: 13px; height: 13px; flex: none; }
+.model-id:hover { color: var(--text); border-color: var(--faint); }
 .heart { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 99px; background: none; color: var(--faint); cursor: pointer; }
 .heart:hover { background: var(--surface-2); color: var(--danger); }
 .heart svg { width: 18px; height: 18px; fill: none; }
@@ -516,3 +520,22 @@ body.onboarding .topline { max-width: none; }
 .phase-detail { font: calc(12.5px * var(--fs)) var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 @keyframes phase-pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .phase-now .dot { animation: none; } }
+
+/* Demandes de pi à valider (installation, relance) */
+.approvals { position: fixed; right: 20px; bottom: 20px; z-index: 30; display: grid; gap: 10px; width: min(420px, calc(100vw - 32px)); }
+.approvals:empty { display: none; }
+.approval { display: grid; gap: 10px; border-color: var(--violet); padding: 16px 18px; }
+.approval h3 { font-size: calc(14.5px * var(--fs)); font-weight: 600; overflow-wrap: anywhere; }
+.approval p { margin: 0; color: var(--muted); font-size: calc(13px * var(--fs)); }
+.approval .acts { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* Clés API et réseau local */
+.keys { display: grid; gap: 8px; }
+.key-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.key-row b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.key-row small { display: block; color: var(--faint); font-size: calc(12px * var(--fs)); }
+.key-secret { display: grid; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--signal); }
+.key-secret p { margin: 0; color: var(--text); }
+.key-secret .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.access-state { color: var(--text); }
+.access-warn { color: var(--danger); }

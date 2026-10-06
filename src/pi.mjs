@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { internalKey } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { agentInstructions } from './machine-doc.mjs';
 import { DIRS, PORTS, fromRoot } from './paths.mjs';
@@ -59,7 +60,7 @@ export async function configurePi(preferredModel = null) {
   const existing = await readJson(modelsFile);
   existing.providers = {
     ...(existing.providers ?? {}),
-    harn: { baseUrl: `http://127.0.0.1:${PORTS.app}/v1`, api: 'openai-completions', apiKey: 'harn', models },
+    harn: { baseUrl: `http://127.0.0.1:${PORTS.app}/v1`, api: 'openai-completions', apiKey: await internalKey(), models },
   };
   await writeFile(modelsFile, JSON.stringify(existing, null, 2));
 

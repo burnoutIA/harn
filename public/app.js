@@ -16,6 +16,10 @@ let view = 'home';
 let doc = { text: '', at: null };
 let piSystem = { text: null, file: '' };
 let ketchTest = null;
+let access = null;  // clés API et réseau local (/api/access)
+let newKey = null;  // la clé tout juste créée : affichée une seule fois
+const approvalsEl = document.getElementById('approvals');
+const baseTitle = document.title;
 
 document.querySelector('#endpoint .endpoint-v').textContent = API.replace('http://', '');
 document.getElementById('endpoint').addEventListener('click', () => copy(API, 'Adresse de l’API copiée'));
@@ -520,7 +524,7 @@ function renderActivity() {
   const last = live?.recent?.[0];
   const phase = request?.phase ?? 'idle';
   const pill = { idle: 'Au repos', prefill: 'Lecture du prompt', decode: 'Génération' }[phase];
-  paint('act-head', `<div class="top"><span class="label">Activité</span><span class="pill ${phase}"><span class="dot"></span>${pill}${request ? ` · ${esc(clientOf(request.client))}` : ''}</span></div>`);
+  paint('act-head', `<div class="top"><span class="label">Activité</span><span class="pill ${phase}"><span class="dot"></span>${pill}${request ? ` · ${esc(request.key ?? clientOf(request.client))}` : ''}</span></div>`);
   paint('act-spark', `${sparkline(live?.series ?? [])}<div class="spark-legend"><span>il y a 2 min</span><span>— — objectif 40 tok/s</span><span>maintenant</span></div>`);
   const ttft = request?.ttft ?? last?.ttft;
   const tokens = request ? request.decoded : last?.generated;
@@ -534,7 +538,7 @@ function renderActivity() {
   </div>`);
   const recent = live?.recent ?? [];
   paint('act-req', recent.length
-    ? `<ul class="requests">${recent.slice(0, 5).map((r) => `<li><span class="when">${clock(r.at)}</span><span class="what">${esc(clientOf(r.client))} · ${fr(r.generated ?? 0)} tokens${r.ttft ? ` · 1er token ${fr(r.ttft, 1)} s` : ''}${r.error ? ` · ${esc(r.error)}` : ''}</span><span class="tps">${r.tps ? `${fr(r.tps)} tok/s` : '—'}</span></li>`).join('')}</ul>`
+    ? `<ul class="requests">${recent.slice(0, 5).map((r) => `<li><span class="when">${clock(r.at)}</span><span class="what">${esc(r.key ?? clientOf(r.client))} · ${fr(r.generated ?? 0)} tokens${r.ttft ? ` · 1er token ${fr(r.ttft, 1)} s` : ''}${r.error ? ` · ${esc(r.error)}` : ''}</span><span class="tps">${r.tps ? `${fr(r.tps)} tok/s` : '—'}</span></li>`).join('')}</ul>`
     : '<p class="empty" style="margin-top:14px">Aucune requête pour l’instant. Ouvrez pi agent et donnez-lui une tâche : le débit s’affiche ici en direct.</p>');
 
   const gpu = live?.gpu;
@@ -599,7 +603,7 @@ function modelCard(model) {
 
   return `<article class="card model ${isActive ? 'active' : ''} ${isUpgrade ? 'upgrade' : ''} ${off ? 'off' : ''}">
     ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
-    <div class="title-row"><div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div></div>${entry.installedAt ? `<button class="heart ${state.favorite === model.id ? 'on' : ''}" data-action="favorite" data-id="${model.id}" title="${state.favorite === model.id ? 'Modèle par défaut · cliquer pour retirer' : 'En faire le modèle par défaut'}" aria-pressed="${state.favorite === model.id}">${icon.heart}</button>` : ''}</div>
+    <div class="title-row"><div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div>${entry.installedAt ? `<button class="model-id" data-action="copy-text" data-text="${esc(model.id)}" title="Le nom à mettre dans le champ « model » de votre application · cliquer pour copier">${icon.copy}<span>${esc(model.id)}</span></button>` : ''}</div>${entry.installedAt ? `<button class="heart ${state.favorite === model.id ? 'on' : ''}" data-action="favorite" data-id="${model.id}" title="${state.favorite === model.id ? 'Modèle par défaut · cliquer pour retirer' : 'En faire le modèle par défaut'}" aria-pressed="${state.favorite === model.id}">${icon.heart}</button>` : ''}</div>
     <p class="tagline">${esc(model.tagline)}</p>
     <div class="facts">
       <div title="Nombre de paramètres${moeOf(model) ? ' (tous les experts du MoE)' : ''}"><div class="k">Taille</div>${model.paramsB ? `<div class="v">${fr(model.paramsB, model.paramsB % 1 ? 1 : 0)}B${moeOf(model) ? '<small>MoE</small>' : ''}</div>` : '<div class="v est">—</div>'}</div>
@@ -766,16 +770,79 @@ function renderMachine() {
       ${ketchTest?.error ? `<p class="hint" style="color:var(--danger)">${esc(ketchTest.error)}</p>` : ''}
       ${ketchTest?.results ? `<ul class="ketch-results">${ketchTest.results.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a><span>${esc(new URL(r.url).hostname)}</span></li>`).join('')}</ul><p class="hint">${ketchTest.results.length} résultats en ${fr(ketchTest.seconds, 1)} s.</p>` : ''}
     </div>`);
+  paint('connect', accessCard());
+}
+
+// Brancher une application : adresse, clés API (reprises de Llama Control), réseau local.
+function accessCard() {
   const id = state.active?.modelId ?? 'modele';
-  paint('connect', `<div class="label">Brancher une application</div>
+  const head = `<div class="label">Brancher une application</div>
     <div class="connect" style="margin-top:14px">
       <div class="row"><span>Adresse (compatible OpenAI)</span><code>${esc(API)}</code></div>
-      <div class="row"><span>Modèle</span><code>${esc(id)}</code></div>
-      <div class="row"><span>Clé</span><code>n’importe laquelle</code></div>
-      <p style="margin:0">Demander un autre modèle installé le charge automatiquement. pi agent est déjà configuré, rien à faire.</p>
+      <div class="row"><span>Modèle</span><code>${esc(id)}</code></div>`;
+  if (!access) return `${head}<p class="empty">Lecture des clés…</p></div>`;
+  const used = (k) => (k.lastUsedAt ? `${fr(k.requests)} requêtes · ${fr(k.tokens)} tokens · ${new Date(k.lastUsedAt).toLocaleString('fr-FR')}` : 'jamais utilisée');
+  const stateLine = access.state === 'invalid' ? `<p class="access-warn" style="margin:0">${esc(access.error)} : toute requête est refusée.</p>`
+    : access.enforced ? '<p class="access-state" style="margin:0">Clé exigée pour toute application. pi agent et Harn ont déjà la leur.</p>'
+    : '<p class="access-state" style="margin:0">Aucune clé : l’API répond sans clé, à cette machine seulement. Créer une première clé ferme la porte.</p>';
+  const keyUrl = newKey ? `${location.origin}/k/${newKey.token}/v1` : '';
+  const secret = newKey ? `<div class="key-secret">
+      <p><strong>Copiez « ${esc(newKey.key.label)} » maintenant</strong> : seule son empreinte est gardée, elle ne sera plus jamais affichée. Elle se colle dans le champ <code style="display:inline;padding:1px 5px">api_key</code> du client.</p>
+      <code>${esc(newKey.token)}</code>
+      <div class="acts"><button class="btn small primary" data-action="copy-text" data-text="${esc(newKey.token)}">${icon.copy} Copier la clé</button><button class="btn small" data-action="copy-text" data-text="${esc(keyUrl)}">Adresse avec la clé</button><button class="btn small ghost" data-action="key-done">C’est noté</button></div>
+      <p class="hint">L’adresse avec la clé (<code style="display:inline;padding:1px 5px">/k/&lt;clé&gt;/v1</code>) sert aux clients qui ne laissent pas saisir de clé, comme Copilot. Elle peut finir dans l’historique ou les journaux du client : à réserver à cette machine ou au réseau privé.</p>
+    </div>` : '';
+  const keys = (access.keys ?? []).map((k) => `<div class="key-row"><div><b>${esc(k.label)}</b><small>${esc(used(k))}</small></div><button class="btn small ghost" data-action="key-revoke" data-id="${esc(k.id)}" data-label="${esc(k.label)}">Révoquer</button></div>`).join('');
+  const lan = access.lan;
+  const lanBody = !lan.enabled ? '<p style="margin:0">Fermé : seule cette machine joint l’API.</p>'
+    : !lan.listening ? `<p class="access-warn" style="margin:0">Activé, mais le port ${lan.port} n’écoute pas (voir data/logs/harn.log).</p>`
+    : `<p class="access-state" style="margin:0">Ouvert sur le port ${lan.port}, clé toujours exigée. Depuis un autre appareil :</p>
+      ${lan.addresses.map((a) => `<code>${esc(a.url)}</code><p class="hint">${esc(a.name)}${a.virtual ? ' · carte virtuelle : seulement pour les machines virtuelles de ce PC' : ''}</p>`).join('') || '<p class="hint">Aucune carte réseau trouvée.</p>'}
+      <p class="hint">Si l’autre appareil n’arrive pas à se connecter, autorisez le port une fois, dans PowerShell lancé en administrateur (réseaux privés seulement) :</p>
+      <code>${esc(lan.firewallCommand)}</code>
+      <button class="btn small ghost" data-action="copy-text" data-text="${esc(lan.firewallCommand)}">${icon.copy} Copier la commande</button>`;
+  return `${head}
+      ${stateLine}
+      ${secret}
+      ${keys ? `<div class="keys">${keys}</div>` : ''}
+      <form class="add-form" data-form="key"><input id="key-label" type="text" maxlength="80" placeholder="Portable — Copilot" autocomplete="off" spellcheck="false" aria-label="Nom de la nouvelle clé"><button class="btn small" type="submit">Créer une clé</button></form>
+      <p style="margin:0">Une clé par application ou par appareil : chacune se révoque seule et compte ses requêtes. Demander un autre modèle installé le charge automatiquement.</p>
+      <div class="row"><span>Réseau local</span>${lanBody}</div>
+      <button class="btn small" data-action="lan" data-on="${lan.enabled ? '' : '1'}" ${!lan.enabled && !access.enforced ? 'disabled title="Créez d’abord une clé"' : ''}>${lan.enabled ? 'Fermer au réseau local' : 'Ouvrir au réseau local'}</button>
       <button class="btn" data-action="copy-api">${icon.copy} Copier l’adresse</button>
-    </div>`);
+    </div>`;
 }
+
+async function loadAccess() {
+  const next = await fetch('/api/access').then((r) => r.json()).catch(() => null);
+  if (!next) return;
+  access = next;
+  if (view === 'machine') renderMachine();
+}
+
+// Ce que pi demande et que seul un clic ici accorde (télécharger, relancer une installation).
+let approvalsHtml = '';
+function renderApprovals() {
+  const pending = (state.approvals ?? []).filter((a) => a.status === 'pending');
+  const html = pending.map((a) => `<section class="card approval" role="alertdialog" aria-label="${esc(a.title)}">
+      <div class="label">pi agent demande</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
+      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">Refuser</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">Accepter</button></div>
+    </section>`).join('');
+  if (html !== approvalsHtml) { approvalsHtml = html; approvalsEl.innerHTML = html; }
+  document.title = pending.length ? `(${pending.length}) ${baseTitle}` : baseTitle;
+}
+approvalsEl.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-approval]');
+  if (!button) return;
+  for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = true;
+  try {
+    const r = await post(`/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
+    toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
+  } catch (error) {
+    toast(error.message);
+    for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = false;
+  }
+});
 
 async function loadSystem() {
   const next = await fetch('/api/pi/system').then((r) => r.json()).catch(() => null);
@@ -783,7 +850,7 @@ async function loadSystem() {
   piSystem = next;
   if (view === 'machine') renderMachine();
 }
-window.addEventListener('focus', () => { if (view === 'machine') loadSystem(); });
+window.addEventListener('focus', () => { if (view === 'machine') { loadSystem(); loadAccess(); } });
 
 async function loadDoc() {
   const key = state.machineDoc?.analysedAt ?? state.profiles[state.active?.modelId]?.bench?.at ?? 'x';
@@ -847,21 +914,34 @@ function render() {
   if (!state) return;
   if (state.setup.phase !== 'done' && view !== 'onboard') view = 'onboard';
   renderShell();
+  renderApprovals();
   if (view === 'onboard') renderOnboard();
   else if (view === 'models') renderModels();
   else if (view === 'tuning') renderTuning();
-  else if (view === 'machine') { renderMachine(); loadDoc(); loadSystem(); }
+  else if (view === 'machine') { renderMachine(); loadDoc(); loadSystem(); if (!access) loadAccess(); }
   else renderHome();
 }
 
 function go(next) {
   view = next;
   try { sessionStorage.setItem('harn.view', next); } catch {}
+  if (next === 'machine') loadAccess();
   render();
   window.scrollTo({ top: 0 });
 }
 
 app.addEventListener('submit', async (event) => {
+  const keyForm = event.target.closest('[data-form="key"]');
+  if (keyForm) {
+    event.preventDefault();
+    const button = keyForm.querySelector('button');
+    button.disabled = true;
+    try {
+      newKey = await post('/api/access/keys', { label: keyForm.querySelector('#key-label').value });
+      await loadAccess();
+    } catch (error) { toast(error.message); } finally { button.disabled = false; }
+    return;
+  }
   const form = event.target.closest('[data-form="add-model"]');
   if (!form) return;
   event.preventDefault();
@@ -885,6 +965,8 @@ app.addEventListener('click', async (event) => {
   const { action, id } = button.dataset;
   if (action === 'view') return go(id);
   if (action === 'copy-api') return copy(API, 'Adresse de l’API copiée : collez-la dans votre application');
+  if (action === 'copy-text') return copy(button.dataset.text, 'Copié');
+  if (action === 'key-done') { newKey = null; return renderMachine(); }
   if (action === 'dismiss') {
     dismissed.add(id);
     try { localStorage.setItem('harn.dismissed', JSON.stringify([...dismissed])); } catch {}
@@ -916,6 +998,18 @@ app.addEventListener('click', async (event) => {
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }
     if (action === 'check') { const r = await post(`/api/checks/${id}/apply`); toast(r.message); }
+    if (action === 'key-revoke') {
+      if (!confirm(`Révoquer la clé « ${button.dataset.label} » ?\n\nLes applications qui l’utilisent seront refusées. Elle ne pourra pas être réactivée.`)) return;
+      const r = await post(`/api/access/keys/${id}/revoke`);
+      access = r.access;
+      renderMachine();
+      toast(`Clé « ${r.revoked.label} » révoquée`);
+    }
+    if (action === 'lan') {
+      access = await post('/api/access/lan', { enabled: Boolean(button.dataset.on) });
+      renderMachine();
+      toast(access.lan.enabled ? `API ouverte au réseau local (port ${access.lan.port})` : 'API fermée au réseau local');
+    }
     if (action === 'edit-system') { const r = await post('/api/pi/system/open'); toast(`Instructions ouvertes dans le ${r.editor}`); }
     if (action === 'ketch-test') {
       ketchTest = { running: true };

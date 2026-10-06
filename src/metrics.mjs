@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { engineHeaders } from './engine.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
@@ -55,8 +56,8 @@ function decodedFromSlots(slots) {
 }
 
 // Début d'une requête relayée par la passerelle.
-export function beginRequest({ model, client, endpoint, engine }) {
-  const request = { id: Date.now().toString(36), model, client, engine, startedAt: Date.now(), phase: 'prefill', decoded: 0, tps: null, ttft: null, chunks: 0 };
+export function beginRequest({ model, client, key = null, endpoint, engine }) {
+  const request = { id: Date.now().toString(36), model, client, key, engine, startedAt: Date.now(), phase: 'prefill', decoded: 0, tps: null, ttft: null, chunks: 0 };
   snapshot.request = request;
   if (!gpuTimer) gpuTimer = setInterval(tick, 1000);
 
@@ -64,7 +65,7 @@ export function beginRequest({ model, client, endpoint, engine }) {
   let lastAt = Date.now();
   if (engine === 'llama') {
     slotTimer = setInterval(async () => {
-      const slots = await fetch(`${endpoint}/slots`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const slots = await fetch(`${endpoint}/slots`, { headers: engineHeaders() }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const info = slots && decodedFromSlots(slots);
       if (!info || info.decoded === null || snapshot.request !== request) return;
       const now = Date.now();
@@ -115,6 +116,7 @@ export async function endRequest(request, { timings, usage, error }) {
     at: new Date(request.startedAt).toISOString(),
     model: request.model,
     client: request.client,
+    key: request.key,
     promptTokens: (timings?.prompt_n ?? 0) + (timings?.cache_n ?? 0) || usage?.prompt_tokens || null,
     cachedTokens: timings?.cache_n ?? usage?.prompt_tokens_details?.cached_tokens ?? null,
     prefillTps: timings?.prompt_per_second ?? null,

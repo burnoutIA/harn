@@ -16,7 +16,7 @@ const TOOLS = [
   },
   {
     name: 'install_model',
-    description: 'Télécharge une quantification choisie, la règle et la mesure (banc par étapes), puis lance le banc d’intelligence. Bloque jusqu’à la fin (plusieurs minutes) et rend les résultats. Ne l’appelle qu’après une confirmation explicite de l’utilisateur.',
+    description: 'Télécharge une quantification choisie, la règle et la mesure (banc par étapes), puis lance le banc d’intelligence. Harn affiche d’abord la demande (dépôt, taille, licence) dans sa fenêtre : rien ne démarre avant que l’utilisateur clique sur Accepter. Préviens-le avant d’appeler l’outil. Bloque jusqu’à la fin (plusieurs minutes) et rend les résultats.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -24,9 +24,8 @@ const TOOLS = [
         quant: { type: 'string', description: 'Nom exact de la quantification, tel que rendu par inspect_model_repo (ex. UD-IQ4_XS)' },
         mmproj: { type: 'string', description: 'Fichier projecteur vision à installer (optionnel ; à omettre si l’auteur dit que la vision est incompatible avec MTP)' },
         sampling: { type: 'object', description: 'Réglages d’échantillonnage recommandés par l’auteur : temperature, top_p, top_k, min_p, presence_penalty, repeat_penalty', additionalProperties: { type: 'number' } },
-        user_confirmed: { type: 'boolean', description: 'true seulement si l’utilisateur a explicitement accepté ce téléchargement (taille annoncée)' },
       },
-      required: ['url', 'quant', 'user_confirmed'],
+      required: ['url', 'quant'],
     },
   },
   {
@@ -36,8 +35,8 @@ const TOOLS = [
   },
   {
     name: 'retry_install',
-    description: 'Relance l’installation d’un modèle du catalogue (fichiers, réglages, banc d’intelligence) et attend la fin. gguf_dir : dossier contenant déjà tous les fichiers GGUF du modèle, pour ne pas les retélécharger.',
-    inputSchema: { type: 'object', properties: { model_id: { type: 'string' }, gguf_dir: { type: 'string' }, user_confirmed: { type: 'boolean', description: 'true seulement si l’utilisateur a accepté la relance' } }, required: ['model_id', 'user_confirmed'] },
+    description: 'Relance l’installation d’un modèle du catalogue (fichiers, réglages, banc d’intelligence) et attend la fin. Comme install_model, la relance attend que l’utilisateur l’accepte dans la fenêtre de Harn. gguf_dir : dossier contenant déjà tous les fichiers GGUF du modèle, pour ne pas les retélécharger.',
+    inputSchema: { type: 'object', properties: { model_id: { type: 'string' }, gguf_dir: { type: 'string' } }, required: ['model_id'] },
   },
   {
     name: 'harn_status',
@@ -76,13 +75,33 @@ async function withProgress(token, task) {
   try { return await task(); } finally { clearInterval(timer); }
 }
 
+// La demande attend un clic dans la fenêtre de Harn. Rend null une fois acceptée, sinon le
+// message d'échec à rendre à pi.
+const APPROVAL_TIMEOUT_MS = 15 * 60_000;
+async function waitApproval(id, token) {
+  const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
+  let step = 0;
+  while (Date.now() < deadline) {
+    const entry = await api('GET', `/api/approvals/${id}`).catch((error) => ({ status: 'lost', error: error.message }));
+    if (entry.status === 'accepted') return null;
+    if (entry.status === 'refused') return 'L’utilisateur a refusé dans la fenêtre de Harn. Ne relance pas sans qu’il le demande.';
+    if (entry.status === 'error') return `Acceptée, mais Harn n’a pas pu démarrer : ${entry.error}`;
+    if (entry.status === 'lost') return `La demande a disparu (${entry.error}).`;
+    if (token !== undefined && step % 5 === 0) send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: token, progress: step, message: 'En attente de l’accord de l’utilisateur dans la fenêtre de Harn' } });
+    step += 1;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return 'Pas de réponse de l’utilisateur dans la fenêtre de Harn au bout de 15 minutes : demande abandonnée.';
+}
+
 async function call(name, args, token) {
   if (name === 'inspect_model_repo') return text(await api('POST', '/api/hf/inspect', { url: args.url }));
   if (name === 'harn_status') return text(await api('GET', '/api/status'));
   if (name === 'read_install_log') return text(await api('GET', `/api/models/${encodeURIComponent(args.model_id)}/log`));
   if (name === 'retry_install') {
-    if (args.user_confirmed !== true) return text('Refusé : demande d’abord à l’utilisateur s’il veut relancer, puis rappelle l’outil avec user_confirmed: true.', true);
-    await api('POST', `/api/models/${encodeURIComponent(args.model_id)}/retry`, { gguf_dir: args.gguf_dir });
+    const asked = await api('POST', `/api/models/${encodeURIComponent(args.model_id)}/retry`, { gguf_dir: args.gguf_dir });
+    const refused = asked.approval ? await waitApproval(asked.approval, token) : null;
+    if (refused) return text(refused, true);
     let step = 0;
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -98,8 +117,9 @@ async function call(name, args, token) {
     }
   }
   if (name === 'install_model') {
-    if (args.user_confirmed !== true) return text('Refusé : demande d’abord à l’utilisateur de confirmer ce téléchargement (taille, durée), puis rappelle l’outil avec user_confirmed: true.', true);
-    await api('POST', '/api/custom/install', args);
+    const asked = await api('POST', '/api/custom/install', { url: args.url, quant: args.quant, mmproj: args.mmproj, sampling: args.sampling });
+    const refused = asked.approval ? await waitApproval(asked.approval, token) : null;
+    if (refused) return text(refused, true);
     let step = 0;
     let last = '';
     for (;;) {

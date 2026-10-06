@@ -166,6 +166,19 @@ export const MODELS = [
 
 export const modelById = (id) => MODELS.find((model) => model.id === id);
 export const downloadUrl = (repo, file) => `${HF}/${repo}/resolve/main/${encodeURIComponent(file)}?download=true`;
+
+// L'empreinte SHA-256 qu'Hugging Face publie pour chaque gros fichier : l'en-tête x-linked-etag
+// de /resolve (sans suivre la redirection vers le CDN), sinon l'arbre du dépôt (lfs.oid).
+const SHA256 = /^[0-9a-f]{64}$/i;
+export async function hfSha256(repo, file) {
+  const head = await fetch(downloadUrl(repo, file), { method: 'HEAD', redirect: 'manual', headers: { 'User-Agent': 'harn' } }).catch(() => null);
+  const linked = head?.headers.get('x-linked-etag')?.replace(/^W\//, '').replaceAll('"', '') ?? '';
+  if (SHA256.test(linked)) return linked.toLowerCase();
+  const dir = file.includes('/') ? `/${file.slice(0, file.lastIndexOf('/'))}` : '';
+  const tree = await fetch(`${HF}/api/models/${repo}/tree/main${dir}`, { headers: { 'User-Agent': 'harn' } }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
+  return SHA256.test(oid) ? oid.toLowerCase() : null;
+}
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

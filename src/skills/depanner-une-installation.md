@@ -22,8 +22,9 @@ Tu as les outils MCP de Harn : `read_install_log`, `retry_install`, `harn_status
    - erreur inconnue → cherche le message exact avec ketch (`search`) avant de conclure.
 
 3. **Proposer une action précise** et demander l'accord : « Je relance en réutilisant les
-   fichiers de D:\… ? ». N'appelle `retry_install` qu'après un oui, avec `user_confirmed: true`.
-   L'outil attend la fin (plusieurs minutes) : c'est normal.
+   fichiers de D:\… ? ». N'appelle `retry_install` qu'après un oui. Harn affiche alors la
+   relance dans sa fenêtre et attend que l'utilisateur clique sur Accepter : dis-le-lui. L'outil
+   attend ensuite la fin (plusieurs minutes) : c'est normal.
 
 4. **Rendre compte** : ce qui s'était passé, ce que tu as fait, le résultat (`harn_status`).
 

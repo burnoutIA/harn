@@ -1,3 +1,4 @@
+import { engineHeaders } from './engine.mjs';
 import { sampleGpu } from './hardware.mjs';
 
 // La mesure d'une variante déjà chargée. Règles du poste de référence :
@@ -52,7 +53,7 @@ export const WORKLOADS = {
 async function complete(endpoint, model, messages, maxTokens) {
   const response = await fetch(`${endpoint}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...engineHeaders() },
     body: JSON.stringify({
       model,
       messages,

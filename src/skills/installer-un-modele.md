@@ -41,7 +41,8 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
 4. **Demander la confirmation.** Présente en quelques lignes : le modèle, la quantification,
    la taille à télécharger, le contexte et la vitesse estimés, la licence, ce que tu laisses de
    côté (vision…). Demande « Je lance le téléchargement ? ». N'appelle `install_model` qu'après
-   un oui explicite, avec `user_confirmed: true`.
+   un oui explicite. Harn affiche ensuite la demande dans sa fenêtre (dépôt, taille, licence) :
+   préviens l'utilisateur qu'il doit cliquer sur Accepter, rien ne démarre avant.
 
 5. **Installer.** Appelle `install_model`. L'outil bloque plusieurs minutes (téléchargement,
    banc, banc d'intelligence, analyse) : c'est normal. Pendant ce temps, la carte graphique

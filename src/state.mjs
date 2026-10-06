@@ -22,6 +22,8 @@ const initial = () => ({
   profiles: {},   // id du modèle → { recipe, bench: { arms: [...], winner, at }, measured }
   active: null,   // { modelId, engine, status, since, error }
   pi: { installed: false, version: null, lastLaunch: null },
+  lan: false,     // API ouverte au réseau local (port à part, clé exigée)
+  approvals: [],  // demandes de pi en attente d'un clic de l'utilisateur (approvals.mjs)
 });
 
 let state = initial();
@@ -38,6 +40,8 @@ export async function loadState() {
   if (state.active) state.active = { ...state.active, status: 'stopped' };
   for (const download of Object.values(state.downloads)) if (!download.done) download.paused = true;
   if (state.setup.phase === 'running') state.setup.phase = 'interrupted';
+  // Une demande restée sans réponse ne vaut plus rien : pi qui l'attendait n'est plus là.
+  state.approvals = [];
   for (const model of Object.values(state.models ?? {})) Object.assign(model, { phase: null, phaseDetail: null, tuning: false, tuneDetail: null });
   for (const profile of Object.values(state.profiles ?? {})) profile.iqRunning = null;
   return state;

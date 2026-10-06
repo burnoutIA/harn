@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { modelById } from './catalog.mjs';
@@ -10,6 +11,14 @@ import { DIRS, PORTS, ROOT } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
 const run = promisify(execFile);
+
+// Le moteur n'écoute que la boucle locale, mais llama-server répond aux pages web de toute
+// origine (CORS ouvert) : sans clé, n'importe quel site ouvert dans le navigateur pourrait s'en
+// servir et lire /slots. Une clé neuve à chaque lancement de Harn, connue de lui seul, passée par
+// fichier pour ne paraître ni dans la ligne de commande, ni dans l'état, ni dans engine.log.
+const ENGINE_KEY = randomBytes(32).toString('base64url');
+const ENGINE_KEY_FILE = path.join(DIRS.data, 'engine.key');
+export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
 
 // Le point de départ d'un modèle sur CETTE machine. Les a priori viennent de levers.mjs
 // (classe de bande passante, architecture) ; le banc les remet en cause un par un.
@@ -52,6 +61,7 @@ export function llamaArgs(model, files, tuning, hardware) {
     '-m', files.model,
     '--host', '127.0.0.1', '--port', String(PORTS.engine),
     '--alias', model.id,
+    '--api-key-file', ENGINE_KEY_FILE,
     '--jinja', '--metrics', '--slots', '--no-webui',
     '-c', String(tuning.context),
     '--parallel', '1',
@@ -123,6 +133,7 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   await stopEngine();
   await reapOrphans();
   await mkdir(DIRS.logs, { recursive: true });
+  await writeFile(ENGINE_KEY_FILE, `${ENGINE_KEY}\n`);
   const log = createWriteStream(path.join(DIRS.logs, 'engine.log'), { flags: 'w' });
   log.write(`# ${new Date().toISOString()}\n# ${command} ${args.join(' ')}\n\n`);
 

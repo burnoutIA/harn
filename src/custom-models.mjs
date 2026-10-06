@@ -41,13 +41,13 @@ export async function inspectRepo(input) {
     fetch(`${HF}/${repo}/raw/main/README.md`, { headers: { 'User-Agent': 'harn' } }).then((r) => (r.ok ? r.text() : '')),
   ]);
   const files = tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path));
-  const mmproj = files.filter((f) => /mmproj/i.test(f.path)).map((f) => ({ name: f.path, bytes: f.size }));
+  const mmproj = files.filter((f) => /mmproj/i.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
   const groups = new Map();
   for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path))) {
     const base = file.path.replace(SHARD, '.gguf');
     const quant = (path.basename(base).match(QUANT)?.[1] ?? path.basename(base, '.gguf')).toUpperCase();
     const group = groups.get(base) ?? { quant, files: [], bytes: 0 };
-    group.files.push({ name: file.path, bytes: file.size });
+    group.files.push({ name: file.path, bytes: file.size, sha256: file.lfs?.oid ?? null });
     group.bytes += file.size;
     groups.set(base, group);
   }

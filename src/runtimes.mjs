@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { download } from './download.mjs';
@@ -25,6 +25,10 @@ const ASSET = {
   hip: /-bin-win-(rocm-[\d.]+|hip-radeon)-x64\.zip$/,
 };
 const CUDART = { cuda13: /^cudart-llama-bin-win-cuda-13\.\d+-x64\.zip$/, cuda12: /^cudart-llama-bin-win-cuda-12\.\d+-x64\.zip$/ };
+
+// L'empreinte que GitHub calcule pour chaque fichier publié (« sha256:… »). Les releases d'avant
+// mi-2025 n'en ont pas : le binaire est alors installé sans vérification, et l'état le note.
+const assetSha = (asset) => (/^sha256:[0-9a-f]{64}$/i.test(asset.digest ?? '') ? asset.digest.slice(7).toLowerCase() : null);
 
 async function latestRelease(source) {
   const response = await fetch(`https://api.github.com/repos/${source.repo}/releases?per_page=15`, {
@@ -78,6 +82,7 @@ export async function installLlama(kind, backend) {
     url: asset.browser_download_url,
     dest: path.join(DIRS.downloads, asset.name),
     expectedBytes: asset.size,
+    sha256: assetSha(asset),
   });
   await extract(zip, target);
 
@@ -91,6 +96,7 @@ export async function installLlama(kind, backend) {
         url: runtimeAsset.browser_download_url,
         dest: path.join(DIRS.downloads, runtimeAsset.name),
         expectedBytes: runtimeAsset.size,
+        sha256: assetSha(runtimeAsset),
       });
       const serverDir = await findServerDir(target);
       await extract(cudart, serverDir ?? target);
@@ -102,7 +108,7 @@ export async function installLlama(kind, backend) {
   const serverPath = path.join(serverDir, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
   const { stdout, stderr } = await run(serverPath, ['--version'], { windowsHide: true, timeout: 30_000 }).catch((error) => error);
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1] ?? release.tag_name;
-  const info = { kind, backend, tag: release.tag_name, version, dir: serverDir, serverPath, installedAt: new Date().toISOString() };
+  const info = { kind, backend, tag: release.tag_name, version, dir: serverDir, serverPath, verified: Boolean(assetSha(asset)), installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
 }
@@ -125,6 +131,7 @@ export async function installKetch() {
     url: asset.browser_download_url,
     dest: path.join(DIRS.downloads, asset.name),
     expectedBytes: asset.size,
+    sha256: assetSha(asset),
   });
   const dir = path.join(DIRS.runtime, 'ketch');
   await extract(zip, dir);
@@ -137,18 +144,28 @@ export async function installKetch() {
 
 // Strata : dépôt GitHub + son propre installeur, piloté sans questions (--yes). Il gère seul
 // Python, son moteur et le téléchargement du modèle dans Strata-data.
+// Version figée sur un commit : Harn exécute son code Python, il ne doit pas suivre la branche
+// main les yeux fermés. Monter de version = changer ce commit après l'avoir relu et essayé.
+// (Pas d'empreinte de l'archive : GitHub ne garantit pas qu'un zip régénéré reste identique ;
+// l'identifiant de commit, lui, désigne un contenu unique.)
+const STRATA_COMMIT = '6f32ec070f23ced9f50e704d854d775da52591ab';
+
 export async function installStrata(model, contextSize, onLog = () => {}, { ggufDir = null } = {}) {
   const dir = path.join(DIRS.runtime, 'strata');
   const repoDir = path.join(dir, 'Strata-main');
   if (!(await stat(path.join(repoDir, 'START-HERE.bat')).catch(() => null))) {
     const zip = await download({
       id: 'runtime:strata',
-      label: 'Strata (runtime MoE)',
-      url: 'https://github.com/Niko1221/Strata/archive/refs/heads/main.zip',
-      dest: path.join(DIRS.downloads, 'strata-main.zip'),
+      label: `Strata (runtime MoE, ${STRATA_COMMIT.slice(0, 7)})`,
+      url: `https://github.com/Niko1221/Strata/archive/${STRATA_COMMIT}.zip`,
+      dest: path.join(DIRS.downloads, `strata-${STRATA_COMMIT.slice(0, 7)}.zip`),
     });
+    // L'archive d'un commit se déplie dans Strata-<commit> : ramenée au nom attendu partout.
+    const unpacked = path.join(dir, `Strata-${STRATA_COMMIT}`);
     await rm(repoDir, { recursive: true, force: true });
+    await rm(unpacked, { recursive: true, force: true });
     await extract(zip, dir);
+    await rename(unpacked, repoDir);
   }
   const args = [
     '--setup', '--family', 'swift', '--model', model.strataModel, '--context', String(contextSize),
@@ -168,7 +185,7 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`L’installeur de Strata s’est arrêté (code ${code})`))));
   });
   const config = (await readdir(repoDir)).find((name) => name.startsWith('strata-swift') && name.endsWith('.json') && name.toLowerCase().includes(model.strataModel.toLowerCase()));
-  const info = { kind: 'strata', dir: repoDir, config, python: path.join(repoDir, '.venv', 'Scripts', 'python.exe'), installedAt: new Date().toISOString() };
+  const info = { kind: 'strata', commit: STRATA_COMMIT, dir: repoDir, config, python: path.join(repoDir, '.venv', 'Scripts', 'python.exe'), installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
   return info;
 }

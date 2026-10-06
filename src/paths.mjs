@@ -16,9 +16,11 @@ export const DIRS = {
   public: fromRoot('public'),
 };
 
-// Un seul port public : interface, API de contrôle et endpoint OpenAI. Le moteur reste interne.
+// Un seul port local : interface, API de contrôle et endpoint OpenAI. Le moteur reste interne.
+// lan : l'endpoint OpenAI seul, ouvert au réseau local à la demande (clé exigée).
 export const PORTS = {
   app: Number(process.env.HARN_PORT ?? 4747),
+  lan: Number(process.env.HARN_LAN_PORT ?? 4748),
   engine: Number(process.env.HARN_ENGINE_PORT ?? 4749),
   strata: Number(process.env.HARN_STRATA_PORT ?? 4750),
 };

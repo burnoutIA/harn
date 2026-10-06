@@ -11,6 +11,7 @@
     "start": "node src/main.mjs",
     "restart": "node src/ctl.mjs restart",
     "stop": "node src/ctl.mjs stop",
+    "keys": "node src/keys.mjs",
     "check": "node --test tests/*.test.mjs"
   }
 }

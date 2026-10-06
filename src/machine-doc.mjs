@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { internalKey } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { PORTS, fromRoot } from './paths.mjs';
 import { OBJECTIVE } from './planner.mjs';
@@ -118,7 +119,7 @@ export async function askLocalAnalysis() {
   const facts = factsMarkdown(state);
   const response = await fetch(`http://127.0.0.1:${PORTS.app}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'harn-analyse' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'harn-analyse', Authorization: `Bearer ${await internalKey()}` },
     body: JSON.stringify({
       model: modelId,
       max_tokens: 6000,
