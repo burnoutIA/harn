@@ -1,0 +1,5 @@
+- lancer un modele implique de décharger celui deja lancé ça doit se faire auto
+- ajouter un runtime vllm ?
+- est ce que le serveur soumet bien les modeles dispo aux clients? et le raisoning?
+- pendant une install j'aimerais avoir quelques retours sur ce qui se passe. au moins la phase en cours (recherche des meilleurs réglages, test de l'intelligence...)
+- revoir la base de notation du banc d'intelligence : les modèles locaux plafonnent à 97-100 alors qu'un modèle frontier (Opus 5.5) doit garder de la marge au-dessus. Ajouter des épreuves qui poussent aux limites (enchaînements de 4-5 outils, bugs subtils, long contexte avec info cachée) et recaler l'échelle pour que 100 reste hors de portée. Noter aussi plus vite (aujourd'hui 2,5 à 4 min par modèle) : test adaptatif par paliers, épreuves les plus discriminantes seulement, requêtes en parallèle.

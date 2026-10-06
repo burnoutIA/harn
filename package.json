@@ -1,0 +1,16 @@
+{
+  "name": "harn",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Une IA locale qui tourne bien, sans rien régler : détection du matériel, installation du bon runtime, réglage et banc au démarrage, pi agent préconfiguré.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "restart": "node src/ctl.mjs restart",
+    "stop": "node src/ctl.mjs stop",
+    "check": "node --test tests/*.test.mjs"
+  }
+}
