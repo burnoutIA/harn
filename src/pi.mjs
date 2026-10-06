@@ -142,9 +142,11 @@ les changements comptent au prochain lancement de pi, ou après la commande /rel
 
 - Réponds en français, de façon claire et concise.
 - Tu tournes en local sur cette machine, servi par Harn.
-- Pour une information récente, une documentation ou un fait que tu ne connais pas avec
-  certitude, utilise les outils de recherche web ketch (search, scrape, docs, code) plutôt
-  que de deviner, et cite tes sources.
+- Pour un fait que tu ne connais pas avec certitude, cherche dans cet ordre, et cite tes sources :
+  1. les sources locales : la référence des leviers, le carnet de la machine, l'outil
+     \`harn_status\` et les fichiers du projet. Sur cette machine, elles font foi ;
+  2. sinon, la recherche web ketch (search, scrape, docs, code) ;
+  3. jamais deviner.
 `;
 
 export async function ensureAppendSystem() {

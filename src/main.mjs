@@ -104,9 +104,13 @@ function compactStatus() {
   const downloads = Object.entries(s.downloads).filter(([, d]) => !d.done).map(([id, d]) => ({ id, file: d.label, percent: d.total ? Math.round((d.received / d.total) * 100) : null, speedMBps: d.speed ? +(d.speed / 1e6).toFixed(0) : null }));
   const models = MODELS.filter((m) => s.models[m.id]?.installedAt || s.models[m.id]?.installing).map((m) => {
     const p = s.profiles[m.id] ?? {};
-    return { id: m.id, name: displayName(m), installed: Boolean(s.models[m.id]?.installedAt), installing: Boolean(s.models[m.id]?.installing), tuning: s.models[m.id]?.tuneDetail ?? null, benchTps: p.bench?.winner?.tps ?? null, setting: p.bench?.winner?.label ?? null, context: p.tuning?.context ?? null, paramsB: paramsOf(m), noteGlobale: globalRating(m, p)?.score ?? null, intelligence: p.iq?.version === IQ_VERSION ? { score: p.iq.score, ...Object.fromEntries(Object.entries(p.iq.categories).map(([k, c]) => [k, `${c.points}/100, palier ${c.level}`])), reflexion: p.iq.verbosity.label } : null, iqRunning: p.iqRunning ?? null, quality: m.quality, error: s.models[m.id]?.error ?? null };
+    // Chaque réglage essayé par le banc et son débit : pi y voit ce qui a déjà été mesuré ici
+    // (MTP, DFlash2, KV…) au lieu de le croire absent.
+    const tried = (p.bench?.arms ?? []).map((a) => ({ etape: a.stage, reglage: a.label, tps: a.tps ?? null, ...Object.fromEntries((a.workloads ?? []).map((w) => [w.workload, Math.round(w.tps)])), ...(a.error ? { erreur: a.error } : {}), ...(a.ok === false && !a.error ? { ecarte: 'marge VRAM insuffisante' } : {}) }));
+    return { id: m.id, name: displayName(m), installed: Boolean(s.models[m.id]?.installedAt), installing: Boolean(s.models[m.id]?.installing), tuning: s.models[m.id]?.tuneDetail ?? null, benchTps: p.bench?.winner?.tps ?? null, setting: p.bench?.winner?.label ?? null, reglagesEssayes: tried.length ? tried : null, context: p.tuning?.context ?? null, paramsB: paramsOf(m), noteGlobale: globalRating(m, p)?.score ?? null, intelligence: p.iq?.version === IQ_VERSION ? { score: p.iq.score, ...Object.fromEntries(Object.entries(p.iq.categories).map(([k, c]) => [k, `${c.points}/100, palier ${c.level}`])), reflexion: p.iq.verbosity.label } : null, iqRunning: p.iqRunning ?? null, quality: m.quality, error: s.models[m.id]?.error ?? null };
   });
-  return { machine: s.plan?.summary?.machine, objective: '100k-150k de contexte, 40 tok/s minimum, le modèle le plus intelligent possible', active: s.active ? { model: s.active.modelId, status: s.active.status } : null, busyWith: busyWith(), downloads, models };
+  const engines = Object.entries(s.runtimes ?? {}).map(([id, r]) => `${id} ${r.tag ?? r.commit?.slice(0, 7) ?? ''}`.trim());
+  return { machine: s.plan?.summary?.machine, engines, objective: '100k-150k de contexte, 40 tok/s minimum, le modèle le plus intelligent possible', active: s.active ? { model: s.active.modelId, status: s.active.status } : null, busyWith: busyWith(), downloads, models };
 }
 
 function events(req, res) {

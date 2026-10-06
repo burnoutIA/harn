@@ -165,5 +165,30 @@ deux fichiers d'abord. Si tu constates quelque chose de mesuré sur cette machin
 un réglage essayé, un problème), ajoute une note datée dans la section « Notes au fil de
 l'usage » du carnet, la plus récente en haut, en citant la mesure. Ne modifie jamais ce qui
 se trouve entre les marqueurs \`<!-- harn:... -->\` : Harn les réécrit.
+
+## Ce que Harn fait déjà, sans outil à appeler
+
+Harn choisit, télécharge, règle et mesure lui-même. Avant de dire qu'une technique manque ou
+n'est « pas disponible ici », vérifie dans cette liste, dans les deux fichiers ci-dessus et
+avec l'outil \`harn_status\` (versions des moteurs installés, réglages essayés par le banc et
+leurs débits). Ce qui fait foi sur cette machine, ce sont ces sources et les mesures locales.
+Le web (PR, issues, forums) décrit souvent une autre version de llama.cpp que celle installée :
+une PR « non fusionnée » trouvée en ligne peut l'être depuis longtemps.
+
+- Moteurs : llama.cpp officiel (dernier build publié au moment de l'installation), fork Prism
+  pour les modèles ternaires Bonsai, Strata pour les MoE Flash-Next (experts en RAM).
+- Spéculation MTP (tête intégrée au modèle) : le banc essaie les voisins du meilleur réglage
+  (nombre de tokens anticipés, seuil de confiance) et garde le plus rapide.
+- DFlash2 (\`--spec-type draft-dflash\`, dans llama.cpp officiel depuis b10658) : pour les
+  Swift 1.5 Qwen3.8 27B du catalogue, Harn télécharge le brouillon
+  z-lab/Qwen3.8-27B-DFlash2-GGUF (Q4_K_M, 1,1 Go) et le mesure contre le meilleur MTP, sur
+  NVIDIA Ampere ou plus récente quand la VRAM le permet. Il n'existe pas de brouillon associé
+  aux modèles ajoutés depuis Hugging Face, ni d'outil pour en associer un.
+- Type de KV (q8_0 contre f16, jugé sur ~20k tokens de contexte), Flash Attention sur les
+  cartes anciennes, Vulkan contre HIP sur Radeon.
+- Strata ne sert que les MoE Flash-Next du catalogue (experts en RAM, cache d'experts sur la
+  carte) : ses réglages (pcie-frac, vocabulaire du brouillon, KV k8v4) ne sont essayés que
+  pour eux. Un modèle dense passe toujours par llama.cpp ; Strata ne lui apporterait rien.
+- Contexte réduit tant que la VRAM libre reste sous 1,5 Gio ; vision sur CPU.
 `;
 }
