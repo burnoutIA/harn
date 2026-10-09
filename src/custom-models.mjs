@@ -43,7 +43,8 @@ export async function inspectRepo(input) {
   const files = tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path));
   const mmproj = files.filter((f) => /mmproj/i.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
   const groups = new Map();
-  for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path))) {
+  // Les têtes MTP et brouillons de spéculation sont des fichiers annexes, pas des quantifications.
+  for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path) && !/(^|\/)(mtp|draft|dflash)[-_]/i.test(f.path))) {
     const base = file.path.replace(SHARD, '.gguf');
     const quant = (path.basename(base).match(QUANT)?.[1] ?? path.basename(base, '.gguf')).toUpperCase();
     const group = groups.get(base) ?? { quant, files: [], bytes: 0 };

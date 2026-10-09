@@ -53,6 +53,28 @@ const helperFor = (failedId) => Object.entries(state.profiles ?? {})
 // Même version que src/iq-test.mjs : les résultats d'un ancien banc sont à refaire.
 const IQ_VERSION = 3;
 const iqResult = (id) => (state.profiles[id]?.iq?.version === IQ_VERSION ? state.profiles[id].iq : null);
+// Les cinq domaines du banc d'intelligence : [clé, nom, poids dans la note].
+const CATS = [['outils', 'Outils', 35], ['code', 'Code', 25], ['raisonnement', 'Raisonnement', 20], ['contexte', 'Long contexte', 10], ['honnetete', 'Honnêteté', 10]];
+// Un modèle peut être meilleur généraliste et un autre meilleur sur une tâche : pour chaque
+// domaine, le modèle testé qui devance strictement tous les autres (pas de badge à égalité).
+function domainLeaders() {
+  const tested = Object.keys(state.profiles ?? {}).filter((id) => state.models[id]?.installedAt && iqResult(id) && modelOf(id));
+  const leaders = {};
+  if (tested.length < 2) return leaders;
+  for (const [key, label] of CATS) {
+    const ranked = tested.map((id) => [id, iqResult(id).categories[key]?.points ?? 0]).sort((a, b) => b[1] - a[1]);
+    if (ranked[0][1] > ranked[1][1]) (leaders[ranked[0][0]] ??= []).push(label);
+  }
+  return leaders;
+}
+function domainStrip(id) {
+  const iq = iqResult(id);
+  if (!iq) return '';
+  return `<div class="domains" title="Banc d’intelligence par domaine (le poids dans la note entre parenthèses)">${CATS.map(([key, label, weight]) => {
+    const points = iq.categories[key]?.points ?? 0;
+    return `<div class="dom" title="${label} (${weight} %) : ${points}/100"><div class="top"><span>${label}</span><b>${points}</b></div><div class="bar"><i style="width:${points}%"></i></div></div>`;
+  }).join('')}</div>`;
+}
 const clientOf = (ua = '') => (/^pi/i.test(ua) ? 'pi agent' : ua.includes('harn') ? 'Harn' : ua.split(/[/ (]/)[0] || 'client');
 
 const icon = {
@@ -585,6 +607,7 @@ function modelCard(model) {
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
   if (model.vision) badges.push(`<span class="badge icon" title="Vision : comprend les images" aria-label="Vision : comprend les images">${icon.eye}</span>`);
   if (verdict.fit === 'partial' && !entry.installedAt) badges.push('<span class="badge warn">En partie sur le processeur</span>');
+  for (const label of domainLeaders()[model.id] ?? []) badges.push(`<span class="badge lead" title="Meilleure note du banc d’intelligence en ${label.toLowerCase()} parmi vos modèles testés">Meilleur en ${label.toLowerCase()}</span>`);
   if (iqResult(model.id)?.verbosity.label === 'bavard') badges.push('<span class="badge warn" title="Réfléchit longtemps avant de répondre">Bavard</span>');
 
   const speed = measured
@@ -612,6 +635,7 @@ function modelCard(model) {
       <div><div class="k">Contexte ici</div><div class="v ${verdict.context && verdict.context < 102400 ? 'bad' : ''}">${verdict.context ? kTokens(verdict.context) : '—'}</div></div>
       <div title="Intelligence 40 % · taille 25 % · vitesse 20 % · contexte 15 %"><div class="k">Note globale</div>${verdict.rating != null ? `<div class="v ${verdict.ratingMeasured ? '' : 'est'}">${verdict.ratingMeasured ? '' : '~'}${verdict.rating}<small>${verdict.ratingMeasured ? '/100' : 'estimée'}</small></div>` : '<div class="v est">—</div>'}</div>
     </div>
+    ${domainStrip(model.id)}
     ${isTarget ? whyTarget(model.id) : ''}
     ${off ? `<p class="why">Pas pour cette machine : ${esc(verdict.reasons.join(', '))}.</p>` : ''}
     ${entry.installing && entry.detail ? `<p class="why">${esc(entry.detail)}</p>` : ''}
@@ -622,6 +646,39 @@ function modelCard(model) {
       </div></div>` : ''}
     <div class="foot">${action}${(entry.installedAt || entry.error) && !entry.installing && !entry.tuning && !loading ? `<button class="btn ghost small" data-action="delete-model" data-id="${model.id}" title="Supprimer ses fichiers et ses réglages">${icon.trash} Supprimer</button>` : ''}<span class="size">${gb(model.totalBytes)}</span></div>
   </article>`;
+}
+
+// ── Veille Hugging Face ────────────────────────────────────
+const daysAgo = (iso) => { const d = Math.floor((Date.now() - Date.parse(iso)) / 86_400_000); return d <= 0 ? 'aujourd’hui' : d === 1 ? 'hier' : `il y a ${d} jours`; };
+function hubSection() {
+  const w = state.watch ?? {};
+  const items = (w.items ?? []).filter((i) => i.usable)
+    .sort((a, b) => (b.best.meetsObjective - a.best.meetsObjective) || (b.likes - a.likes));
+  const updates = w.updates ?? [];
+  const head = `<div class="group-title hub-head"><h2>Nouveautés sur Hugging Face</h2><span>${w.checking ? 'recherche en cours…' : w.checkedAt ? `vérifié ${daysAgo(w.checkedAt)} à ${clock(w.checkedAt)}` : 'pas encore vérifié'}</span>
+    <button class="btn small ghost" data-action="hub-check" ${w.checking ? 'disabled' : ''}>Vérifier maintenant</button></div>`;
+  const upd = updates.map((u) => `<div class="tip">${icon.info}<span><b>${esc(nameOf(u.id))} a été mis à jour sur Hugging Face</b> (${esc(u.files.join(', '))}). Supprimez-le puis réinstallez-le pour en profiter. <a href="https://huggingface.co/${esc(u.repo)}" target="_blank" rel="noopener">Voir le dépôt</a></span></div>`).join('');
+  const cards = items.map((i) => {
+    const b = i.best;
+    const tags = [i.moe ? 'MoE' : null, i.vision ? 'vision' : null, b.fit === 'partial' ? 'en partie sur le processeur' : null].filter(Boolean).join(' · ');
+    return `<article class="card model hub">
+      <div class="badges">${b.meetsObjective ? '<span class="badge upgrade" title="Tient 100k de contexte et 40 tok/s sur cette machine">Atteint l’objectif ici</span>' : ''}<span class="badge">♥ ${fr(i.likes)}</span><span class="badge">${daysAgo(i.lastModified ?? i.createdAt)}</span></div>
+      <div class="title-row"><div><h3>${esc(i.name)}</h3><div class="variant">${esc(i.repo)}</div></div></div>
+      <div class="facts">
+        <div><div class="k">Taille</div><div class="v ${i.paramsB ? '' : 'est'}">${i.paramsB ? `${fr(i.paramsB, i.paramsB % 1 ? 1 : 0)}B` : '—'}</div></div>
+        <div><div class="k">Version</div><div class="v" style="font-size:calc(13px * var(--fs))">${esc(b.quant)}</div></div>
+        <div><div class="k">Vitesse ici</div><div class="v est">~${b.tps}<small>estimé</small></div></div>
+        <div><div class="k">Contexte ici</div><div class="v ${b.context < 102400 ? 'bad' : ''}">${kTokens(b.context)}</div></div>
+        <div><div class="k">Téléchargement</div><div class="v">${fr(b.gigabytes, 1)}<small>Go</small></div></div>
+      </div>
+      ${tags || i.license ? `<p class="why">${esc([tags, i.license ? `licence ${i.license}` : null].filter(Boolean).join(' · '))}</p>` : ''}
+      <div class="foot"><button class="btn violet" data-action="hub-install" data-repo="${esc(i.repo)}" data-quant="${esc(b.quant)}" data-mmproj="${esc(i.mmproj ?? '')}">${icon.bolt} Installer et tester</button>
+        <a class="btn ghost" href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">Voir</a>
+        <button class="btn ghost small" data-action="hub-dismiss" data-repo="${esc(i.repo)}" title="Ne plus proposer ce modèle">Écarter</button></div>
+    </article>`;
+  }).join('');
+  const empty = !items.length && !updates.length ? `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de nouveau ces 30 derniers jours qui tourne bien sur cette machine.' : 'Harn regarde une fois par jour les modèles sortis ou mis à jour sur Hugging Face, et ne garde que ceux qui tournent bien ici.'}</p>` : '';
+  return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}</div></div>`;
 }
 
 function renderModels() {
@@ -645,6 +702,7 @@ function renderModels() {
   const group = (title, hint, list) => (list.length ? `<div class="group-title"><h2>${title}</h2><span>${hint}</span></div><div class="models">${list.map(modelCard).join('')}</div>` : '');
   paint('models-body', `<div style="display:grid;gap:20px">
     <div class="models featured">${featured.map(([title, m]) => `<div class="feature"><div class="group-title"><h2>${title}</h2></div>${modelCard(m)}</div>`).join('')}</div>
+    ${hubSection()}
     ${group('Compatibles', `${ok.length} modèles`, ok)}
     ${group('Hors de portée', 'mémoire ou carte insuffisante', no)}
   </div>`);
@@ -681,7 +739,6 @@ function renderTuning() {
   }
   const profileIq = state.profiles[id] ?? {};
   const iq = iqResult(id);
-  const CATS = [['outils', 'Outils', 35], ['code', 'Code', 25], ['raisonnement', 'Raisonnement', 20], ['contexte', 'Long contexte', 10], ['honnetete', 'Honnêteté', 10]];
   const LEVEL = { aucun: 'aucun palier', plancher: 'plancher', difficile: 'palier difficile', limite: 'palier limite' };
   const VERB = { concis: 'Réflexion concise', normal: 'Réflexion normale', bavard: 'Réflexion trop longue' };
   paint('tune-iq', `<div class="view-head" style="margin-bottom:6px"><div><div class="label">Banc d’intelligence</div>
@@ -1037,6 +1094,16 @@ app.addEventListener('click', async (event) => {
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }
+    if (action === 'hub-check') { await post('/api/watch/check'); toast('Recherche des nouveautés sur Hugging Face'); }
+    if (action === 'hub-dismiss') { await post('/api/watch/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }
+    if (action === 'hub-install') {
+      const { repo, quant, mmproj } = button.dataset;
+      if (!confirm(`Installer ${repo} · ${quant} ?
+
+Harn le télécharge, le règle pour votre carte et teste son intelligence. Votre IA actuelle reste disponible pendant ce temps.`)) return;
+      await post('/api/custom/install', { url: `https://huggingface.co/${repo}`, quant, mmproj: mmproj || null });
+      toast('Installation lancée : suivez-la dans la liste des modèles');
+    }
     if (action === 'check') { const r = await post(`/api/checks/${id}/apply`); toast(r.message); }
     if (action === 'key-revoke') {
       if (!confirm(`Révoquer la clé « ${button.dataset.label} » ?\n\nLes applications qui l’utilisent seront refusées. Elle ne pourra pas être réactivée.`)) return;

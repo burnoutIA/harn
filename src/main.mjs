@@ -20,6 +20,7 @@ import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, re
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
+import { checkHub, dismissHub, watchHub } from './watch.mjs';
 
 const ORIGIN = `http://127.0.0.1:${PORTS.app}`;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -222,6 +223,16 @@ async function api(req, res, url) {
       try { await applyUpdate(activity()); return json(res, 200, { ok: true }); } catch (error) { return json(res, 409, { error: error.message }); }
     }
   }
+  // Veille Hugging Face : relancer la recherche, écarter une proposition.
+  if (parts[1] === 'watch') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    if (parts[2] === 'check') { background(checkHub()); return json(res, 202, { ok: true }); }
+    if (parts[2] === 'dismiss') {
+      const body = await new Response(req).json().catch(() => ({}));
+      dismissHub(String(body.repo ?? ''));
+      return json(res, 200, { ok: true });
+    }
+  }
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());
   if (parts[1] === 'checks' && parts[2] && parts[3] === 'apply') {
@@ -382,6 +393,7 @@ async function main() {
     openWindow();
     await reapOrphans();
     watchForUpdates();
+    watchHub();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
     if (state.lan) {
