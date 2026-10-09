@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { internalKey } from './api-keys.mjs';
@@ -75,6 +75,7 @@ export async function configurePi(preferredModel = null) {
   if (state.hardware) await writeFile(path.join(DIRS.piAgent, 'AGENTS.md'), agentInstructions(state.hardware));
   await ensureAppendSystem();
   await installSkills();
+  await installExtensions();
   await configureMcp();
   return { modelsFile, settingsFile, defaultModel };
 }
@@ -179,6 +180,16 @@ async function installSkills() {
     const dir = path.join(DIRS.piAgent, 'skills', name.replace(/\.md$/, ''));
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, 'SKILL.md'), await readFile(path.join(source, name), 'utf8'));
+  }
+}
+
+// Les extensions pi fournies par Harn (src/pi-extensions, un dossier par extension), recopiées
+// à chaque configuration comme les skills. ctx-optimizer vient du projet ctx_optimizer/pi : on
+// l'y fait évoluer, puis on recopie ses fichiers ici.
+async function installExtensions() {
+  const source = fromRoot('src', 'pi-extensions');
+  for (const entry of await readdir(source, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory()) await cp(path.join(source, entry.name), path.join(DIRS.piAgent, 'extensions', entry.name), { recursive: true, force: true });
   }
 }
 
