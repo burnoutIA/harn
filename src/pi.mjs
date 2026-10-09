@@ -38,7 +38,14 @@ async function readJson(file) {
 
 // La configuration que pi lit : un fournisseur « harn » qui pointe sur notre /v1, un modèle
 // par modèle installé. La fenêtre annoncée est la vraie (la réduire étrangle les réponses du
-// client près du seuil) et le plafond de sortie ne dépend pas de la fenêtre.
+// client près du seuil).
+// Sortie : jusqu'à 80k par réponse (ce que Qwen conseille pour les maths et le code difficiles),
+// 5/8 du contexte au plus. Sur une preuve Lean, le Qwen3.8 officiel a buté trois fois sur 32k de
+// réflexion seule, sans réponse. pi ramène de lui-même
+// max_tokens à la place qui reste dans le contexte ; pour que cette place vaille au moins 32k, il
+// compacte dès qu'il en reste moins (marge par modèle, 16k par défaut chez pi).
+const MAX_OUTPUT = 81920;
+const ANSWER_ROOM = 32768;
 export async function configurePi(preferredModel = null) {
   const state = getState();
   await mkdir(DIRS.piAgent, { recursive: true });
@@ -52,7 +59,7 @@ export async function configurePi(preferredModel = null) {
       reasoning: model.reasoning,
       input: model.vision ? ['text', 'image'] : ['text'],
       contextWindow: context,
-      maxTokens: Math.min(32768, Math.floor(context / 2)),
+      maxTokens: Math.min(MAX_OUTPUT, Math.floor((context * 5) / 8)),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
   });
@@ -70,6 +77,8 @@ export async function configurePi(preferredModel = null) {
   const favorite = installed.includes(state.favorite) ? state.favorite : null;
   const defaultModel = preferredModel ?? favorite ?? state.active?.modelId ?? installed[0];
   Object.assign(settings, { defaultProvider: 'harn', defaultModel, defaultThinkingLevel: settings.defaultThinkingLevel ?? 'medium' });
+  settings.compaction = { ...(settings.compaction ?? {}), modelOverrides: { ...(settings.compaction?.modelOverrides ?? {}) } };
+  for (const model of models) settings.compaction.modelOverrides[`harn/${model.id}`] = { reserveTokens: Math.min(ANSWER_ROOM, Math.floor(model.contextWindow / 4)) };
   await writeFile(settingsFile, JSON.stringify(settings, null, 2));
   // Consignes globales de pi : la référence des leviers et le carnet de cette machine.
   if (state.hardware) await writeFile(path.join(DIRS.piAgent, 'AGENTS.md'), agentInstructions(state.hardware));
