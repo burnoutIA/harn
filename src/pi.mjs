@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { internalKey } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { agentInstructions } from './machine-doc.mjs';
+import { outputBudget, outputUsage } from './output-budget.mjs';
 import { DIRS, PORTS, fromRoot } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
@@ -38,28 +39,26 @@ async function readJson(file) {
 
 // La configuration que pi lit : un fournisseur « harn » qui pointe sur notre /v1, un modèle
 // par modèle installé. La fenêtre annoncée est la vraie (la réduire étrangle les réponses du
-// client près du seuil).
-// Sortie : jusqu'à 80k par réponse (ce que Qwen conseille pour les maths et le code difficiles),
-// 5/8 du contexte au plus. Sur une preuve Lean, le Qwen3.8 officiel a buté trois fois sur 32k de
-// réflexion seule, sans réponse. pi ramène de lui-même
-// max_tokens à la place qui reste dans le contexte ; pour que cette place vaille au moins 32k, il
-// compacte dès qu'il en reste moins (marge par modèle, 16k par défaut chez pi).
-const MAX_OUTPUT = 81920;
-const ANSWER_ROOM = 32768;
+// client près du seuil). Sortie et place garantie avant compaction : calculées par modèle
+// (output-budget.mjs) d'après sa famille et son vrai usage. pi ramène de lui-même max_tokens à la
+// place qui reste ; il compacte quand il en reste moins que la réserve du modèle.
 export async function configurePi(preferredModel = null) {
   const state = getState();
   await mkdir(DIRS.piAgent, { recursive: true });
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelById(id));
+  const usage = await outputUsage();
+  const budgets = {};
   const models = installed.map((id) => {
     const model = modelById(id);
     const context = state.profiles[id]?.tuning?.context ?? model.contextByVram[0][1];
+    const budget = budgets[id] = outputBudget(model, context, usage[id], state.profiles[id]?.iq);
     return {
       id,
       name: displayName(model),
       reasoning: model.reasoning,
       input: model.vision ? ['text', 'image'] : ['text'],
       contextWindow: context,
-      maxTokens: Math.min(MAX_OUTPUT, Math.floor((context * 5) / 8)),
+      maxTokens: budget.maxTokens,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
   });
@@ -78,7 +77,7 @@ export async function configurePi(preferredModel = null) {
   const defaultModel = preferredModel ?? favorite ?? state.active?.modelId ?? installed[0];
   Object.assign(settings, { defaultProvider: 'harn', defaultModel, defaultThinkingLevel: settings.defaultThinkingLevel ?? 'medium' });
   settings.compaction = { ...(settings.compaction ?? {}), modelOverrides: { ...(settings.compaction?.modelOverrides ?? {}) } };
-  for (const model of models) settings.compaction.modelOverrides[`harn/${model.id}`] = { reserveTokens: Math.min(ANSWER_ROOM, Math.floor(model.contextWindow / 4)) };
+  for (const model of models) settings.compaction.modelOverrides[`harn/${model.id}`] = { reserveTokens: budgets[model.id].reserve };
   await writeFile(settingsFile, JSON.stringify(settings, null, 2));
   // Consignes globales de pi : la référence des leviers et le carnet de cette machine.
   if (state.hardware) await writeFile(path.join(DIRS.piAgent, 'AGENTS.md'), agentInstructions(state.hardware));

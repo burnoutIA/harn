@@ -150,6 +150,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   // On relaie octet pour octet, en lisant au passage les compteurs du moteur.
   let timings = null;
   let usage = null;
+  let finish = null;   // « length » : réponse coupée à la limite de sortie (voir output-budget.mjs)
   let buffer = '';
   const decoder = new TextDecoder();
   const streaming = (upstream.headers.get('content-type') ?? '').includes('event-stream');
@@ -168,6 +169,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
           const event = JSON.parse(line.slice(5));
           if (event.timings) timings = event.timings;
           if (event.usage) usage = event.usage;
+          if (event.choices?.[0]?.finish_reason) finish = event.choices[0].finish_reason;
           if (event.choices?.[0]?.delta && Object.keys(event.choices[0].delta).length) onChunk(request);
         } catch { /* ligne partielle : ignorée */ }
       }
@@ -177,6 +179,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
         const parsed = JSON.parse(buffer);
         timings = parsed.timings ?? null;
         usage = parsed.usage ?? null;
+        finish = parsed.choices?.[0]?.finish_reason ?? null;
       } catch { /* réponse non JSON */ }
     }
   } catch (caught) {
@@ -184,6 +187,6 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   }
   if (upstream.status >= 400) error ??= `HTTP ${upstream.status}`;
   res.end();
-  await endRequest(request, { timings, usage, error });
+  await endRequest(request, { timings, usage, error, finish });
   if (decision.key) recordUsage(decision.key.id, timings?.predicted_n ?? usage?.completion_tokens ?? request.decoded);
 }

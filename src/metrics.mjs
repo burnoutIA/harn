@@ -106,7 +106,7 @@ export function onChunk(request, tokens = 1) {
 }
 
 // Fin de requête : les compteurs du moteur font foi (timings llama.cpp, usage OpenAI).
-export async function endRequest(request, { timings, usage, error }) {
+export async function endRequest(request, { timings, usage, error, finish = null }) {
   clearInterval(slotTimer);
   slotTimer = null;
   const now = Date.now();
@@ -126,6 +126,7 @@ export async function endRequest(request, { timings, usage, error }) {
     draftAcceptance: timings?.draft_n ? timings.draft_n_accepted / timings.draft_n : null,
     seconds: (now - request.startedAt) / 1000,
     estimated: !timings,
+    finish,
     error: error ?? null,
   };
   snapshot.request = null;
