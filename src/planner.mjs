@@ -69,8 +69,28 @@ const STRATA_REF = { IQ2_XS: 63, IQ3_XXS: 49 };
 function strataTps(model, profile, hardware) {
   const bandwidth = Math.min(1.8, Math.max(0.5, profile.bandwidth / 672)) ** 0.6;
   const cache = (Math.min(hardware.vramGiB, 32) / 12) ** 0.5;
-  return STRATA_REF[model.strataModel] * bandwidth * cache;
+  // Experts relus depuis le SSD : 5060 Ti 16 Go + 32 Go de RAM, IQ2_XS, 50 tok/s mesurés pour 57 estimés.
+  const ssd = strataMemory(model, hardware.ramGiB, hardware.vramGiB) === 'ssd' ? 0.88 : 1;
+  return STRATA_REF[model.strataModel] * bandwidth * cache * ssd;
 }
+
+// Où vivent les experts Strata, avec les règles de son installeur (setup.py, mode faible RAM) :
+// 'ram' s'ils tiennent en RAM avec 10 Go à côté ; sinon la carte garde les plus utilisés (sa VRAM
+// moins ~5 Go) et le reste est copié en RAM ('resident') ou, à défaut, relu depuis le SSD ('ssd')
+// tant que RAM - 6 + part de la carte couvre les experts ; null en dessous.
+const LOW_RAM_HEADROOM_GIB = 10;
+function strataMemory(model, ramGiB, vramGiB) {
+  if (ramGiB >= model.arenaGB + LOW_RAM_HEADROOM_GIB) return 'ram';
+  const onGpu = Math.max(0, Math.min(model.arenaGB, vramGiB - 5));
+  if (ramGiB >= model.arenaGB - onGpu + LOW_RAM_HEADROOM_GIB) return 'resident';
+  // 2 Go de tolérance : chez Strata cette règle n'est qu'une indication du menu (l'installeur passe
+  // quand même en mode faible RAM), et une machine « 32 Go » n'en annonce souvent que 31.
+  return ramGiB - 6 + onGpu >= model.arenaGB - 2 ? 'ssd' : null;
+}
+
+// La RAM minimale (taille de barrette courante) pour qu'un modèle Strata tourne sur cette carte.
+const RAM_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256];
+const strataRamNeeded = (model, vramGiB) => RAM_SIZES.find((size) => strataMemory(model, size * 0.98, vramGiB)) ?? null;
 
 // Le verdict d'un modèle sur cette machine, en mots simples.
 export function assess(model, hardware) {
@@ -82,18 +102,24 @@ export function assess(model, hardware) {
   const reasons = [];
 
   if (hardware.diskFreeGiB !== null && hardware.diskFreeGiB < sizeGB * 1.05 + 5) reasons.push(`il faut ${Math.ceil(sizeGB + 5)} Go libres sur le disque (${hardware.diskFreeGiB} disponibles)`);
-  if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
-
   if (model.engine === 'strata') {
+    // Moins de RAM que conseillé : Strata passe en mode faible RAM (la carte garde les experts les
+    // plus utilisés, le reste est relu depuis le SSD) tant que RAM + carte couvrent les experts.
+    if (!strataMemory(model, hardware.ramGiB, hardware.vramGiB)) {
+      const need = strataRamNeeded(model, hardware.vramGiB);
+      reasons.push(`il faut ${need ?? model.needs.ramGiB} Go de RAM avec cette carte (${Math.round(hardware.ramGiB)} ici)`);
+    }
     if (gpu?.vendor !== 'nvidia') reasons.push('Strata demande une carte NVIDIA');
     else if (gpu.computeCapability < model.needs.nvidiaCc) reasons.push('Strata demande une RTX série 20 ou plus récente');
     if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
     if (reasons.length) return { fit: 'no', reasons };
     // Le KV de Strata vit en RAM au-delà de 64k (~13,7 Ko par token) : 131k tiennent dès que la RAM suit.
+    // En mode faible RAM, le KV au-delà de 32k va sur la carte : ~1,4 Go à 131k, sans conséquence.
     const context = 131072;
     return finalize({ fit: 'full', reasons, context, kv: 'int8', tps: strataTps(model, profile, hardware) });
   }
 
+  if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
   if (reasons.length) return { fit: 'no', reasons };
   const capacity = llamaCapacity(model, hardware, desktopGiB);
   if (backend.gpu && capacity.context >= 32768) {
@@ -201,11 +227,15 @@ function explainTarget(target, candidates, verdict, q, profiles) {
 function ramAdvice(hardware) {
   const gpu = hardware.primary;
   if (gpu?.vendor !== 'nvidia' || gpu.computeCapability < 7.5 || hardware.vramGiB < 11.5) return null;
-  const strata = MODELS.filter((m) => m.engine === 'strata' && hardware.ramGiB < m.needs.ramGiB && hardware.vramGiB >= m.needs.vramGiB)
-    .sort((a, b) => a.needs.ramGiB - b.needs.ramGiB)[0];
+  // Seulement un modèle qui ne tourne pas encore ici : sinon on conseillerait ce qui marche déjà.
+  const strata = MODELS.filter((m) => m.engine === 'strata' && hardware.vramGiB >= m.needs.vramGiB && !strataMemory(m, hardware.ramGiB, hardware.vramGiB))
+    .map((m) => ({ model: m, ram: strataRamNeeded(m, hardware.vramGiB) }))
+    .filter((x) => x.ram)
+    .sort((a, b) => a.ram - b.ram || a.model.arenaGB - b.model.arenaGB)[0];
   if (!strata) return null;
-  const tps = Math.round(strataTps(strata, gpuProfile(hardware), hardware));
-  return `Avec ${strata.needs.ramGiB} Go de RAM, cette carte ferait tourner ${strata.name} (${strata.variant}) via Strata, à environ ${tps} tok/s et 131k de contexte.`;
+  const { model, ram } = strata;
+  const tps = Math.round(strataTps(model, gpuProfile(hardware), { ...hardware, ramGiB: ram }));
+  return `Avec ${ram} Go de RAM, cette carte ferait tourner ${model.name} (${model.variant}) via Strata, à environ ${tps} tok/s et 131k de contexte.`;
 }
 
 function summarize(hardware, backend, first, upgrade, targetVerdict) {

@@ -35,8 +35,21 @@ test('24 Go : IQ3_S d’abord, Flash-Next Strata proposé si la RAM suit', () =>
   assert.equal(plan.firstModel, 'swift15-q27-iq3s-mtp');
   // Sans mesure, la note globale estimée préfère l'IQ2_XS (bien plus rapide, à peine moins juste).
   assert.equal(plan.upgradeModel, 'swift15-flashnext-iq2xs-strata');
-  assert.equal(makePlan(machine(24, 32)).upgradeModel, null);
-  assert.equal(makePlan(machine(24, 32)).targetModel, 'swift15-q27-iq3s-mtp');
+  // 32 Go suffisent sur une 3090 (mode faible RAM de Strata : la carte garde 19 Go d'experts) ; 16 non.
+  assert.equal(makePlan(machine(24, 32)).upgradeModel, 'swift15-flashnext-iq2xs-strata');
+  assert.equal(makePlan(machine(24, 16)).upgradeModel, null);
+  assert.equal(makePlan(machine(24, 16)).targetModel, 'swift15-q27-iq3s-mtp');
+});
+
+test('Strata en mode faible RAM : 5060 Ti 16 Go + 32 Go, experts en partie sur le SSD', () => {
+  const m = machine(16, 31.8);
+  const plan = makePlan({ ...m, vramGiB: 15.9, primary: { ...m.primary, name: 'NVIDIA GeForce RTX 5060 Ti', computeCapability: 12.0 } });
+  const iq2 = plan.verdicts.find((v) => v.id === 'swift15-flashnext-iq2xs-strata');
+  assert.equal(iq2.fit, 'full');
+  assert.ok(iq2.tps >= 45 && iq2.tps <= 55);  // 50 tok/s mesurés
+  assert.equal(plan.verdicts.find((v) => v.id === 'swift15-flashnext-iq3xxs-strata').fit, 'no');
+  assert.match(plan.advice, /48 Go.*IQ3_XXS/);
+  assert.equal(makePlan(machine(12, 32)).verdicts.find((v) => v.id === 'swift15-flashnext-iq2xs-strata').fit, 'no');
 });
 
 test('Strata exige NVIDIA', () => {
@@ -84,7 +97,7 @@ test('Radeon RDNA 3/4 : Vulkan et HIP mesurés', () => {
 });
 
 test('échelle commune : le score du banc remplace la note estimée', () => {
-  const m = machine(24, 32);
+  const m = machine(24, 16);
   assert.equal(makePlan(m).targetModel, 'swift15-q27-iq3s-mtp');
   // Un modèle testé plus bas que son estimation perd sa place.
   const plan = makePlan(m, { 'swift15-q27-iq3s-mtp': 60 });

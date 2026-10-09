@@ -123,6 +123,8 @@ export const MODELS = [
     tagline: 'Le grand MoE de 125B sur un PC de joueur, grâce à Strata. Plus rapide et plus fort que le 27B quand la RAM suit.',
     engine: 'strata',
     strataModel: 'IQ2_XS',
+    // Go d'experts (« arena_gb » de setup.py de Strata) : décide si le mode faible RAM suffit.
+    arenaGB: 35.5,
     repo: 'ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF',
     files: [
       { name: 'Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf', bytes: 39_790_000_000 },
@@ -146,6 +148,7 @@ export const MODELS = [
     tagline: 'Le plus fort du catalogue : MoE 125B en IQ3_XXS, plus de 100 tok/s sur une 3090.',
     engine: 'strata',
     strataModel: 'IQ3_XXS',
+    arenaGB: 42.9,
     repo: 'ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF',
     files: [
       { name: 'Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf', bytes: 39_790_000_000 },
