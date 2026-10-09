@@ -68,6 +68,12 @@ h1, h2, h3, h4 { margin: 0; letter-spacing: -0.025em; }
 
 /* ── Coque ──────────────────────────────────────────────────── */
 .content { min-width: 0; }
+.update-slot { max-width: 1180px; padding: 0 clamp(16px, 4vw, 48px); }
+.update-slot:empty { display: none; }
+.update-slot .tip { margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+.update-slot .tip > span { flex: 1 1 260px; }
+.update-slot .tip ul { margin: 6px 0 0; padding-left: 18px; }
+.update-slot .actions { display: flex; gap: 8px; }
 .shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; background: linear-gradient(to right, var(--bg-2) 232px, var(--bg) 232px); }
 body.onboarding .shell { background: var(--bg); }
 .side {

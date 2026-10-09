@@ -7,9 +7,12 @@ import { RATING_WEIGHTS, globalRating, ratingFrom } from './rating.mjs';
 // estime, pour chaque modèle, le contexte qui tient et le débit attendu à 100k, puis arbitre.
 // Les estimations sont calées sur les mesures du poste de référence ; le banc les remplace.
 
-export const OBJECTIVE = { minContext: 100 * 1024, maxContext: 150 * 1024, minTps: 40 };
+// floorContext : le plancher d'une installation. Chaque modèle reçoit le plus grand contexte que
+// la marge de la machine permet, jusqu'à 150k ; sous 32k on ne l'installe pas.
+export const OBJECTIVE = { minContext: 100 * 1024, maxContext: 150 * 1024, minTps: 40, floorContext: 32 * 1024 };
 
 const GiB = 1024 ** 3;
+const CRAWL_TPS = 15;
 const BACKEND_LABEL = { cuda13: 'CUDA 13', cuda12: 'CUDA 12.4', vulkan: 'Vulkan', hip: 'HIP (ROCm)', cpu: 'Processeur' };
 
 export function pickBackend(hardware) {
@@ -35,10 +38,26 @@ const COMPUTE_GIB = 1.3;
 const HEADROOM_GIB = 1.5;
 const round = (tokens) => Math.floor(tokens / 4096) * 4096;
 
+const weightsOf = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) / GiB;
+const vramBudgetOf = (hardware, desktopGiB) => hardware.vramGiB - desktopGiB - HEADROOM_GIB - COMPUTE_GIB;
+
 function llamaCapacity(model, hardware, desktopGiB) {
-  const weights = model.files.reduce((sum, file) => sum + file.bytes, 0) / GiB;
-  const budget = hardware.vramGiB - desktopGiB - HEADROOM_GIB - COMPUTE_GIB - weights;
-  if (budget <= 0) return { context: 0, kv: 'q8_0', weightsGiB: weights };
+  return contextIn(model, vramBudgetOf(hardware, desktopGiB) - weightsOf(model));
+}
+
+// Un modèle qui déborde de la carte : llama.cpp (--fit) laisse en RAM les couches qui ne tiennent
+// pas. Le contexte se calcule alors sur la carte et la RAM ensemble, moins ~8 Go pour le système.
+const RAM_RESERVE_GIB = 8;
+function sharedCapacity(model, hardware, desktopGiB) {
+  const vram = Math.max(0, vramBudgetOf(hardware, desktopGiB));
+  const capacity = contextIn(model, vram + hardware.ramGiB - RAM_RESERVE_GIB - weightsOf(model));
+  const kvGiB = (capacity.context * (model.kvBytesPerToken?.[capacity.kv] ?? 0)) / GiB;
+  return { ...capacity, gpuShare: Math.min(1, vram / (capacity.weightsGiB + kvGiB)) };
+}
+
+function contextIn(model, budget) {
+  const weights = weightsOf(model);
+  if (budget <= 0 || !model.kvBytesPerToken) return { context: 0, kv: 'q8_0', weightsGiB: weights };
   // q8_0 d'abord ; q4_0 seulement s'il faut ça pour atteindre 100k (le K quantifié coûte plus
   // en qualité que le V, et q4_0 est plus lent que q8_0 en profondeur sur le build officiel).
   for (const kv of ['q8_0', 'q4_0']) {
@@ -63,13 +82,24 @@ function llamaTps(model, profile, weightsGiB) {
   return base * (model.mtp ? 1.45 : 1) * 0.72;
 }
 
+// Partagé carte + RAM : chaque token lit sa part de poids sur la carte et le reste en RAM
+// (~60 Go/s en DDR4/DDR5 double canal) ; les temps s'additionnent.
+const RAM_BANDWIDTH = 60;
+function sharedTps(model, profile, weightsGiB, gpuShare) {
+  const onGpu = 1 / llamaTps(model, profile, weightsGiB);
+  const onRam = 1 / llamaTps(model, { ...profile, bandwidth: RAM_BANDWIDTH }, weightsGiB);
+  return 1 / (gpuShare * onGpu + (1 - gpuShare) * onRam);
+}
+
 // Strata : RTX 5070 (672 Go/s, 12 Go) à 128k : IQ2_XS 63, IQ3_XXS 49 tok/s (README Strata).
+// Coder IQ1_M : 55 tok/s à 4k sur la même carte, ramenés à 128k comme l'IQ2_XS (63 / 79) : 44.
 // Plus de VRAM = plus d'experts en cache. 3090 : 49 × 1,22 × 1,41 = 85 (mesuré 86 à 100k).
-const STRATA_REF = { IQ2_XS: 63, IQ3_XXS: 49 };
+const STRATA_REF = { IQ2_XS: 63, IQ3_XXS: 49, IQ1_M: 44 };
 function strataTps(model, profile, hardware) {
   const bandwidth = Math.min(1.8, Math.max(0.5, profile.bandwidth / 672)) ** 0.6;
   const cache = (Math.min(hardware.vramGiB, 32) / 12) ** 0.5;
-  // Experts relus depuis le SSD : 5060 Ti 16 Go + 32 Go de RAM, IQ2_XS, 50 tok/s mesurés pour 57 estimés.
+  // Experts relus depuis le SSD : pénalité estimée, pas encore mesurée (les 50 tok/s d'une 5060 Ti
+  // 16 Go + 32 Go, pris d'abord pour de l'IQ2_XS, étaient le Coder IQ1_M, qui tient en RAM).
   const ssd = strataMemory(model, hardware.ramGiB, hardware.vramGiB) === 'ssd' ? 0.88 : 1;
   return STRATA_REF[model.strataModel] * bandwidth * cache * ssd;
 }
@@ -122,12 +152,16 @@ export function assess(model, hardware) {
   if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
   if (reasons.length) return { fit: 'no', reasons };
   const capacity = llamaCapacity(model, hardware, desktopGiB);
-  if (backend.gpu && capacity.context >= 32768) {
+  if (backend.gpu && capacity.context >= OBJECTIVE.floorContext) {
     return finalize({ fit: 'full', reasons, context: capacity.context, kv: capacity.kv, tps: llamaTps(model, profile, capacity.weightsGiB) });
   }
-  // Un modèle qui déborde de la carte tourne quand même, partagé avec la RAM, mais lentement.
-  if (model.engine === 'prism' || hardware.ramGiB >= sizeGB + 8) {
-    return finalize({ fit: 'partial', reasons: ['une partie du modèle tournera sur le processeur, plus lentement'], context: 32768, kv: 'q8_0', tps: null });
+  // Un modèle qui déborde de la carte tourne quand même, partagé avec la RAM, mais plus lentement :
+  // autant de contexte que la carte et la RAM ensemble en laissent, 32k au moins.
+  const shared = sharedCapacity(model, hardware, desktopGiB);
+  if (shared.context >= OBJECTIVE.floorContext || model.engine === 'prism') {
+    const context = Math.max(OBJECTIVE.floorContext, shared.context);
+    const tps = backend.gpu && model.engine !== 'prism' ? sharedTps(model, profile, shared.weightsGiB, shared.gpuShare) : null;
+    return finalize({ fit: 'partial', reasons: ['une partie du modèle tournera sur le processeur, plus lentement'], context, kv: shared.kv, tps });
   }
   return { fit: 'no', reasons: [`il faut au moins ${Math.ceil(capacity.weightsGiB + 4)} Go de mémoire graphique`] };
 }
@@ -166,7 +200,10 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
     entry.ratingMeasured = Boolean(measured);
   }
   const r = (model) => verdict(model.id).rating;
-  const usable = MODELS.filter((model) => verdict(model.id).fit !== 'no');
+  // Un modèle partagé avec la RAM peut tenir un long contexte à 5 tok/s : on l'affiche, mais on
+  // ne le vise pas (Bonsai sur une petite carte vaut mieux qu'un 27B qui rampe).
+  const crawling = (model) => verdict(model.id).tps !== null && verdict(model.id).tps < CRAWL_TPS;
+  const usable = MODELS.filter((model) => verdict(model.id).fit !== 'no' && !crawling(model));
 
   // La cible : la meilleure note globale parmi ceux qui tiennent 100k et 40 tok/s ; sinon, parmi ceux qui tiennent
   // 100k, le plus rapide (sous 40 tok/s c'est la vitesse qui manque) ; sinon le plus grand contexte.

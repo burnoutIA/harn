@@ -909,11 +909,51 @@ function renderOnboard() {
     : '<b>Pendant ce temps.</b> Les téléchargements reprennent là où ils s’étaient arrêtés si vous fermez Harn. Une fois le modèle chargé, Harn essaie plusieurs réglages et garde le plus rapide pour votre carte.');
 }
 
+// ── Mise à jour de Harn ────────────────────────────────────
+// « Plus tard » vaut pour cette version-là : une version plus récente se signale de nouveau.
+const updateEl = document.getElementById('update');
+let updateSkipped = null;
+try { updateSkipped = localStorage.getItem('harn.update-skipped'); } catch {}
+let updating = false;
+function renderUpdate() {
+  const u = state.appUpdate;
+  let html = '';
+  if (u?.restarting || updating) html = `<div class="tip">${icon.info}<span><b>Harn redémarre avec la nouvelle version…</b> La page se recharge toute seule.</span></div>`;
+  else if (u?.applying) html = `<div class="tip">${icon.info}<span><b>Mise à jour en cours…</b> ${u.mode === 'zip' ? 'Téléchargement de la nouvelle version.' : 'Récupération depuis GitHub.'}</span></div>`;
+  else if (u && ['available', 'unknown'].includes(u.status) && u.remote && updateSkipped !== u.remote.sha) {
+    const count = u.behindBy ? `${u.behindBy} changement${u.behindBy > 1 ? 's' : ''}` : 'nouvelle version';
+    const list = u.changes?.length ? `<ul>${u.changes.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : `<br>${esc(u.remote.message)}`;
+    html = `<div class="tip">${icon.bolt}<span><b>Une nouvelle version de Harn est disponible</b> (${count}).${list}${u.error ? `<br><b>La mise à jour a échoué :</b> ${esc(u.error)}` : ''}</span>
+      <div class="actions"><button class="btn small primary" data-update="apply">Mettre à jour</button><button class="btn small ghost" data-update="skip">Plus tard</button></div></div>`;
+  }
+  if (updateEl.innerHTML !== html) updateEl.innerHTML = html;
+}
+updateEl.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-update]');
+  if (!button) return;
+  if (button.dataset.update === 'skip') {
+    updateSkipped = state.appUpdate?.remote?.sha ?? null;
+    try { localStorage.setItem('harn.update-skipped', updateSkipped); } catch {}
+    return renderUpdate();
+  }
+  button.disabled = true;
+  try {
+    updating = true;
+    renderUpdate();
+    await post('/api/update/apply');
+  } catch (error) {
+    updating = false;
+    toast(error.message);
+    renderUpdate();
+  }
+});
+
 // ── Rendu ──────────────────────────────────────────────────
 function render() {
   if (!state) return;
   if (state.setup.phase !== 'done' && view !== 'onboard') view = 'onboard';
   renderShell();
+  renderUpdate();
   renderApprovals();
   if (view === 'onboard') renderOnboard();
   else if (view === 'models') renderModels();
@@ -1051,6 +1091,8 @@ async function boot() {
     live = JSON.parse(event.data);
     if (view === 'home') { renderGauge(); renderActivity(); }
   });
+  // Après une mise à jour, le serveur relancé sert le nouveau code : on recharge la page.
+  source.onopen = () => { if (updating) location.reload(); };
   source.onerror = () => { statusEl.innerHTML = '<span class="dot error"></span><span><b>Connexion perdue</b>Harn est-il fermé ?</span>'; };
 }
 setInterval(() => { if (state?.setup.phase === 'running') render(); }, 1000);

@@ -19,6 +19,7 @@ import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
+import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
 
 const ORIGIN = `http://127.0.0.1:${PORTS.app}`;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -213,6 +214,14 @@ async function api(req, res, url) {
     return json(res, 404, { error: 'inconnu' });
   }
 
+  // Mise à jour de Harn : seulement depuis sa fenêtre (elle remplace le code puis relance).
+  if (parts[1] === 'update') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    if (parts[2] === 'check') return json(res, 200, await checkForUpdate());
+    if (parts[2] === 'apply') {
+      try { await applyUpdate(activity()); return json(res, 200, { ok: true }); } catch (error) { return json(res, 409, { error: error.message }); }
+    }
+  }
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());
   if (parts[1] === 'checks' && parts[2] && parts[3] === 'apply') {
@@ -372,6 +381,7 @@ async function main() {
     console.log(`Harn · interface ${ORIGIN} · API OpenAI ${ORIGIN}/v1`);
     openWindow();
     await reapOrphans();
+    watchForUpdates();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
     if (state.lan) {

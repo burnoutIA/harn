@@ -46,7 +46,7 @@ async function latestRelease(source) {
 // complet obligatoire : le tar GNU de Git, souvent premier dans le PATH, lit « C: » comme un
 // hôte distant et ne sait pas ouvrir un zip.
 const TAR = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
-async function extract(zip, target) {
+export async function extract(zip, target) {
   await mkdir(target, { recursive: true });
   await run(TAR, ['-xf', zip, '-C', target], { windowsHide: true, timeout: 300_000 });
 }
@@ -168,7 +168,7 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
     await rename(unpacked, repoDir);
   }
   const args = [
-    '--setup', '--family', 'swift', '--model', model.strataModel, '--context', String(contextSize),
+    '--setup', '--family', model.strataFamily ?? 'swift', '--model', model.strataModel, '--context', String(contextSize),
     '--vision', 'cpu', '--data-dir', path.join(DIRS.models, 'strata-data'), '--yes', '--no-start', '--no-browser',
     // Fichiers déjà présents sur la machine : Strata les utilise au lieu de retélécharger 70 Go.
     ...(ggufDir ? ['--gguf-dir', ggufDir] : []),
@@ -184,7 +184,7 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
     child.stderr.on('data', (chunk) => onLog(String(chunk)));
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`L’installeur de Strata s’est arrêté (code ${code})`))));
   });
-  const config = (await readdir(repoDir)).find((name) => name.startsWith('strata-swift') && name.endsWith('.json') && name.toLowerCase().includes(model.strataModel.toLowerCase()));
+  const config = (await readdir(repoDir)).find((name) => name.startsWith(`strata-${model.strataFamily ?? 'swift'}`) && name.endsWith('.json') && name.toLowerCase().includes(model.strataModel.toLowerCase()));
   const info = { kind: 'strata', commit: STRATA_COMMIT, dir: repoDir, config, python: path.join(repoDir, '.venv', 'Scripts', 'python.exe'), installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
   return info;

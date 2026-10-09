@@ -75,7 +75,11 @@ const runtimeKind = (model) => (model.engine === 'prism' ? 'prism' : 'llama');
 // (100k-150k), le reste des a priori de la carte.
 function startingTuning(model, hardware) {
   const verdict = assess(model, hardware);
-  return defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
+  const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
+  // Partagé avec la RAM : --fit remplit la carte jusqu'à sa cible ; on la met au-dessus de la marge
+  // exigée, sinon le contrôle de marge raccourcirait le contexte sans rien gagner.
+  if (verdict.fit === 'partial') tuning.fitTargetMiB = HEADROOM_MIN_MIB + 256;
+  return tuning;
 }
 
 export function firstSetupAttempts(plan, hardware) {
@@ -296,11 +300,11 @@ const freeVram = async () => (getState().hardware?.primary?.vendor === 'nvidia' 
 // Charger, puis vérifier la marge VRAM. C'est le levier ×21 du poste de référence : sous
 // ~1,5 Gio libre, le préfill retombe sur la mémoire hôte sans la moindre erreur. Pour retrouver
 // la marge on cède dans l'ordre de l'objectif : contexte par paliers jusqu'à 100k, puis KV q4_0,
-// puis seulement sous 100k.
+// puis seulement sous 100k, par paliers jusqu'au plancher de 32k.
 function smaller(tuning) {
   if (tuning.context - 16384 >= OBJECTIVE.minContext) return { ...tuning, context: tuning.context - 16384 };
   if (tuning.kv !== 'q4_0') return { ...tuning, kv: 'q4_0' };
-  return { ...tuning, context: Math.max(16384, Math.floor(tuning.context / 2 / 4096) * 4096) };
+  return { ...tuning, context: Math.max(OBJECTIVE.floorContext, tuning.context - 16384) };
 }
 
 // Chaque chargement prend un numéro : si un autre modèle est demandé entre-temps, celui-ci
@@ -318,12 +322,12 @@ async function loadWithHeadroom(model, tuning) {
       active = await startEngine(recipeFor(model, current));
     } catch (error) {
       if (ticket !== loadTicket) throw superseded();
-      if (current.context <= 16384 || model.engine === 'strata') throw error;
+      if (current.context <= OBJECTIVE.floorContext || model.engine === 'strata') throw error;
       current = smaller(current);
       continue;
     }
     const headroomMiB = await freeVram();
-    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || current.context <= 16384 || model.engine === 'strata') {
+    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || current.context <= OBJECTIVE.floorContext || model.engine === 'strata') {
       return { active, tuning: current, headroomMiB };
     }
     current = smaller(current);
