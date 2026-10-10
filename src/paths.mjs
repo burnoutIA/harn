@@ -17,6 +17,7 @@ export const DIRS = {
   logs: fromHome('data', 'logs'),
   downloads: fromHome('runtime', 'downloads'),
   piAgent: fromHome('data', 'pi-agent'),
+  agents: fromHome('data', 'agents'),
   workspace: fromHome('workspace'),
   public: fromRoot('public'),
 };

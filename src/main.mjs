@@ -20,6 +20,7 @@ import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
+import { createAgent, deleteAgent, launchAgent, listAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -198,6 +199,7 @@ async function api(req, res, url) {
     return json(res, 200, { modelId: active.modelId, label: active.label, status: active.status, command: active.command, args: active.args, cwd: active.cwd ?? null, config, configName: config ? configArg : null });
   }
   if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
+  if (req.method === 'GET' && url.pathname === '/api/agents') return json(res, 200, { agents: await listAgents() });
   if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
     const entry = approvalOf(parts[2]);
     return entry ? json(res, 200, entry) : json(res, 404, { error: 'Demande inconnue ou expirée (Harn a-t-il redémarré ?)' });
@@ -220,6 +222,22 @@ async function api(req, res, url) {
         return json(res, 200, accessReport(await listKeys()));
       }
       if (parts[1] === 'approvals' && parts[2] && ['accept', 'refuse'].includes(parts[3])) return json(res, 200, decideApproval(parts[2], parts[3] === 'accept'));
+    } catch (error) {
+      return json(res, error.status ?? 500, { error: error.message });
+    }
+    return json(res, 404, { error: 'inconnu' });
+  }
+
+  // Agents : créés, réglés et lancés depuis la fenêtre de Harn seulement (un agent ne s'accorde
+  // pas lui-même le shell).
+  if (parts[1] === 'agents') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    const body = await new Response(req).json().catch(() => ({}));
+    try {
+      if (!parts[2]) return json(res, 200, await createAgent(body));
+      if (!parts[3]) return json(res, 200, await updateAgent(parts[2], body));
+      if (parts[3] === 'launch') return json(res, 200, await launchAgent(parts[2]));
+      if (parts[3] === 'delete') return json(res, 200, await deleteAgent(parts[2]));
     } catch (error) {
       return json(res, error.status ?? 500, { error: error.message });
     }

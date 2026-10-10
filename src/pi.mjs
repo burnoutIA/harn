@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { internalKey } from './api-keys.mjs';
@@ -43,8 +43,19 @@ async function readJson(file) {
 // (output-budget.mjs) d'après sa famille et son vrai usage. pi ramène de lui-même max_tokens à la
 // place qui reste ; il compacte quand il en reste moins que la réserve du modèle.
 export async function configurePi(preferredModel = null) {
+  const configured = await configurePiDir(DIRS.piAgent, { preferredModel });
+  await ensureAppendSystem();
+  return configured;
+}
+
+// Le pi de test reçoit tout. Un agent (agents.mjs) a son propre dossier et choisit : shell,
+// outils de Harn, recherche web.
+const EVERYTHING = { shell: true, harnTools: true, web: true };
+const NO_SHELL = ['-bash', '-powershell'];
+
+export async function configurePiDir(dir, { preferredModel = null, options = EVERYTHING } = {}) {
   const state = getState();
-  await mkdir(DIRS.piAgent, { recursive: true });
+  await mkdir(dir, { recursive: true });
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelById(id));
   const usage = await outputUsage();
   const budgets = {};
@@ -62,7 +73,7 @@ export async function configurePi(preferredModel = null) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
   });
-  const modelsFile = path.join(DIRS.piAgent, 'models.json');
+  const modelsFile = path.join(dir, 'models.json');
   const existing = await readJson(modelsFile);
   existing.providers = {
     ...(existing.providers ?? {}),
@@ -70,7 +81,7 @@ export async function configurePi(preferredModel = null) {
   };
   await writeFile(modelsFile, JSON.stringify(existing, null, 2));
 
-  const settingsFile = path.join(DIRS.piAgent, 'settings.json');
+  const settingsFile = path.join(dir, 'settings.json');
   const settings = await readJson(settingsFile);
   // Un modèle demandé explicitement (lancement de pi), sinon le modèle par défaut (cœur), sinon le chargé.
   const favorite = installed.includes(state.favorite) ? state.favorite : null;
@@ -78,13 +89,18 @@ export async function configurePi(preferredModel = null) {
   Object.assign(settings, { defaultProvider: 'harn', defaultModel, defaultThinkingLevel: settings.defaultThinkingLevel ?? 'medium' });
   settings.compaction = { ...(settings.compaction ?? {}), modelOverrides: { ...(settings.compaction?.modelOverrides ?? {}) } };
   for (const model of models) settings.compaction.modelOverrides[`harn/${model.id}`] = { reserveTokens: budgets[model.id].reserve };
+  // Sans shell : les deux outils de commande sont retirés de la sélection de départ. La case
+  // recochée, on ne retire que ce que Harn avait posé.
+  if (!options.shell) settings.defaultTools = NO_SHELL;
+  else if (JSON.stringify(settings.defaultTools) === JSON.stringify(NO_SHELL)) delete settings.defaultTools;
   await writeFile(settingsFile, JSON.stringify(settings, null, 2));
-  // Consignes globales de pi : la référence des leviers et le carnet de cette machine.
-  if (state.hardware) await writeFile(path.join(DIRS.piAgent, 'AGENTS.md'), agentInstructions(state.hardware));
-  await ensureAppendSystem();
-  await installSkills();
-  await installExtensions();
-  await configureMcp();
+  // Consignes globales de pi : la référence des leviers et le carnet de cette machine. Elles et
+  // les skills ne servent qu'à qui a les outils de Harn.
+  if (!options.harnTools) await rm(path.join(dir, 'AGENTS.md'), { force: true });
+  else if (state.hardware) await writeFile(path.join(dir, 'AGENTS.md'), agentInstructions(state.hardware));
+  await installSkills(dir, options.harnTools);
+  await installExtensions(dir);
+  await configureMcp(dir, options);
   return { modelsFile, settingsFile, defaultModel };
 }
 
@@ -96,14 +112,17 @@ export const KETCH_ENV = {
   KETCH_TAGS_PATH: path.join(DIRS.data, 'ketch', 'tags.db'),
 };
 
-async function configureMcp() {
+async function configureMcp(dir, { harnTools, web }) {
   const ketch = getState().ketch;
-  const file = path.join(DIRS.piAgent, 'mcp.json');
+  const file = path.join(dir, 'mcp.json');
   const config = await readJson(file);
   config.mcpServers = { ...(config.mcpServers ?? {}) };
   config.autoEnableCodemode ??= false;
+  // Les deux serveurs appartiennent à Harn : retirés, puis reposés selon les options.
+  delete config.mcpServers.harn;
+  delete config.mcpServers.ketch;
   // Les outils de Harn lui-même : analyser, installer, mesurer et tester un modèle.
-  config.mcpServers.harn = {
+  if (harnTools) config.mcpServers.harn = {
     command: process.execPath,
     args: [fromRoot('src', 'harn-mcp.mjs')],
     env: { HARN_PORT: String(PORTS.app) },
@@ -111,7 +130,7 @@ async function configureMcp() {
     exposure: 'direct',
     description: 'Harn, le serveur d’IA locale de cette machine : analyser un modèle Hugging Face, l’installer, le mesurer et tester son intelligence.',
   };
-  if (ketch?.path) {
+  if (web && ketch?.path) {
     config.mcpServers.ketch = {
       command: ketch.path,
       args: ['mcp', 'serve'],
@@ -181,11 +200,12 @@ export async function openInEditor(file) {
 }
 
 // Les skills fournis par Harn (réécrits à chaque configuration : ils appartiennent à Harn).
-async function installSkills() {
+async function installSkills(piDir, wanted) {
   const source = fromRoot('src', 'skills');
   for (const name of await readdir(source).catch(() => [])) {
     if (!name.endsWith('.md')) continue;
-    const dir = path.join(DIRS.piAgent, 'skills', name.replace(/\.md$/, ''));
+    const dir = path.join(piDir, 'skills', name.replace(/\.md$/, ''));
+    if (!wanted) { await rm(dir, { recursive: true, force: true }); continue; }
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, 'SKILL.md'), await readFile(path.join(source, name), 'utf8'));
   }
@@ -194,10 +214,10 @@ async function installSkills() {
 // Les extensions pi fournies par Harn (src/pi-extensions, un dossier par extension), recopiées
 // à chaque configuration comme les skills. ctx-optimizer vient du projet ctx_optimizer/pi : on
 // l'y fait évoluer, puis on recopie ses fichiers ici.
-async function installExtensions() {
+async function installExtensions(piDir) {
   const source = fromRoot('src', 'pi-extensions');
   for (const entry of await readdir(source, { withFileTypes: true }).catch(() => [])) {
-    if (entry.isDirectory()) await cp(path.join(source, entry.name), path.join(DIRS.piAgent, 'extensions', entry.name), { recursive: true, force: true });
+    if (entry.isDirectory()) await cp(path.join(source, entry.name), path.join(piDir, 'extensions', entry.name), { recursive: true, force: true });
   }
 }
 
@@ -205,22 +225,36 @@ async function hasWindowsTerminal() {
   return run('where', ['wt.exe'], { windowsHide: true }).then(() => true).catch(() => false);
 }
 
-// pi est une application de terminal : on lui ouvre sa propre fenêtre, déjà branchée.
-export async function launchPi(modelId = null, prompt = null) {
-  const { defaultModel } = await configurePi(modelId);
-  await mkdir(DIRS.workspace, { recursive: true });
+// pi est une application de terminal : on lui ouvre sa propre fenêtre, déjà branchée sur son
+// dossier (piDir). session : sous Linux avec tmux, pi tourne dans une session de ce nom, qui
+// survit à la fenêtre et se passe d'écran ; la relancer s'y rattache au lieu d'ouvrir un second pi.
+export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null }) {
+  await mkdir(cwd, { recursive: true });
   const cli = await piCli();
-  const env = { ...process.env, PI_CODING_AGENT_DIR: DIRS.piAgent };
-  const title = 'pi · Harn';
+  const env = { ...process.env, PI_CODING_AGENT_DIR: piDir };
   if (process.platform === 'win32') {
     if (await hasWindowsTerminal()) {
-      spawn('wt.exe', ['-w', 'new', '--title', title, '-d', DIRS.workspace, process.execPath, cli, ...(prompt ? [prompt.replaceAll(';', ',')] : [])], { env, detached: true, stdio: 'ignore' }).unref();
+      spawn('wt.exe', ['-w', 'new', '--title', title, '-d', cwd, process.execPath, cli, ...(prompt ? [prompt.replaceAll(';', ',')] : [])], { env, detached: true, stdio: 'ignore' }).unref();
     } else {
-      spawn('cmd.exe', ['/c', 'start', `"${title}"`, '/D', DIRS.workspace, `"${process.execPath}"`, `"${cli}"`, ...(prompt ? [`"${prompt.replace(/["&|<>^%]/g, ' ')}"`] : [])], { env, detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+      spawn('cmd.exe', ['/c', 'start', `"${title}"`, '/D', cwd, `"${process.execPath}"`, `"${cli}"`, ...(prompt ? [`"${prompt.replace(/["&|<>^%]/g, ' ')}"`] : [])], { env, detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
     }
-  } else {
-    spawn('x-terminal-emulator', ['-e', process.execPath, cli], { env, cwd: DIRS.workspace, detached: true, stdio: 'ignore' }).unref();
+    return { resumed: false };
   }
+  if (session && await run('tmux', ['-V']).then(() => true).catch(() => false)) {
+    const target = `=${session}`;
+    const resumed = await run('tmux', ['has-session', '-t', target]).then(() => true).catch(() => false);
+    // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
+    if (!resumed) await run('tmux', ['new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, process.execPath, cli]);
+    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) spawn('x-terminal-emulator', ['-e', 'tmux', 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
+    return { resumed, session };
+  }
+  spawn('x-terminal-emulator', ['-e', process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();
+  return { resumed: false };
+}
+
+export async function launchPi(modelId = null, prompt = null) {
+  const { defaultModel } = await configurePi(modelId);
+  await openPiTerminal({ title: 'pi · Harn', cwd: DIRS.workspace, piDir: DIRS.piAgent, prompt });
   update((s) => { s.pi = { ...s.pi, lastLaunch: new Date().toISOString(), lastModel: defaultModel }; });
   return { model: defaultModel, workspace: DIRS.workspace };
 }

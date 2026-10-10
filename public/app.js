@@ -993,13 +993,6 @@ function renderMachine() {
   const ketch = state.ketch;
   paint('pi-agent', `<div class="label">pi agent</div>
     <div class="pi-block">
-      <h3>Instructions</h3>
-      <p>Ajoutées au prompt système de pi à chaque démarrage (fichier <code>APPEND_SYSTEM.md</code>).</p>
-      <div class="pi-preview doc">${piSystem.text === null ? '<p class="empty">Lecture…</p>' : markdown(piSystem.text.split('\n').slice(0, 14).join('\n'))}</div>
-      <button class="btn" data-action="edit-system">Modifier les instructions</button>
-      <p class="hint">Les changements comptent au prochain lancement de pi, ou après la commande <code>/reload</code>.</p>
-    </div>
-    <div class="pi-block">
       <h3>Recherche web</h3>
       <p>${ketch ? `ketch ${esc(ketch.version)} · outils <code>search</code>, <code>scrape</code>, <code>docs</code>, <code>code</code>, sans clé API.` : 'Installation de ketch au prochain démarrage de Harn…'}</p>
       ${ketch ? `<button class="btn" data-action="ketch-test">Tester la recherche</button>` : ''}
@@ -1085,9 +1078,76 @@ async function loadSystem() {
   const next = await fetch('/api/pi/system').then((r) => r.json()).catch(() => null);
   if (!next || next.text === piSystem.text) return;
   piSystem = next;
-  if (view === 'machine') renderMachine();
+  if (view === 'agents') renderAgents();
 }
-window.addEventListener('focus', () => { if (view === 'machine') { loadSystem(); loadAccess(); } });
+window.addEventListener('focus', () => { if (view === 'machine') loadAccess(); if (view === 'agents') loadSystem(); });
+
+// ── Agents ─────────────────────────────────────────────────
+// Un agent par personne : ses consignes, son modèle, ses outils, son dossier de travail. La liste
+// vient de /api/agents (pas de l'état diffusé : elle portera des secrets).
+let agents = null;
+const AGENT_OPTIONS = [
+  ['shell', 'Shell', 'Exécuter des commandes sur cette machine.'],
+  ['harnTools', 'Outils de Harn', 'Installer, mesurer et tester des modèles, lire le carnet de la machine.'],
+  ['web', 'Recherche web', 'Chercher et lire des pages web avec ketch.'],
+];
+
+function agentCard(agent) {
+  const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelOf(id));
+  const models = [
+    '<option value="">Modèle par défaut de Harn</option>',
+    ...(agent.modelInstalled ? [] : [`<option value="${esc(agent.model)}" selected>${esc(agent.model)} (désinstallé)</option>`]),
+    ...installed.map((id) => `<option value="${esc(id)}" ${id === agent.model ? 'selected' : ''}>${esc(nameOf(id))} · ${esc(modelOf(id).variant)}</option>`),
+  ].join('');
+  return `<section class="card agent"><form data-form="agent-edit" data-id="${esc(agent.id)}">
+      <div class="head"><h3>${esc(agent.name)}</h3>
+        <div class="acts"><button class="btn small ghost" type="button" data-action="agent-delete" data-id="${esc(agent.id)}" title="Supprimer cet agent" aria-label="Supprimer cet agent">${icon.trash}</button><button class="btn small primary" type="button" data-action="agent-launch" data-id="${esc(agent.id)}">${icon.terminal} Ouvrir</button></div></div>
+      <label class="field"><span>Nom</span><input type="text" name="name" maxlength="60" value="${esc(agent.name)}" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
+      <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
+      <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
+      <p class="hint">Dossier de travail : <code>${esc(agent.workspace)}</code></p>
+      <div class="foot"><button class="btn small" type="submit">Enregistrer</button><p class="hint">Pris en compte au prochain lancement de l’agent.</p></div>
+    </form></section>`;
+}
+
+function renderAgents() {
+  mount('agents', `<div class="view">
+    <div class="view-head"><div><h1>Agents</h1><p>Un agent par personne : ses consignes, son modèle, ses outils et son dossier de travail. Rien n’est partagé entre eux.</p></div></div>
+    <form class="add-form agent-new" data-form="agent-new"><input id="agent-name" type="text" maxlength="60" placeholder="Prénom de la personne" autocomplete="off" spellcheck="false" aria-label="Nom du nouvel agent"><button class="btn small" type="submit">Créer un agent</button></form>
+    <div class="agents" id="agents-list"></div>
+    <section class="card" id="pi-test"></section>
+  </div>`);
+  paint('agents-list', agents === null ? '<p class="empty">Lecture…</p>' : agents.length ? agents.map(agentCard).join('') : '<p class="empty">Aucun agent pour l’instant.</p>');
+  paint('pi-test', `<div class="label">pi de test</div>
+    <div class="pi-block">
+      <h3>Instructions</h3>
+      <p>Le pi ouvert par « Tester » sur un modèle : tous les outils, son propre dossier de travail, rien en commun avec les agents. Ses instructions sont ajoutées à son prompt système à chaque démarrage (fichier <code>APPEND_SYSTEM.md</code>).</p>
+      <div class="pi-preview doc">${piSystem.text === null ? '<p class="empty">Lecture…</p>' : markdown(piSystem.text.split('\n').slice(0, 14).join('\n'))}</div>
+      <button class="btn" data-action="edit-system">Modifier les instructions</button>
+      <p class="hint">Les changements comptent au prochain lancement de pi, ou après la commande <code>/reload</code>.</p>
+    </div>`);
+}
+
+async function loadAgents() {
+  const next = await fetch('/api/agents').then((r) => r.json()).catch(() => null);
+  if (!next?.agents) return;
+  agents = next.agents;
+  if (view === 'agents') renderAgents();
+}
+
+async function saveAgent(form) {
+  const data = new FormData(form);
+  const saved = await post(`/api/agents/${form.dataset.id}`, {
+    name: data.get('name'),
+    model: data.get('model') || null,
+    prompt: data.get('prompt'),
+    options: Object.fromEntries(AGENT_OPTIONS.map(([key]) => [key, data.has(key)])),
+  });
+  agents = agents.map((a) => (a.id === saved.id ? saved : a));
+  renderAgents();
+  return saved;
+}
 
 async function loadDoc() {
   const key = state.machineDoc?.analysedAt ?? state.profiles[state.active?.modelId]?.bench?.at ?? 'x';
@@ -1196,7 +1256,8 @@ function render() {
   if (view === 'onboard') renderOnboard();
   else if (view === 'models') renderModels();
   else if (view === 'tuning') renderTuning();
-  else if (view === 'machine') { renderMachine(); loadDoc(); loadSystem(); if (!access) loadAccess(); }
+  else if (view === 'machine') { renderMachine(); loadDoc(); if (!access) loadAccess(); }
+  else if (view === 'agents') { renderAgents(); loadSystem(); if (!agents) loadAgents(); }
   else renderHome();
 }
 
@@ -1204,6 +1265,7 @@ function go(next) {
   view = next;
   try { sessionStorage.setItem('harn.view', next); } catch {}
   if (next === 'machine') loadAccess();
+  if (next === 'agents') loadAgents();
   render();
   window.scrollTo({ top: 0 });
 }
@@ -1217,6 +1279,26 @@ app.addEventListener('submit', async (event) => {
     try {
       newKey = await post('/api/access/keys', { label: keyForm.querySelector('#key-label').value });
       await loadAccess();
+    } catch (error) { toast(error.message); } finally { button.disabled = false; }
+    return;
+  }
+  const agentForm = event.target.closest('[data-form="agent-new"], [data-form="agent-edit"]');
+  if (agentForm) {
+    event.preventDefault();
+    const button = agentForm.querySelector('[type="submit"]');
+    button.disabled = true;
+    try {
+      if (agentForm.dataset.form === 'agent-edit') {
+        await saveAgent(agentForm);
+        toast('Agent enregistré');
+      } else {
+        const input = agentForm.querySelector('#agent-name');
+        const created = await post('/api/agents', { name: input.value });
+        input.value = '';
+        agents = [...(agents ?? []), created];
+        renderAgents();
+        toast(`Agent « ${created.name} » créé`);
+      }
     } catch (error) { toast(error.message); } finally { button.disabled = false; }
     return;
   }
@@ -1326,6 +1408,20 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       access = await post('/api/access/lan', { enabled: Boolean(button.dataset.on) });
       renderMachine();
       toast(access.lan.enabled ? `API ouverte au réseau local (port ${access.lan.port})` : 'API fermée au réseau local');
+    }
+    if (action === 'agent-launch') {
+      // Lancé avec ce qui est à l'écran : la fiche est enregistrée d'abord.
+      const saved = await saveAgent(button.closest('form'));
+      const r = await post(`/api/agents/${id}/launch`);
+      toast(r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
+    }
+    if (action === 'agent-delete') {
+      const agent = agents.find((a) => a.id === id);
+      if (!confirm(`Supprimer l’agent « ${agent.name} » ?\n\nSes consignes, ses conversations et tout son dossier de travail seront effacés.`)) return;
+      await post(`/api/agents/${id}/delete`);
+      agents = agents.filter((a) => a.id !== id);
+      renderAgents();
+      toast(`Agent « ${agent.name} » supprimé`);
     }
     if (action === 'edit-system') { const r = await post('/api/pi/system/open'); toast(`Instructions ouvertes dans le ${r.editor}`); }
     if (action === 'ketch-test') {
