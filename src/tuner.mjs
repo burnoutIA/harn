@@ -40,6 +40,16 @@ export const WORKLOADS = {
     label: 'Texte',
     messages: [{ role: 'user', content: 'Explique en détail, pour un public non technique, comment une IA locale génère du texte mot après mot, ce qui la rend rapide ou lente sur un ordinateur, et comment choisir un modèle. Fais un texte long et structuré.' }],
   },
+  // ~32k tokens lus puis une réponse courte : la charge d'un agent dont la conversation grossit.
+  // C'est là que certains modèles s'effondrent (Xing4 : 99 tok/s à vide, 48 à 55k).
+  depth: {
+    label: 'Profondeur',
+    maxTokens: 128,
+    messages: [
+      { role: 'system', content: 'Tu es un développeur TypeScript senior. Réponds uniquement avec du code.' },
+      { role: 'user', content: `${codeBlocks(208)}\n\n${ASK_CODE}` },
+    ],
+  },
   // ~20k tokens de contexte : là où la pente de l'attention sur le KV se voit.
   deep: {
     label: 'Contexte long',
@@ -80,9 +90,9 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
     // L'état P ne compte que si la carte travaille vraiment (au repos elle est en P8, c'est normal).
     const watcher = setInterval(async () => { const gpu = await sampleGpu(); if (gpu && gpu.util >= 50) pstates.add(gpu.pstate); }, 1500);
     const started = Date.now();
-    const answer = await complete(endpoint, modelId, workload.messages, maxTokens).finally(() => clearInterval(watcher));
+    const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens).finally(() => clearInterval(watcher));
     const t = answer.timings ?? {};
-    const generated = t.predicted_n ?? answer.usage?.completion_tokens ?? maxTokens;
+    const generated = t.predicted_n ?? answer.usage?.completion_tokens ?? workload.maxTokens ?? maxTokens;
     results.push({
       workload: id,
       tps: t.predicted_per_second ?? generated / ((Date.now() - started) / 1000),

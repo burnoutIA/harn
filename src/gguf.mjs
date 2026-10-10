@@ -100,7 +100,9 @@ export function profileFromMetadata({ meta }) {
     const attnLayers = interval ? Math.ceil(layers / interval) : layers;
     kvSum = attnLayers * (kvHeads ?? 8);
   }
-  const f16PerToken = kvSum * (keyLength + valueLength) * 2;
+  // MLA (DeepSeek, Kimi, Xing4…) : une seule tête latente par couche, K = latent + RoPE, et V lu
+  // dans K. Compter K + V doublerait le cache et ferait croire que f16 ne tient pas.
+  const f16PerToken = get('attention.kv_lora_rank') ? kvSum * keyLength * 2 : kvSum * (keyLength + valueLength) * 2;
   const experts = get('expert_count') ?? 0;
   const used = get('expert_used_count') ?? 0;
   return {

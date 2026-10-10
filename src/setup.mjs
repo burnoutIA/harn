@@ -435,7 +435,11 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   const results = [];
   let index = 0;
 
-  async function trial(stage, tuning, workloads = ['code', 'prose']) {
+  // Les charges de la comparaison en cours : une fois la profondeur entrée dans la comparaison
+  // (étape KV), chaque essai suivant la mesure aussi, sinon un moteur mesuré sans elle gagnerait
+  // d'office (sa moyenne ne compterait pas la partie la plus lente).
+  let compared = ['code', 'prose'];
+  async function trial(stage, tuning, workloads = compared) {
     index += 1;
     const label = describe(tuning);
     const say = (what) => onProgress(`${stage} · ${label}${what ? ` · ${what}` : ''}`);
@@ -493,12 +497,18 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
 
   // KV f16 : pente de profondeur plus faible sur le build officiel, mais KV deux fois plus gros.
   // Il ne se juge qu'avec la charge longue, mesurée aussi sur le réglage actuel.
-  const f16ExtraMiB = best.tuning.context * (model.kvBytesPerToken?.f16 - model.kvBytesPerToken?.[best.tuning.kv]) / 2 ** 20;
-  if (gpu && best.tuning.kv !== 'f16' && best.tuning.context >= 32768 && best.headroomMiB !== null && best.headroomMiB - f16ExtraMiB >= HEADROOM_MIN_MIB) {
-    const reference = await trial('KV en profondeur', best.tuning, ['code', 'prose', 'deep']);
-    const f16 = await trial('KV en profondeur', { ...best.tuning, kv: 'f16' }, ['code', 'prose', 'deep']);
+  // Mesuré en profondeur (~32k), à un contexte qui laisse f16 tenir avec la marge (réduit s'il le
+  // faut, jamais sous l'objectif de 100k) : Xing4 (MLA) y gagne 30 % de génération à 49k.
+  const perToken = model.kvBytesPerToken;
+  const f16Context = gpu && perToken?.f16 && perToken[best.tuning.kv] && best.headroomMiB !== null
+    ? Math.min(best.tuning.context, Math.floor((best.headroomMiB - HEADROOM_MIN_MIB + best.tuning.context * perToken[best.tuning.kv] / 2 ** 20) / (perToken.f16 / 2 ** 20) / 4096) * 4096)
+    : 0;
+  if (best.tuning.kv !== 'f16' && !best.tuning.kvV && f16Context >= OBJECTIVE.minContext) {
+    const reference = await trial('KV en profondeur', best.tuning, ['code', 'prose', 'depth']);
+    const f16 = await trial('KV en profondeur', { ...best.tuning, kv: 'f16', context: f16Context }, ['code', 'prose', 'depth']);
     if (f16.ok && !f16.error && !reference.error && f16.tps > reference.tps) best = f16;
     else if (!reference.error) best = reference;
+    if (!best.error) compared = ['code', 'prose', 'depth'];
   }
 
   if (gpu && profile.flashAttentionUncertain) best = better(await trial('Flash Attention', { ...best.tuning, fa: 'off' }), best);
@@ -534,6 +544,12 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
 
   async function finish(model, results, best) {
     if (!sameTuning(loadedTuning, best.tuning)) await startEngine(recipeFor(model, best.tuning));
+    // La vitesse en profondeur du réglage retenu (reprise si l'étape KV l'a déjà mesurée).
+    let depth = best.workloads?.find((w) => w.workload === 'depth') ?? null;
+    if (!depth && model.engine !== 'strata' && best.tuning.backend !== 'cpu' && best.tuning.context >= 40960) {
+      onProgress('Vitesse en profondeur (~32k tokens)');
+      depth = (await measure(getState().active.endpoint, modelId, { workloads: ['depth'] }).catch(() => null))?.workloads[0] ?? null;
+    }
     update((s) => {
       const entry = (s.profiles[model.id] ??= {});
       entry.tuning = best.tuning;
@@ -543,6 +559,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         arch: profile.archLabel,
         arms: results.map(({ tuning, ...rest }) => rest),
         winner: { id: best.id, label: best.label, tps: best.tps, prefillTps: best.prefillTps, throttled: best.throttled },
+        depth: depth && { tokens: depth.promptTokens, tps: +depth.tps.toFixed(1), prefillTps: depth.prefillTps ? Math.round(depth.prefillTps) : null },
       };
     });
     await writeMachineFacts().catch(() => {});

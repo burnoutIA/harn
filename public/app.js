@@ -858,7 +858,7 @@ function renderTuning() {
   const bench = state.profiles[id]?.bench;
   const ready = state.active?.status === 'ready';
   paint('tune-head', `<div><h1>Réglages</h1><p>${bench
-    ? `Harn a essayé ${bench.arms.length} réglages de ${esc(nameOf(id))} sur votre carte, en ne changeant qu’une chose à la fois, et garde le plus rapide.`
+    ? `Harn a essayé ${bench.arms.length} réglages de ${esc(nameOf(id))} sur votre carte, en ne changeant qu’une chose à la fois, et garde le plus rapide.${bench.depth ? ` Quand la conversation grossit (${kTokens(bench.depth.tokens)} de contexte), il génère encore <b>${fr(bench.depth.tps)} tok/s</b>${bench.depth.prefillTps ? ` et lit ${fr(bench.depth.prefillTps)} tok/s` : ''}.` : ''}`
     : 'Les réglages s’affichent après la première mesure.'}</p></div>
     ${id ? `<button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button>` : ''}`);
   if (!bench) { paint('tune-arms', '<p class="empty">Pas encore de mesure.</p>'); }
@@ -873,7 +873,7 @@ function renderTuning() {
         if (arm.error) return `<div class="arm out"><div><div class="stage">${esc(stageOf(arm))}</div><div class="name">${esc(plainArm(arm))}<small>${esc(arm.label)}</small></div></div><div class="bars"></div><div class="score">—<small>échec</small></div><div class="reason">${esc(arm.error.slice(0, 140))}</div></div>`;
         return `<div class="arm ${win ? 'win' : ''} ${arm.ok === false ? 'out' : ''}">
           <div><div class="stage">${win ? '<span class="badge active">Retenu</span>' : esc(stageOf(arm))}</div><div class="name">${esc(plainArm(arm))}<small>${esc(arm.label)}</small></div></div>
-          <div class="bars">${hb('code', 'Code', w('code'))}${hb('prose', 'Texte', w('prose'))}${hb('deep', 'Long', w('deep'))}</div>
+          <div class="bars">${hb('code', 'Code', w('code'))}${hb('prose', 'Texte', w('prose'))}${hb('deep', 'Long', w('deep'))}${hb('deep', '32k', w('depth'))}</div>
           <div class="score">${fr(arm.tps)}<small>tok/s</small></div>
           ${arm.ok === false ? '<div class="reason">Écarté : laissait moins de 1,5 Go libres sur la carte.</div>' : ''}
         </div>`;
