@@ -62,8 +62,8 @@ export function describe(tuning) {
   return parts.join(' · ');
 }
 
-// Réglages enregistrés avant le champ `layers` : une cible --fit relevée marquait un modèle partagé.
-export const layersOf = (tuning) => tuning.layers ?? (tuning.fitTargetMiB > 1024 ? 'auto' : 'all');
+// Les anciens réglages ont reçu `layers` par migration (migrations.mjs, v2).
+export const layersOf = (tuning) => tuning.layers ?? 'all';
 
 export function llamaArgs(model, files, tuning, hardware) {
   const gpu = tuning.backend !== 'cpu';

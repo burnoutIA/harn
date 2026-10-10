@@ -159,9 +159,15 @@ test('toutes les couches sur la carte, --fit seulement pour un modèle partagé'
   assert.equal(full[full.indexOf('--fit') + 1], 'off');
   const shared = llamaArgs(model, files, { ...defaultTuning(model, 131072, hw), layers: 'auto', fitTargetMiB: 1792 }, hw);
   assert.equal(shared[shared.indexOf('-ngl') + 1], 'auto');
-  // Réglage enregistré avant le champ `layers` : cible --fit relevée = modèle partagé.
-  const legacy = llamaArgs(model, files, { ...defaultTuning(model, 131072, hw), layers: undefined, fitTargetMiB: 1792 }, hw);
-  assert.equal(legacy[legacy.indexOf('-ngl') + 1], 'auto');
+});
+
+test('migration v2 : `layers` déduit des anciens réglages, état plus récent laissé tel quel', async () => {
+  const { migrate, SCHEMA_VERSION } = await import('../src/migrations.mjs');
+  const old = migrate({ version: 1, profiles: { a: { tuning: { fitTargetMiB: 1792 } }, b: { tuning: { fitTargetMiB: 1024 } }, c: {} } });
+  assert.equal(old.profiles.a.tuning.layers, 'auto');
+  assert.equal(old.profiles.b.tuning.layers, 'all');
+  assert.equal(old.version, SCHEMA_VERSION);
+  assert.equal(migrate({ version: SCHEMA_VERSION + 5 }).version, SCHEMA_VERSION + 5);
 });
 
 test('llamAmpere : KV K/V distincts, cache de prompts aligné sur l’officiel', async () => {

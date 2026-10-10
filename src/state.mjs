@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { SCHEMA_VERSION, migrate } from './migrations.mjs';
 import { DIRS } from './paths.mjs';
 
 const FILE = path.join(DIRS.data, 'state.json');
@@ -11,7 +12,7 @@ export const bus = new EventEmitter();
 bus.setMaxListeners(100);
 
 const initial = () => ({
-  version: 1,
+  version: SCHEMA_VERSION,
   hardware: null,
   plan: null,
   // Une étape par phase du premier démarrage : l'interface les affiche telles quelles.
@@ -32,7 +33,8 @@ let saveTimer = null;
 export async function loadState() {
   await mkdir(DIRS.data, { recursive: true });
   try {
-    state = { ...initial(), ...JSON.parse(await readFile(FILE, 'utf8')) };
+    // Un fichier sans version date d'avant le versionnage : version 1.
+    state = migrate({ ...initial(), version: 1, ...JSON.parse(await readFile(FILE, 'utf8')) });
   } catch {
     state = initial();
   }
