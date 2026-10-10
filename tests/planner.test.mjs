@@ -271,3 +271,18 @@ test('estimations calées à 100k sur les modèles déjà mesurés de la même f
   assert.equal(plan.verdicts.find((v) => v.id === other.id).tps, Math.round(other.tps * plan.calibration.dense));
   assert.equal(plan.verdicts.find((v) => v.id === measuredId).calibration, undefined, 'le modèle mesuré garde sa mesure');
 });
+
+test('GitHub : limite atteinte dite clairement, réponses gardées en cache', async () => {
+  const { github } = await import('../src/github.mjs');
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => { calls += 1; return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 600) } }); };
+    await assert.rejects(github('/test/limite'), /Limite de l’API GitHub atteinte \(encore 10 min\).*data\/github\.token/);
+    globalThis.fetch = async () => { calls += 1; return new Response(JSON.stringify({ ok: 1 }), { status: 200 }); };
+    calls = 0;
+    await github('/test/cache');
+    await github('/test/cache');
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = realFetch; }
+});

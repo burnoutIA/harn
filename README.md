@@ -43,6 +43,12 @@ sudo apt install nvidia-cuda-toolkit cmake build-essential
 
 Le banc le met face au moteur officiel et garde le plus rapide.
 
+Harn interroge GitHub (versions des moteurs, recherche d'un moteur pour une architecture
+nouvelle, mises à jour). Sans compte, GitHub limite à 60 requêtes par heure ; un jeton sans
+aucune permission (github.com → Settings → Developer settings → Fine-grained token, accès
+« Public repositories ») en donne 5 000. Le mettre dans `data/github.token`, ou dans la variable
+`GITHUB_TOKEN`.
+
 ## Choix du modèle
 
 | Machine | Premier modèle | Proposé ensuite |

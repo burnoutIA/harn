@@ -12,6 +12,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { download } from './download.mjs';
 import { DIRS, ROOT } from './paths.mjs';
+import { github as githubApi } from './github.mjs';
 import { extract } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
@@ -19,13 +20,12 @@ const run = promisify(execFile);
 const REPO = 'xavier-egoneau/harn';
 // main : la version publiée. develop porte le travail en cours et n'est jamais proposé.
 const BRANCH = 'main';
-const API = `https://api.github.com/repos/${REPO}`;
 const VERSION_FILE = path.join(DIRS.data, 'app-version.json');
 const KEEP = new Set(['data', 'models', 'runtime', 'workspace', 'node_modules', '.git']);
 const EVERY_MS = 6 * 60 * 60 * 1000;
 
-const github = (pathname) => fetch(`${API}${pathname}`, { headers: { 'User-Agent': 'harn', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15_000) })
-  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`GitHub a répondu ${r.status}`))));
+// Toujours frais : on vérifie une mise à jour au plus toutes les six heures.
+const github = (pathname) => githubApi(`/repos/${REPO}${pathname}`, { ttl: 0, timeout: 15_000 });
 
 const git = (...args) => run('git', args, { cwd: ROOT, windowsHide: true, timeout: 120_000 }).then((r) => r.stdout.trim());
 const isClone = () => stat(path.join(ROOT, '.git')).then(() => git('--version').then(() => true, () => false), () => false);

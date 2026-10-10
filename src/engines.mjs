@@ -9,6 +9,7 @@
 import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { llamAmpereEligible, mtpPlan } from './levers.mjs';
+import { github } from './github.mjs';
 import { buildEngine, installLlama, latestRelease } from './runtimes.mjs';
 import { modelById } from './catalog.mjs';
 import { DIRS } from './paths.mjs';
@@ -173,9 +174,7 @@ export async function alternates(model, tuning, profile, hardware = getState().h
 // ── Chercher le moteur qui manque ─────────────────────────
 // 1. une version officielle plus récente qui connaît l'architecture ;
 // 2. une PR ouverte de llama.cpp dont le code la connaît (code non fusionné : accord demandé).
-const GH = 'https://api.github.com';
-const gh = (route) => fetch(`${GH}${route}`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'harn' }, signal: AbortSignal.timeout(20_000) })
-  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`GitHub ne répond pas (${r.status})`))));
+const gh = (route) => github(route);
 
 // exclude : moteurs déjà essayés sans succès pour ce modèle.
 export async function findEngine(arch, { name = null, exclude = [] } = {}) {

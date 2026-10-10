@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { download } from './download.mjs';
+import { github } from './github.mjs';
 import { linuxPython } from './hardware.mjs';
 import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
@@ -50,11 +51,7 @@ const newest = (assets) => [...assets].sort((a, b) => cudaOf(b.name) - cudaOf(a.
 const assetSha = (asset) => (/^sha256:[0-9a-f]{64}$/i.test(asset.digest ?? '') ? asset.digest.slice(7).toLowerCase() : null);
 
 export async function latestRelease(source) {
-  const response = await fetch(`https://api.github.com/repos/${source.repo}/releases?per_page=15`, {
-    headers: { 'User-Agent': 'harn', Accept: 'application/vnd.github+json' },
-  });
-  if (!response.ok) throw new Error(`GitHub ne répond pas (${response.status})`);
-  const releases = await response.json();
+  const releases = await github(`/repos/${source.repo}/releases?per_page=15`);
   // Le dernier build qui publie vraiment des binaires pour ce système (certaines releases n'en ont pas).
   const release = releases.find((item) => source.tag.test(item.tag_name) && item.assets.some((asset) => PLATFORM_ASSET.test(asset.name)));
   if (!release) throw new Error(`Aucun binaire ${LINUX ? 'Linux' : 'Windows'} publié sur ${source.repo}`);
@@ -153,11 +150,7 @@ export async function installLlama(kind, backend, { refresh = false } = {}) {
 export async function installKetch() {
   const existing = getState().ketch;
   if (existing?.path && await stat(existing.path).catch(() => null)) return existing;
-  const response = await fetch('https://api.github.com/repos/1broseidon/ketch/releases/latest', {
-    headers: { 'User-Agent': 'harn', Accept: 'application/vnd.github+json' },
-  });
-  if (!response.ok) throw new Error(`GitHub ne répond pas (${response.status})`);
-  const release = await response.json();
+  const release = await github('/repos/1broseidon/ketch/releases/latest');
   const asset = release.assets.find((item) => (LINUX ? /linux_x86_64\.tar\.gz$/ : /windows_x86_64\.zip$/).test(item.name));
   if (!asset) throw new Error(`Pas de build ${LINUX ? 'Linux' : 'Windows'} de ketch`);
   const zip = await download({
