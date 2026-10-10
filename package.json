@@ -12,6 +12,7 @@
     "restart": "node src/ctl.mjs restart",
     "stop": "node src/ctl.mjs stop",
     "keys": "node src/keys.mjs",
+    "power-test": "node tools/power-test.mjs",
     "check": "node --test tests/*.test.mjs"
   }
 }
