@@ -11,6 +11,7 @@ import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, openInEditor } from './pi.mjs';
 import { installKetch } from './runtimes.mjs';
+import { proposeEngine } from './setup.mjs';
 import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
 import { inspectRepo, loadCustomModels } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
@@ -232,6 +233,13 @@ async function api(req, res, url) {
       dismissHub(String(body.repo ?? ''));
       return json(res, 200, { ok: true });
     }
+  }
+  // Chercher un moteur pour une architecture inconnue : la compilation d'une PR passe par une
+  // demande d'accord, affichée dans la fenêtre.
+  if (url.pathname === '/api/engines/find') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    const body = await new Response(req).json().catch(() => ({}));
+    return json(res, 200, await proposeEngine({ modelId: body.modelId ?? null, arch: body.arch ?? null, name: body.name ?? null }));
   }
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());

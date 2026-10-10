@@ -195,3 +195,31 @@ test('architectures d’un moteur lues dans llama-arch.cpp', async () => {
   const source = 'static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {\n    { LLM_ARCH_LLAMA,  "llama" },\n    { LLM_ARCH_QWEN35, "qwen35" },\n    { LLM_ARCH_UNKNOWN, "(unknown)" },\n};';
   assert.deepEqual(parseArchs(source), ['llama', 'qwen35', '(unknown)']);
 });
+
+test('fiches moteur : llamAmpere proposé au banc sur RTX 30 Linux, l’officiel face à un fork', async () => {
+  const { alternates } = await import('../src/engines.mjs');
+  const { gpuProfile } = await import('../src/levers.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const tools = { ok: true, nvcc: '12.4', cmake: true, hostCompiler: 'g++-13' };
+  const linux = { ...machine(24, 64), os: { platform: 'linux' }, buildTools: tools };
+  const profile = gpuProfile(linux);
+  const official = { context: 131072, backend: 'cuda12', kv: 'q8_0', spec: { type: 'mtp', n: 3, pMin: 0 } };
+
+  const fromOfficial = await alternates(model, official, profile, linux);
+  assert.deepEqual(fromOfficial.map((a) => a.id), ['llamampere']);
+  const [compressed, plain] = fromOfficial[0].arms('cuda12');
+  assert.equal(compressed.fork, 'llamampere');
+  assert.equal(compressed.kvV, 'turbo4');
+  assert.equal(plain.spec.n, 'auto');
+
+  const fromFork = await alternates(model, { ...compressed }, profile, linux);
+  assert.deepEqual(fromFork.map((a) => a.id), ['llama']);
+  const [back] = fromFork[0].arms('cuda12');
+  assert.equal(back.fork, undefined);
+  assert.equal(back.kv, 'q8_0');
+  assert.equal(back.kvV, undefined);
+  assert.equal(typeof back.spec.n, 'number');
+
+  assert.deepEqual(await alternates(model, official, profile, { ...linux, os: { platform: 'win32' } }), []);
+  assert.deepEqual(await alternates({ ...model, engine: 'prism' }, official, profile, linux), []);
+});

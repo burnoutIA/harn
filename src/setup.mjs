@@ -5,12 +5,14 @@ import { MODELS, displayName, downloadUrl, hfSha256, modelById, totalBytes } fro
 import { download, hashFile } from './download.mjs';
 import { defaultTuning, describe, layersOf, llamaArgs, modelFiles, startEngine, stopEngine } from './engine.mjs';
 import { detectHardware, sampleGpu } from './hardware.mjs';
-import { dflashEligible, gpuProfile, llamAmpereEligible, mtpPlan } from './levers.mjs';
+import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { configurePi, installPi } from './pi.mjs';
 import { OBJECTIVE, assess, makePlan } from './planner.mjs';
-import { archMissing, enginesFor } from './engines.mjs';
-import { engineEnv, installKetch, installLlama, installLlamAmpere, installStrata } from './runtimes.mjs';
+import { addEngine, alternates, archMissing, canBuild, engineSheet, enginesFor, ensureEngine, findEngine, recordBuildFailure } from './engines.mjs';
+import { requestApproval } from './approvals.mjs';
+import { checkHub } from './watch.mjs';
+import { engineEnv, installKetch, installLlama, installStrata } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 import { systemChecks } from './system-checks.mjs';
 import { askLocalAnalysis, machineDocPath, writeMachineFacts } from './machine-doc.mjs';
@@ -71,12 +73,6 @@ export function runFirstSetup() {
 }
 
 const runtimeKind = (model, tuning) => (tuning?.fork ?? (model.engine === 'prism' ? 'prism' : 'llama'));
-
-// Une compilation de llamAmpere ratée n'est retentée que si les outils ont changé (paquet ajouté).
-function failedBuild() {
-  const failure = getState().buildFailures?.llamampere;
-  return Boolean(failure) && JSON.stringify(failure.tools) === JSON.stringify(getState().hardware?.buildTools);
-}
 
 const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256 };
 
@@ -423,12 +419,13 @@ export async function tuneModel(modelId, options = {}) {
   });
 }
 
-async function tuneModelInner(modelId, { startFrom = null, onProgress = () => {} } = {}) {
+async function tuneModelInner(modelId, { startFrom = null, engine = null, onProgress = () => {} } = {}) {
   const model = modelById(modelId);
   const state = getState();
   const hardware = state.hardware;
   const profile = gpuProfile(hardware);
-  const initial = startFrom ?? await loadWithHeadroom(model, state.profiles[modelId]?.tuning ?? startingTuning(model, hardware));
+  // engine : le moteur imposé quand l'officiel ne sait pas charger ce modèle ({ fork, backend }).
+  const initial = startFrom ?? await loadWithHeadroom(model, { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) });
 
   let loadedTuning = initial.tuning;
   let loadedHeadroom = initial.headroomMiB;
@@ -513,29 +510,20 @@ async function tuneModelInner(modelId, { startFrom = null, onProgress = () => {}
     }
   }
 
-  // llamAmpere (RTX 30 sous Linux) : le même réglage sur l'autre moteur, puis son KV compressé.
-  // Compilé une seule fois (~10-20 min) ; un échec est noté et ne bloque pas le banc.
-  if (gpu && model.engine !== 'prism' && llamAmpereEligible(hardware) && !failedBuild()) {
+  // Les autres moteurs qui savent charger ce modèle (fiches de engines.mjs) : le même réglage,
+  // plus les variantes propres à chacun. Un moteur à compiler l'est une seule fois (10-20 min) ;
+  // un échec est noté et ne bloque pas le banc.
+  for (const alt of gpu ? await alternates(model, best.tuning, profile, hardware) : []) {
     try {
-      if (!best.tuning.fork) {
-        onProgress('llamAmpere · compilation du moteur (une seule fois, 10 à 20 min)');
-        const info = await installLlamAmpere(hardware.buildTools, (text) => {
-          const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
-          if (step) onProgress(`llamAmpere · compilation ${step}`);
-        });
-        // Sa propre profondeur MTP : ses noyaux rendent la vérification de 4-8 tokens bon marché,
-        // l'optimum mesuré sur l'officiel (souvent 2-3) le bride.
-        const fork = { ...best.tuning, fork: 'llamampere', backend: info.backend, spec: model.mtp ? { type: 'mtp', n: 'auto' } : best.tuning.spec };
-        best = better(await trial('Moteur llamAmpere', { ...fork, kv: 'tq5_0', kvV: 'turbo4' }), best);
-        best = better(await trial('Moteur llamAmpere', fork), best);
-      } else {
-        // Déjà sur llamAmpere : le moteur officiel reste mesuré face à lui.
-        const spec = best.tuning.spec?.n === 'auto' ? { type: 'mtp', ...mtpPlan(profile).base } : best.tuning.spec;
-        best = better(await trial('Moteur officiel', { ...best.tuning, fork: undefined, backend: getState().plan.backend.id, kv: 'q8_0', kvV: undefined, spec }), best);
-      }
+      onProgress(`${alt.label} · préparation du moteur`);
+      const info = await ensureEngine(alt, { hardware, onLog: (text) => {
+        const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
+        if (step) onProgress(`${alt.label} · compilation ${step}`);
+      } });
+      for (const arm of alt.arms(info.backend)) best = better(await trial(`Moteur ${alt.label}`, arm), best);
     } catch (error) {
-      update((s) => { s.buildFailures = { ...s.buildFailures, llamampere: { error: error.message.slice(0, 300), at: new Date().toISOString(), tools: hardware.buildTools } }; });
-      results.push({ id: 'llamampere', stage: 'Moteur llamAmpere', label: 'compilation', error: error.message.slice(0, 200), ok: false });
+      if (engineSheet(alt.id).source === 'build') recordBuildFailure(alt.id, error, hardware);
+      results.push({ id: alt.id, stage: `Moteur ${alt.label}`, label: 'installation', error: error.message.slice(0, 200), ok: false });
     }
   }
 
@@ -624,19 +612,28 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
     installs.set(modelId, (async () => {
       const model = modelById(modelId);
       const plan = getState().plan;
-      // Avant de télécharger : un moteur sait-il charger cette architecture ?
+      // Une nouvelle tentative efface l'erreur de la précédente.
+      update((s) => { if (s.models[modelId]) s.models[modelId].error = null; });
+      // Avant de télécharger : quel moteur sait charger cette architecture ? L'officiel d'abord
+      // (mis à jour s'il le faut), sinon un moteur ajouté avec l'accord de l'utilisateur.
       const engines = model.engine === 'strata' ? null : await enginesFor(model.profile?.arch);
       if (engines && !engines.length) throw new Error(archMissing(model.profile.arch));
+      let engine = null;
       if (model.engine !== 'strata') {
-        setPhase(modelId, 'download', 'Préparation du moteur llama.cpp');
-        await installLlama(runtimeKind(model), plan.backend.id);
+        const primary = engines?.find((e) => e.id === runtimeKind(model)) ?? engines?.[0] ?? { id: runtimeKind(model) };
+        setPhase(modelId, 'download', `Préparation du moteur ${engineSheet(primary.id).label}`);
+        const info = await ensureEngine(primary, { backend: plan.backend.id, onLog: (text) => {
+          const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
+          if (step) setPhase(modelId, 'download', `Compilation de ${engineSheet(primary.id).label} ${step}`);
+        } });
+        if (primary.id !== runtimeKind(model)) engine = { fork: primary.id, backend: info.backend };
       }
       setPhase(modelId, 'download');
       await installModelFiles(model, { ggufDir });
       setPhase(modelId, 'tune');
       update((s) => { s.models[modelId].tuning = true; });
       await withGpu(modelId, async () => {
-        await tuneModel(modelId, { onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
+        await tuneModel(modelId, { engine, onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
         update((s) => { s.models[modelId].tuning = false; s.models[modelId].tuneDetail = null; });
         if (getState().pi.installed) await configurePi();
         if (fromCustomJob) return; // la suite (test, analyse) est menée par installCustom
@@ -841,3 +838,34 @@ export function pickHelper(exceptId = null, state = getState()) {
 }
 
 export { stopEngine };
+
+// ── Moteur manquant ───────────────────────────────────────
+// Un modèle dont aucun moteur installé ne connaît l'architecture : on cherche une version
+// officielle plus récente (installée sans demander, c'est le moteur de tous les jours), sinon une
+// PR de llama.cpp qui l'ajoute. Une PR est du code que personne n'a encore relu : elle n'est
+// compilée qu'après l'accord de l'utilisateur, donné par un clic dans la fenêtre de Harn.
+export async function proposeEngine({ modelId = null, arch = null, name = null } = {}) {
+  const model = modelId ? modelById(modelId) : null;
+  arch ??= model?.profile?.arch;
+  name ??= model ? displayName(model) : null;
+  if (!arch) throw Object.assign(new Error('Architecture du modèle inconnue'), { status: 400 });
+  const found = await findEngine(arch, { name });
+  if (!found) return { status: 'none', message: `Aucun moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition ouverte dans llama.cpp qui la connaisse. Harn le proposera dès qu’il en existera un.` };
+  // Ensuite : régler le modèle s'il est déjà là, sinon revoir la veille, qui le proposera.
+  const after = () => (modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
+  if (found.kind === 'official') {
+    ensureEngine(found.candidate).then(after).catch(() => {});
+    return { status: 'official', message: `${found.label} sait charger ce modèle : mise à jour du moteur, puis réglage.` };
+  }
+  if (!canBuild(getState().hardware)) {
+    return { status: 'unbuildable', message: `${found.label} sait charger ce modèle, mais il faut le compiler : pour l’instant, Linux avec une carte NVIDIA et les outils de compilation.` };
+  }
+  const { sheet } = found;
+  requestApproval({
+    kind: 'engine',
+    title: `Compiler ${sheet.label} pour ${name ?? arch} ?`,
+    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). Ce code n’est pas encore accepté dans llama.cpp, donc pas relu par ses mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ».`,
+    run: () => { addEngine(sheet).then(after).catch(() => {}); },
+  });
+  return { status: 'approval', message: `${found.label} sait charger ce modèle : acceptez la demande pour le compiler.` };
+}

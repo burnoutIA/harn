@@ -585,3 +585,4 @@ body.onboarding .topline { max-width: none; }
 .hub-missing { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0 0; font-size: calc(13px * var(--fs)); color: var(--muted); }
 .hub-missing svg { flex: none; width: 16px; height: 16px; margin-top: 2px; }
 .hub-missing a { color: var(--text); }
+.hub-missing .link { border: 0; padding: 0; background: none; color: var(--text); font: inherit; text-decoration: underline; cursor: pointer; }

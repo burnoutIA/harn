@@ -5,6 +5,7 @@ import { mkdir, readFile, readdir, readlink, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { modelById } from './catalog.mjs';
+import { engineSheet } from './engines.mjs';
 import { backendCandidates, gpuProfile, mtpPlan } from './levers.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS, PORTS, ROOT } from './paths.mjs';
@@ -55,7 +56,7 @@ export function describe(tuning) {
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
   if (tuning.fa === 'off') parts.push('sans FA');
   if (layersOf(tuning) === 'auto') parts.push('partagé CPU');
-  if (tuning.fork === 'llamampere') parts.push('llamAmpere');
+  if (tuning.fork) parts.push(engineSheet(tuning.fork)?.label ?? tuning.fork);
   if (tuning.backend && !tuning.backend.startsWith('cuda')) parts.push(tuning.backend.toUpperCase());
   return parts.join(' · ');
 }
@@ -76,18 +77,17 @@ export function llamaArgs(model, files, tuning, hardware) {
     '--parallel', '1',
     '-t', String(threads),
     '-b', String(tuning.batch), '-ub', String(tuning.ubatch),
-    // K et V du même type, sauf les paires prévues par llamAmpere (tq5_0/turbo4, noyau fusionné).
+    // K et V du même type, sauf les paires prévues par un fork (llamAmpere : tq5_0/turbo4, noyau fusionné).
     '--cache-type-k', tuning.kv, '--cache-type-v', tuning.kvV ?? tuning.kv,
   ];
-  // llamAmpere garde par défaut jusqu'à la moitié de la RAM et 16 Gio de disque pour son cache de
-  // prompts : on s'aligne sur le llama.cpp officiel (8 Gio de RAM, rien sur le disque).
-  if (tuning.fork === 'llamampere') args.push('--cache-ram', '8192', '--no-cache-disk');
+  // Les options propres au moteur, écrites dans sa fiche.
+  if (tuning.fork) args.push(...(engineSheet(tuning.fork)?.args ?? []));
   if (gpu && layersOf(tuning) === 'auto') args.push('-ngl', 'auto', '--fit', 'on', '--fit-target', String(tuning.fitTargetMiB), '-fa', tuning.fa ?? 'on');
   else if (gpu) args.push('-ngl', '999', '--fit', 'off', '-fa', tuning.fa ?? 'on');
   else args.push('-ngl', '0');
   const spec = tuning.spec ?? { type: 'none' };
   if (spec.type === 'mtp' && spec.n === 'auto') {
-    // llamAmpere : sa profondeur adaptative (3-4) et son vocabulaire de brouillon, réglés pour ses noyaux.
+    // Profondeur choisie par le moteur lui-même (llamAmpere : adaptative 3-4, réglée pour ses noyaux).
   } else if (spec.type === 'mtp') {
     args.push('--spec-type', 'draft-mtp', '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
   } else if (spec.type === 'dflash' && files.dflash) {

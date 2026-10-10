@@ -96,7 +96,8 @@ function toast(message) {
   toastEl.textContent = message;
   toastEl.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => toastEl.classList.remove('show'), 2400);
+  // Le temps de lire : ~60 ms par caractère, 2,4 s au moins.
+  toast.timer = setTimeout(() => toastEl.classList.remove('show'), Math.max(2400, String(message).length * 60));
 }
 async function copy(text, message) {
   try { await navigator.clipboard.writeText(text); toast(message); } catch { toast(text); }
@@ -289,13 +290,14 @@ function phaseBlock(id) {
 function engineLabel() {
   const tuning = state.profiles?.[state.active?.modelId]?.tuning;
   const runtimes = state.runtimes ?? {};
-  if (tuning?.fork === 'llamampere') return `llamAmpere ${runtimes['llamampere-cuda12']?.tag ?? ''}`.trim();
-  const official = runtimes[`llama-${tuning?.backend ?? state.plan?.backend?.id}`] ?? Object.values(runtimes).find((r) => r.kind === 'llama');
-  return `llama.cpp ${official?.tag ?? ''}`.trim();
+  const kind = tuning?.fork ?? 'llama';
+  const runtime = runtimes[`${kind}-${tuning?.backend ?? state.plan?.backend?.id}`] ?? Object.values(runtimes).find((r) => r.kind === kind);
+  const known = { llama: 'llama.cpp', prism: 'llama.cpp Prism', llamampere: 'llamAmpere' };
+  return `${runtime?.label ?? known[kind] ?? kind} ${runtime?.tag ?? ''}`.trim();
 }
 
-const STAGE = { 'Moteur llamAmpere': 'Moteur', 'Moteur officiel': 'Moteur', 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
-const stageOf = (arm) => STAGE[arm.stage] ?? arm.stage ?? '';
+const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
+const stageOf = (arm) => STAGE[arm.stage] ?? (arm.stage?.startsWith('Moteur ') ? 'Moteur' : arm.stage) ?? '';
 
 // Les réglages en mots simples ; le libellé technique reste visible en second plan.
 function plainArm(arm) {
@@ -754,7 +756,7 @@ function modelCard(model) {
   if (entry.phase || entry.installing || entry.tuning || pending.has(model.id)) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
   else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
   else if (isActive && !loading) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">${icon.power} Recharger</button>`;
-  else if (entry.installedAt && archWithoutEngine(model)) action = `<p class="why">Architecture « ${esc(archWithoutEngine(model))} » : llama.cpp ne sait pas encore la charger. Gardez-le si une version plus récente est attendue, sinon supprimez-le.</p>`;
+  else if (entry.installedAt && archWithoutEngine(model)) action = `<p class="why">Architecture « ${esc(archWithoutEngine(model))} » : aucun moteur installé ne sait la charger.</p><button class="btn" data-action="engine-find" data-id="${model.id}">Chercher un moteur</button>`;
   else if (entry.installedAt) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">Utiliser ce modèle</button>`;
   // Le banc d'intelligence se lance depuis la carte : le modèle est chargé si besoin.
   const iqRun = state.profiles[model.id]?.iqRunning;
@@ -776,7 +778,7 @@ function modelCard(model) {
     ${isTarget ? whyTarget(model.id) : ''}
     ${off ? `<p class="why">Pas pour cette machine : ${esc(verdict.reasons.join(', '))}.</p>` : ''}
     ${entry.installing && entry.detail ? `<p class="why">${esc(entry.detail)}</p>` : ''}
-    ${entry.error && !archWithoutEngine(model) ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
+    ${entry.error && !archWithoutEngine(model) && !entry.phase ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
         <button class="btn small" data-action="open-log" data-id="${model.id}">Voir le journal</button>
         <button class="btn small" data-action="retry" data-id="${model.id}">Réessayer</button>
         ${helperFor(model.id) ? `<button class="btn small primary" data-action="ask-pi" data-id="${model.id}" title="pi dépanne avec ${esc(nameOf(helperFor(model.id)))}">${icon.terminal} Demander à pi</button>` : ''}
@@ -817,7 +819,7 @@ function hubSection() {
   const empty = !items.length && !updates.length ? `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de nouveau ces 30 derniers jours qui tourne bien sur cette machine.' : 'Harn regarde une fois par jour les modèles sortis ou mis à jour sur Hugging Face, et ne garde que ceux qui tournent bien ici.'}</p>` : '';
   // Écartés faute de moteur : on les nomme, pour qu'un modèle attendu ne disparaisse pas sans raison.
   const missing = (w.items ?? []).filter((i) => i.engineMissing);
-  const noEngine = missing.length ? `<p class="hub-missing">${icon.info}<span><b>Pas encore de moteur pour ${missing.length === 1 ? 'ce modèle' : `ces ${missing.length} modèles`}</b> : ${missing.map((i) => `<a href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">${esc(i.name)}</a> (architecture « ${esc(i.engineMissing)} »)`).join(', ')}. llama.cpp ne sait pas encore les charger ; Harn les proposera dès qu’un moteur le pourra.</span></p>` : '';
+  const noEngine = missing.length ? `<p class="hub-missing">${icon.info}<span><b>Pas encore de moteur pour ${missing.length === 1 ? 'ce modèle' : `ces ${missing.length} modèles`}</b> : ${missing.map((i) => `<a href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">${esc(i.name)}</a> (architecture « ${esc(i.engineMissing)} », <button class="link" data-action="engine-find" data-arch="${esc(i.engineMissing)}" data-name="${esc(i.name)}">chercher un moteur</button>)`).join(', ')}. llama.cpp ne sait pas encore les charger.</span></p>` : '';
   return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}${noEngine}</div></div>`;
 }
 
@@ -1240,6 +1242,11 @@ app.addEventListener('click', async (event) => {
     if (action === 'retry') { await post(`/api/models/${id}/retry`); toast('Nouvelle tentative'); }
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
+    if (action === 'engine-find') {
+      toast('Recherche d’un moteur…');
+      const r = await post('/api/engines/find', id ? { modelId: id } : { arch: button.dataset.arch, name: button.dataset.name });
+      toast(r.message);
+    }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }
     if (action === 'hub-check') { await post('/api/watch/check'); toast('Recherche des nouveautés sur Hugging Face'); }
     if (action === 'hub-dismiss') { await post('/api/watch/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }

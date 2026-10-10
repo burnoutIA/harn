@@ -90,13 +90,17 @@ export function engineEnv(dir) {
   return { ...process.env, LD_LIBRARY_PATH: [dir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
 }
 
-export async function installLlama(kind, backend) {
+// refresh : passer à la dernière version publiée (une architecture récente l'exige). Les
+// fichiers de l'ancienne restent dans leur dossier, rien n'est écrasé.
+export async function installLlama(kind, backend, { refresh = false } = {}) {
   const runtimeId = `${kind}-${backend}`;
   const existing = getState().runtimes[runtimeId];
-  if (existing && await stat(existing.serverPath).catch(() => null)) return existing;
+  const present = existing && await stat(existing.serverPath).catch(() => null);
+  if (present && !refresh) return existing;
 
   const source = SOURCES[kind];
   const release = await latestRelease(source);
+  if (present && existing.tag === release.tag_name) return existing;
   // « cudart-llama-bin-win-cuda-… » a le même suffixe que le moteur : on l'écarte ici.
   const asset = newest(release.assets.filter((item) => !item.name.startsWith('cudart-') && ASSET[backend].test(item.name)));
   if (!asset) throw new Error(`Pas de build ${backend} dans ${source.repo} ${release.tag_name}`);
@@ -173,11 +177,10 @@ export async function installKetch() {
   return info;
 }
 
-// llamAmpere : pas de binaire publié, on compile une version figée (même règle que Strata : un
-// commit relu, pas la branche main). Le dossier porte le nom de la version : une compilation
-// faite à la main au même endroit, au même commit, est reprise telle quelle.
-export const LLAMAMPERE = { tag: 'v0.5', commit: '83aa38c18e5c73f2eaff5ca7aacf9b9eab882318' };
-
+// Moteurs compilés ici (llamAmpere, une PR llama.cpp, un fork) : pas de binaire publié pour cette
+// machine, on compile un commit figé — même règle que Strata, un contenu précis plutôt qu'une
+// branche qui bouge. Le dossier porte le nom de la fiche et de sa version : une compilation faite
+// à la main au même endroit, au même commit, est reprise telle quelle.
 async function builtCommit(dir) {
   for (const file of ['.harn-commit', path.join('.git', 'HEAD')]) {
     const text = await readFile(path.join(dir, file), 'utf8').catch(() => '');
@@ -195,24 +198,28 @@ function runLogged(command, args, options, onLog) {
   });
 }
 
-export async function installLlamAmpere(tools, onLog = () => {}) {
-  const runtimeId = 'llamampere-cuda12';
+// sheet : { id, label, repo, ref (commit), version?, cudaArch } ; tools : hardware.buildTools.
+export async function buildEngine(sheet, tools, onLog = () => {}) {
+  const backend = `cuda${Number.parseInt(tools.nvcc, 10)}`;
+  const runtimeId = `${sheet.id}-${backend}`;
   const existing = getState().runtimes[runtimeId];
-  if (existing?.commit === LLAMAMPERE.commit && (await stat(existing.serverPath).catch(() => null))) return existing;
-  const repoDir = path.join(DIRS.runtime, 'llamampere', LLAMAMPERE.tag);
-  const binDir = path.join(repoDir, 'build-sm86', 'bin');
+  if (existing?.commit === sheet.ref && (await stat(existing.serverPath).catch(() => null))) return existing;
+  const repoDir = path.join(DIRS.runtime, sheet.id, sheet.version ?? sheet.ref.slice(0, 12));
+  const buildDir = `build-sm${sheet.cudaArch}`;
+  const binDir = path.join(repoDir, buildDir, 'bin');
   const serverPath = path.join(binDir, 'llama-server');
-  const reuse = (await builtCommit(repoDir)) === LLAMAMPERE.commit && (await stat(serverPath).catch(() => null));
+  const reuse = (await builtCommit(repoDir)) === sheet.ref && (await stat(serverPath).catch(() => null));
 
   if (!reuse) {
     const archive = await download({
-      id: 'runtime:llamampere',
-      label: `llamAmpere ${LLAMAMPERE.tag} (sources)`,
-      url: `https://github.com/JakeATX/llamAmpere/archive/${LLAMAMPERE.commit}.tar.gz`,
-      dest: path.join(DIRS.downloads, `llamampere-${LLAMAMPERE.commit.slice(0, 7)}.tar.gz`),
+      id: `runtime:${sheet.id}`,
+      label: `${sheet.label} (sources ${sheet.ref.slice(0, 7)})`,
+      url: `https://github.com/${sheet.repo}/archive/${sheet.ref}.tar.gz`,
+      dest: path.join(DIRS.downloads, `${sheet.id}-${sheet.ref.slice(0, 7)}.tar.gz`),
     });
     const parent = path.dirname(repoDir);
-    const unpacked = path.join(parent, `llamAmpere-${LLAMAMPERE.commit}`);
+    // L'archive d'un commit se déplie dans <dépôt>-<commit>.
+    const unpacked = path.join(parent, `${sheet.repo.split('/')[1]}-${sheet.ref}`);
     await rm(repoDir, { recursive: true, force: true });
     await rm(unpacked, { recursive: true, force: true });
     await extract(archive, parent);
@@ -220,16 +227,16 @@ export async function installLlamAmpere(tools, onLog = () => {}) {
     // nvcc refuse un g++ trop récent : on lui passe celui que la détection a retenu, par son chemin.
     const hostCompiler = (await run('sh', ['-c', `command -v ${tools.hostCompiler}`])).stdout.trim();
     onLog('Configuration (cmake)');
-    await runLogged('cmake', ['-S', '.', '-B', 'build-sm86', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
-      '-DCMAKE_CUDA_ARCHITECTURES=86', `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir }, onLog);
-    await runLogged('cmake', ['--build', 'build-sm86', '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 90 * 60_000 }, onLog);
-    await writeFile(path.join(repoDir, '.harn-commit'), LLAMAMPERE.commit);
+    await runLogged('cmake', ['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
+      `-DCMAKE_CUDA_ARCHITECTURES=${sheet.cudaArch}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir }, onLog);
+    await runLogged('cmake', ['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 90 * 60_000 }, onLog);
+    await writeFile(path.join(repoDir, '.harn-commit'), sheet.ref);
   }
 
   const { stdout, stderr } = await run(serverPath, ['--version'], { env: engineEnv(binDir), timeout: 30_000 }).catch((error) => error);
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1];
-  if (!version) throw new Error('llamAmpere compilé mais llama-server ne démarre pas');
-  const info = { kind: 'llamampere', backend: 'cuda12', tag: LLAMAMPERE.tag, commit: LLAMAMPERE.commit, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };
+  if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
+  const info = { kind: sheet.id, label: sheet.label, backend, tag: sheet.version ?? sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
 }
