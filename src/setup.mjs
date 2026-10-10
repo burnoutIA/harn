@@ -616,7 +616,8 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
       update((s) => { if (s.models[modelId]) s.models[modelId].error = null; });
       // Avant de télécharger : quel moteur sait charger cette architecture ? L'officiel d'abord
       // (mis à jour s'il le faut), sinon un moteur ajouté avec l'accord de l'utilisateur.
-      const engines = model.engine === 'strata' ? null : await enginesFor(model.profile?.arch);
+      const failed = getState().models[modelId]?.engineFailures ?? {};
+      const engines = model.engine === 'strata' ? null : (await enginesFor(model.profile?.arch))?.filter((e) => !failed[e.id]) ?? null;
       if (engines && !engines.length) throw new Error(archMissing(model.profile.arch));
       let engine = null;
       if (model.engine !== 'strata') {
@@ -633,7 +634,12 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
       setPhase(modelId, 'tune');
       update((s) => { s.models[modelId].tuning = true; });
       await withGpu(modelId, async () => {
-        await tuneModel(modelId, { engine, onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
+        await tuneModel(modelId, { engine, onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } }).catch((error) => {
+          // Un moteur ajouté qui connaît l'architecture mais pas ce fichier (tenseurs d'une autre
+          // version du code) : noté pour ce modèle, la prochaine recherche passe au suivant.
+          if (error.fatal && engine?.fork) update((s) => { s.models[modelId].engineFailures = { ...s.models[modelId].engineFailures, [engine.fork]: error.message.slice(0, 300) }; });
+          throw error;
+        });
         update((s) => { s.models[modelId].tuning = false; s.models[modelId].tuneDetail = null; });
         if (getState().pi.installed) await configurePi();
         if (fromCustomJob) return; // la suite (test, analyse) est menée par installCustom
@@ -849,8 +855,9 @@ export async function proposeEngine({ modelId = null, arch = null, name = null }
   arch ??= model?.profile?.arch;
   name ??= model ? displayName(model) : null;
   if (!arch) throw Object.assign(new Error('Architecture du modèle inconnue'), { status: 400 });
-  const found = await findEngine(arch, { name });
-  if (!found) return { status: 'none', message: `Aucun moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition ouverte dans llama.cpp qui la connaisse. Harn le proposera dès qu’il en existera un.` };
+  const exclude = Object.keys((modelId && getState().models[modelId]?.engineFailures) ?? {});
+  const found = await findEngine(arch, { name, exclude });
+  if (!found) return { status: 'none', message: `Aucun ${exclude.length ? 'autre ' : ''}moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition dans llama.cpp qui la connaisse${exclude.length ? ' et que ce fichier n’ait pas déjà mise en échec' : ''}. Harn le proposera dès qu’il en existera un.` };
   // Ensuite : régler le modèle s'il est déjà là, sinon revoir la veille, qui le proposera.
   const after = () => (modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
   if (found.kind === 'official') {
@@ -861,10 +868,12 @@ export async function proposeEngine({ modelId = null, arch = null, name = null }
     return { status: 'unbuildable', message: `${found.label} sait charger ce modèle, mais il faut le compiler : pour l’instant, Linux avec une carte NVIDIA et les outils de compilation.` };
   }
   const { sheet } = found;
+  // Déjà accepté une fois (pour un autre modèle de la même architecture) : pas de nouvelle demande.
+  if (getState().engines?.[sheet.id]) { after(); return { status: 'known', message: `${found.label} est déjà installé : réglage du modèle avec lui.` }; }
   requestApproval({
     kind: 'engine',
     title: `Compiler ${sheet.label} pour ${name ?? arch} ?`,
-    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). Ce code n’est pas encore accepté dans llama.cpp, donc pas relu par ses mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ».`,
+    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ».`,
     run: () => { addEngine(sheet).then(after).catch(() => {}); },
   });
   return { status: 'approval', message: `${found.label} sait charger ce modèle : acceptez la demande pour le compiler.` };

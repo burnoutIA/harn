@@ -781,6 +781,7 @@ function modelCard(model) {
     ${entry.error && !archWithoutEngine(model) && !entry.phase ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
         <button class="btn small" data-action="open-log" data-id="${model.id}">Voir le journal</button>
         <button class="btn small" data-action="retry" data-id="${model.id}">Réessayer</button>
+        ${Object.keys(entry.engineFailures ?? {}).length ? `<button class="btn small" data-action="engine-find" data-id="${model.id}" title="Ce moteur connaît l’architecture mais pas ce fichier : chercher une autre version du code">Chercher un autre moteur</button>` : ''}
         ${helperFor(model.id) ? `<button class="btn small primary" data-action="ask-pi" data-id="${model.id}" title="pi dépanne avec ${esc(nameOf(helperFor(model.id)))}">${icon.terminal} Demander à pi</button>` : ''}
       </div></div>` : ''}
     <div class="foot">${action}${(entry.installedAt || entry.error) && !entry.installing && !entry.tuning && !loading ? `<button class="btn ghost small" data-action="delete-model" data-id="${model.id}" title="Supprimer ses fichiers et ses réglages">${icon.trash} Supprimer</button>` : ''}<span class="size">${gb(model.totalBytes)}</span></div>

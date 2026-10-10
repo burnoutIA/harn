@@ -175,20 +175,23 @@ const GH = 'https://api.github.com';
 const gh = (route) => fetch(`${GH}${route}`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'harn' }, signal: AbortSignal.timeout(20_000) })
   .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`GitHub ne répond pas (${r.status})`))));
 
-export async function findEngine(arch, { name = null } = {}) {
+// exclude : moteurs déjà essayés sans succès pour ce modèle.
+export async function findEngine(arch, { name = null, exclude = [] } = {}) {
   const official = BUILTIN.llama;
   const latest = await latestTag(official);
   if (latest && (await engineArchs('llama', latest).catch(() => [])).includes(arch)) {
     return { kind: 'official', candidate: { id: 'llama', ref: latest, refresh: true }, label: `llama.cpp ${latest}` };
   }
   const seen = new Set();
-  for (const query of [arch, name?.split(/[\s-]/)[0]].filter(Boolean)) {
-    const search = await gh(`/search/issues?q=${encodeURIComponent(`${query} repo:${official.repo} is:pr is:open`)}&per_page=5`).catch(() => ({ items: [] }));
+  // Les PR ouvertes d'abord, puis les fermées sans fusion (une variante « cleanup » peut être
+  // celle qui a servi à produire le GGUF). Une PR fusionnée est déjà dans les versions officielles.
+  for (const state of ['open', 'closed']) for (const query of [arch, name?.split(/[\s-]/)[0]].filter(Boolean)) {
+    const search = await gh(`/search/issues?q=${encodeURIComponent(`${query} repo:${official.repo} is:pr is:${state}`)}&per_page=5`).catch(() => ({ items: [] }));
     for (const item of search.items ?? []) {
-      if (seen.has(item.number)) continue;
+      if (seen.has(item.number) || exclude.includes(`llama-pr-${item.number}`)) continue;
       seen.add(item.number);
       const pr = await gh(`/repos/${official.repo}/pulls/${item.number}`).catch(() => null);
-      if (!pr?.head?.repo) continue;
+      if (!pr?.head?.repo || pr.merged) continue;
       const archs = await rawArchs(pr.head.repo.full_name, pr.head.sha).catch(() => []);
       if (!archs.includes(arch)) continue;
       return {
@@ -196,7 +199,7 @@ export async function findEngine(arch, { name = null } = {}) {
         label: `llama.cpp PR #${pr.number}`,
         sheet: {
           id: `llama-pr-${pr.number}`, label: `llama.cpp PR #${pr.number}`, repo: pr.head.repo.full_name, ref: pr.head.sha,
-          url: pr.html_url, title: pr.title, author: pr.user?.login ?? '?', onlyArchs: [arch], foundAt: new Date().toISOString(),
+          url: pr.html_url, title: pr.title, author: pr.user?.login ?? '?', state: pr.state, onlyArchs: [arch], foundAt: new Date().toISOString(),
         },
       };
     }
