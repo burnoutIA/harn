@@ -1237,7 +1237,7 @@ app.addEventListener('click', async (event) => {
       const r = await post(`/api/models/${id}/delete`);
       catalog = await fetch('/api/catalog').then((res) => res.json());
       regions.clear(); app.dataset.view = ''; render();
-      toast(`${m.name} supprimé${r.freedBytes ? ` · ${gb(r.freedBytes)} libérés` : ''}`);
+      toast(`${m.name} supprimé${r.freedBytes ? ` · ${gb(r.freedBytes)} libérés` : ''}${r.droppedEngines?.length ? ` · moteur retiré : ${r.droppedEngines.join(', ')}` : ''}`);
     }
     if (action === 'activate') { await post(`/api/models/${id}/activate`); toast('Chargement…'); }
     if (action === 'unload') { await post('/api/engine/stop'); toast('Carte graphique libérée'); }

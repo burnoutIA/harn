@@ -6,10 +6,12 @@
 // Architectures : un GGUF dit la sienne (general.architecture), un moteur llama.cpp connaît la
 // liste écrite dans son src/llama-arch.cpp. Les comparer avant de télécharger évite d'installer
 // 14 Go pour découvrir au chargement « unknown model architecture ».
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { llamAmpereEligible, mtpPlan } from './levers.mjs';
 import { buildEngine, installLlama, latestRelease } from './runtimes.mjs';
+import { modelById } from './catalog.mjs';
+import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
 // Compiler demande Linux, une NVIDIA et les outils (nvcc, cmake, g++ accepté par nvcc).
@@ -211,4 +213,38 @@ export async function findEngine(arch, { name = null, exclude = [] } = {}) {
 export async function addEngine(sheet) {
   update((s) => { s.engines = { ...s.engines, [sheet.id]: { ...sheet, approvedAt: new Date().toISOString() } }; });
   update((s) => { s.engineArchs = { ...s.engineArchs, [`${sheet.id}@${sheet.ref}`]: sheet.onlyArchs }; });
+}
+
+// Un moteur ajouté pour une architecture (PR, fork) n'a plus de raison d'être quand plus aucun
+// modèle installé ne l'utilise : ses sources, sa compilation et sa fiche sont retirées. Il se
+// recompile si un modèle de cette architecture revient (avec un nouvel accord).
+async function sizeOf(target) {
+  const info = await stat(target).catch(() => null);
+  if (!info) return 0;
+  if (!info.isDirectory()) return info.size;
+  let total = 0;
+  for (const name of await readdir(target)) total += await sizeOf(path.join(target, name));
+  return total;
+}
+
+export async function dropUnusedEngines() {
+  const state = getState();
+  const archsInUse = new Set(Object.keys(state.models ?? {}).filter((id) => state.models[id].installedAt).map((id) => modelById(id)?.profile?.arch).filter(Boolean));
+  const dropped = [];
+  let bytes = 0;
+  for (const sheet of Object.values(state.engines ?? {})) {
+    if ((sheet.onlyArchs ?? []).some((arch) => archsInUse.has(arch))) continue;
+    const dir = path.join(DIRS.runtime, sheet.id);
+    const archives = (await readdir(DIRS.downloads).catch(() => [])).filter((name) => name.startsWith(`${sheet.id}-`)).map((name) => path.join(DIRS.downloads, name));
+    for (const target of [dir, ...archives]) { bytes += await sizeOf(target); await rm(target, { recursive: true, force: true }); }
+    update((s) => {
+      delete s.engines[sheet.id];
+      for (const key of Object.keys(s.runtimes ?? {})) if (key.startsWith(`${sheet.id}-`)) delete s.runtimes[key];
+      for (const key of Object.keys(s.engineArchs ?? {})) if (key.startsWith(`${sheet.id}@`)) delete s.engineArchs[key];
+      for (const key of Object.keys(s.downloads ?? {})) if (key === `runtime:${sheet.id}`) delete s.downloads[key];
+      if (s.buildFailures) delete s.buildFailures[sheet.id];
+    });
+    dropped.push(sheet.label);
+  }
+  return { dropped, bytes };
 }

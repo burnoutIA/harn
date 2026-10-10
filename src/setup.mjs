@@ -9,7 +9,7 @@ import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { configurePi, installPi } from './pi.mjs';
 import { OBJECTIVE, assess, makePlan } from './planner.mjs';
-import { addEngine, alternates, archMissing, canBuild, engineSheet, enginesFor, ensureEngine, findEngine, recordBuildFailure } from './engines.mjs';
+import { addEngine, alternates, archMissing, canBuild, dropUnusedEngines, engineSheet, enginesFor, ensureEngine, findEngine, recordBuildFailure } from './engines.mjs';
 import { requestApproval } from './approvals.mjs';
 import { checkHub } from './watch.mjs';
 import { engineEnv, installKetch, installLlama, installStrata } from './runtimes.mjs';
@@ -837,8 +837,10 @@ export async function deleteModel(modelId) {
     for (const id of Object.keys(s.downloads ?? {})) if (id.startsWith(`model:${modelId}:`)) delete s.downloads[id];
   });
   if (model.custom) await unregisterModel(modelId);
+  // Les moteurs ajoutés pour ce seul modèle (PR, fork) partent avec lui.
+  const engines = await dropUnusedEngines().catch(() => ({ dropped: [], bytes: 0 }));
   update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
-  return { freedBytes: freed, kept: Object.values(entry.paths ?? {}) };
+  return { freedBytes: freed + engines.bytes, kept: Object.values(entry.paths ?? {}), droppedEngines: engines.dropped };
 }
 
 async function dirSize(target) {
