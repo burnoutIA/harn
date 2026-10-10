@@ -171,6 +171,49 @@ export function assess(model, hardware) {
   return { fit: 'no', reasons: [`il faut au moins ${Math.ceil(capacity.weightsGiB + 4)} Go de mémoire graphique`] };
 }
 
+// Les estimations calées sur cette machine. Les formules (bande passante, MTP, MoE) sont réglées
+// sur une 3090 de référence ; ici, l'écart médian entre mesure et estimation des modèles déjà
+// passés au banc, par famille, corrige les autres. À grandeur égale : l'estimation vaut pour 100k
+// de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
+// peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
+// Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
+const familyOf = (model) => (model.engine === 'strata' || model.engine === 'prism' ? model.engine : model.moe ? 'moe' : 'dense');
+
+export function measuredAt100k(bench) {
+  const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);
+  const short = arm?.workloads?.find((w) => w.workload === 'code');
+  const deep = bench?.depth;
+  if (!short?.promptTokens || !short.tps || !deep?.tokens || !deep.tps || deep.tokens <= short.promptTokens * 2) return null;
+  const slope = (1 / deep.tps - 1 / short.tps) / (deep.tokens - short.promptTokens);
+  const perToken = 1 / deep.tps + Math.max(0, slope) * (OBJECTIVE.minContext - deep.tokens);
+  return perToken > 0 ? 1 / perToken : null;
+}
+
+export function calibrate(verdicts, profiles = {}) {
+  const ratios = {};
+  for (const entry of verdicts) {
+    const model = MODELS.find((m) => m.id === entry.id);
+    const measured = measuredAt100k(profiles[entry.id]?.bench);
+    if (model && measured && entry.tps && entry.fit === 'full') (ratios[familyOf(model)] ??= []).push(measured / entry.tps);
+  }
+  const factors = {};
+  for (const [family, values] of Object.entries(ratios)) {
+    const sorted = values.sort((a, b) => a - b);
+    const median = sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+    factors[family] = +Math.min(1.5, Math.max(0.5, median)).toFixed(3);
+  }
+  for (const entry of verdicts) {
+    const model = MODELS.find((m) => m.id === entry.id);
+    const factor = model && factors[familyOf(model)];
+    if (!factor || !entry.tps || profiles[entry.id]?.bench?.winner?.tps) continue;
+    entry.tpsUncalibrated = entry.tps;
+    entry.tps = Math.round(entry.tps * factor);
+    entry.calibration = +factor.toFixed(2);
+    entry.meetsSpeed = entry.tps >= OBJECTIVE.minTps;
+  }
+  return factors;
+}
+
 function finalize(verdict) {
   const tps = verdict.tps === null ? null : Math.round(verdict.tps);
   return {
@@ -194,6 +237,7 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
   const backend = pickBackend(hardware);
   const verdicts = MODELS.map((model) => ({ id: model.id, ...assess(model, hardware), intelligence: q(model), tested: scores[model.id] !== undefined }));
   const verdict = (id) => verdicts.find((entry) => entry.id === id);
+  const calibration = calibrate(verdicts, profiles);
   // Note globale : mesurée pour un modèle passé aux bancs, sinon estimée (intelligence, vitesse et
   // contexte attendus ici). C'est elle qui départage les modèles qui tiennent l'objectif.
   for (const entry of verdicts) {
@@ -245,6 +289,7 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
     targetModel: target?.id ?? null,
     targetWhy,
     verdicts,
+    calibration,
     summary: summarize(hardware, backend, first, upgrade, target ? verdict(target.id) : null),
     advice: ramAdvice(hardware),
   };

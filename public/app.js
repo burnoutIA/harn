@@ -750,7 +750,7 @@ function modelCard(model) {
 
   const speed = measured
     ? `<div class="v ${measured < minTps ? 'bad' : ''}">${fr(measured)}<small>tok/s</small></div>`
-    : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}">~${verdict.tps}<small>estimé</small></div>` : '<div class="v est">—</div>';
+    : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}" ${verdict.calibration ? `title="Estimation corrigée ×${fr(verdict.calibration, 2)} d’après les modèles déjà mesurés sur cette machine"` : ''}>~${verdict.tps}<small>${verdict.calibration ? 'estimé ici' : 'estimé'}</small></div>` : '<div class="v est">—</div>';
 
   let action = '';
   if (entry.phase || entry.installing || entry.tuning || pending.has(model.id)) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;

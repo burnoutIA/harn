@@ -251,3 +251,23 @@ test('banc : seuil de bruit, pondération selon l’usage', async () => {
   assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.code) > weightedHarmonic(results, USAGE_WEIGHTS.balanced));
   assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.prose) < weightedHarmonic(results, USAGE_WEIGHTS.balanced));
 });
+
+test('estimations calées à 100k sur les modèles déjà mesurés de la même famille', async () => {
+  const { measuredAt100k } = await import('../src/planner.mjs');
+  // 100 tok/s à 4k, 80 à 32k : le temps par token croît linéairement, ~54 à 100k.
+  const bench = { winner: { id: 'arm1', tps: 100 }, arms: [{ id: 'arm1', workloads: [{ workload: 'code', tps: 100, promptTokens: 4096 }] }], depth: { tokens: 32768, tps: 80 } };
+  const at100k = measuredAt100k(bench);
+  assert.ok(at100k > 53 && at100k < 55, `${at100k}`);
+  assert.equal(measuredAt100k({ winner: { id: 'arm1', tps: 100 }, arms: bench.arms }), null, 'sans profondeur : pas de calage');
+
+  const hw = machine(24, 64);
+  const raw = makePlan(hw);
+  const measuredId = 'swift15-q27-iq3s-mtp';
+  const estimate = raw.verdicts.find((v) => v.id === measuredId).tps;
+  const other = raw.verdicts.find((v) => v.id !== measuredId && v.fit === 'full' && v.tps && !modelById(v.id).moe && modelById(v.id).engine === 'llama');
+  const scaled = { ...bench, depth: { tokens: 32768, tps: 80 * (estimate * 0.6) / at100k }, arms: [{ id: 'arm1', workloads: [{ workload: 'code', tps: 100 * (estimate * 0.6) / at100k, promptTokens: 4096 }] }] };
+  const plan = makePlan(hw, {}, { [measuredId]: { bench: scaled } });
+  assert.ok(Math.abs(plan.calibration.dense - 0.6) < 0.01, `${plan.calibration.dense}`);
+  assert.equal(plan.verdicts.find((v) => v.id === other.id).tps, Math.round(other.tps * plan.calibration.dense));
+  assert.equal(plan.verdicts.find((v) => v.id === measuredId).calibration, undefined, 'le modèle mesuré garde sa mesure');
+});

@@ -84,7 +84,8 @@ async function inspectCandidate(candidate, hardware) {
       fit: best.verdict.fit,
       context: best.verdict.context,
       kv: best.verdict.kv,
-      tps: best.verdict.tps,
+      // Calée sur les modèles déjà mesurés ici, comme les estimations du catalogue.
+      tps: Math.round(best.verdict.tps * (getState().plan?.calibration?.[best.entry.moe ? 'moe' : 'dense'] ?? 1)),
       meetsObjective: Boolean(best.verdict.meetsContext && best.verdict.meetsSpeed),
     },
   };
