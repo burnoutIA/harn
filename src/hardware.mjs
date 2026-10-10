@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { statfs } from 'node:fs/promises';
 import os from 'node:os';
 import { promisify } from 'node:util';
-import { ROOT } from './paths.mjs';
+import { HOME } from './paths.mjs';
 
 const run = promisify(execFile);
 const GiB = 1024 ** 3;
@@ -120,7 +120,7 @@ export async function detectHardware() {
     nvidiaGpus(),
     windowsOtherGpus(),
     cpuInfo(),
-    statfs(ROOT).catch(() => null),
+    statfs(HOME).catch(() => null),
     gitBash(),
     linuxPython(),
     buildTools(),
@@ -146,7 +146,11 @@ export async function detectHardware() {
 }
 
 // Relevé léger pour le direct : un nvidia-smi par seconde au plus, quand l'interface regarde.
+let gpuSampler = null;
+export const setGpuSampler = (sampler) => { gpuSampler = sampler; };
+
 export async function sampleGpu() {
+  if (gpuSampler) return gpuSampler();
   const csv = await tryRun('nvidia-smi', [
     '--query-gpu=utilization.gpu,memory.used,memory.free,memory.total,power.draw,temperature.gpu,pstate,clocks.sm',
     '--format=csv,noheader,nounits', '-i', '0',

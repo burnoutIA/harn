@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { internalKey } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
-import { PORTS, fromRoot } from './paths.mjs';
+import { HOME, PORTS, fromRoot } from './paths.mjs';
 import { OBJECTIVE } from './planner.mjs';
 import { getState } from './state.mjs';
 
@@ -19,7 +19,7 @@ const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g
 
 export function machineDocPath(hardware) {
   const gpu = hardware.primary ? slugify(hardware.primary.name) : 'cpu';
-  return fromRoot('docs', 'machines', `${gpu}-${Math.round(hardware.ramGiB)}go-ram.md`);
+  return path.join(HOME, 'docs', 'machines', `${gpu}-${Math.round(hardware.ramGiB)}go-ram.md`);
 }
 
 function replaceBlock(text, name, body) {

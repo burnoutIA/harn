@@ -1,3 +1,4 @@
+import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BANK, TIER_POINTS, WEIGHTS, adaptive, extract, longDocument } from '../src/iq-test.mjs';

@@ -345,7 +345,7 @@ const exhausted = (tuning) => tuning.context <= OBJECTIVE.floorContext && layers
 let loadTicket = 0;
 const superseded = () => new Error('Chargement remplacé par celui d’un autre modèle');
 
-async function loadWithHeadroom(model, tuning) {
+export async function loadWithHeadroom(model, tuning) {
   const ticket = ++loadTicket;
   let current = { ...tuning };
   for (let attempt = 0; attempt < 14; attempt += 1) {

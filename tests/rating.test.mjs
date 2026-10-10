@@ -1,3 +1,4 @@
+import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { globalRating, paramsOf } from '../src/rating.mjs';

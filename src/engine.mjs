@@ -8,7 +8,7 @@ import { modelById } from './catalog.mjs';
 import { engineSheet } from './engines.mjs';
 import { backendCandidates, gpuProfile, mtpPlan } from './levers.mjs';
 import { sampleGpu } from './hardware.mjs';
-import { DIRS, PORTS, ROOT } from './paths.mjs';
+import { DIRS, PORTS } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
 const run = promisify(execFile);
@@ -143,7 +143,7 @@ export async function reapOrphans() {
 }
 
 async function windowsRuntimePids() {
-  const root = path.join(ROOT, 'runtime').replaceAll("'", "''");
+  const root = DIRS.runtime.replaceAll("'", "''");
   const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${root}', 'OrdinalIgnoreCase') } | Select-Object -ExpandProperty ProcessId`;
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }).catch(() => ({ stdout: '' }));
   return stdout.split(/\s+/).filter(Boolean).map(Number);
@@ -153,7 +153,7 @@ async function windowsRuntimePids() {
 // runtime/, sert la recherche web des sessions pi ouvertes : on le laisse.
 async function linuxRuntimePids() {
   if (process.platform !== 'linux') return [];
-  const root = path.join(ROOT, 'runtime') + path.sep;
+  const root = DIRS.runtime + path.sep;
   const pids = [];
   for (const entry of await readdir('/proc').catch(() => [])) {
     if (!/^\d+$/.test(entry)) continue;
