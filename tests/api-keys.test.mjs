@@ -1,3 +1,4 @@
+import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { bearerToken, extractPathKey, fingerprint, generateKey, hashKey } from '../src/api-keys.mjs';

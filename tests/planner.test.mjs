@@ -1,3 +1,4 @@
+import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { modelById } from '../src/catalog.mjs';
@@ -12,6 +13,24 @@ const machine = (vramGiB, ramGiB, vendor = 'nvidia', cuda = '13.4') => ({
 test('moins de 8 Go de VRAM : Bonsai', () => {
   assert.match(makePlan(machine(6, 16)).firstModel, /bonsai2/);
   assert.match(makePlan(machine(0, 8, null)).firstModel, /bonsai2-1bit/);
+});
+
+test('sous Linux : Strata proposé comme sous Windows', () => {
+  const linux = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
+  const windows = makePlan({ ...machine(24, 128), os: { platform: 'win32' } });
+  assert.equal(linux.upgradeModel, windows.upgradeModel);
+  assert.ok(linux.verdicts.some((v) => /strata/.test(v.id) && v.fit !== 'no'));
+});
+
+test('sous Linux sans Python venv : Strata hors de portée, avec la commande à lancer', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' }, python: { ok: false } });
+  const strata = plan.verdicts.filter((v) => /strata/.test(v.id));
+  assert.ok(strata.every((v) => v.fit === 'no' && v.reasons.some((r) => /python3-venv/.test(r))));
+});
+
+test('sous macOS : pas de Strata', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'darwin' } });
+  assert.ok(plan.verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));
 });
 
 test('16 Go de VRAM : le 27B GSQ-RCO qui atteint 100k', () => {
@@ -128,4 +147,142 @@ test('« Meilleur choix ici » suit la note globale mesurée, pas l’intelligen
   const profiles = { 'swift15-flashnext-iq3xxs-strata': profile(100, 90, 131072), 'swift15-q27-iq2xs-mtp': profile(100, 190, 153600) };
   const scores = { 'swift15-flashnext-iq3xxs-strata': 100, 'swift15-q27-iq2xs-mtp': 100 };
   assert.equal(makePlan(machine(24, 128), scores, profiles).targetModel, 'swift15-flashnext-iq3xxs-strata');
+});
+
+test('toutes les couches sur la carte, --fit seulement pour un modèle partagé', async () => {
+  const { defaultTuning, llamaArgs } = await import('../src/engine.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const hw = machine(24, 64);
+  const files = { model: 'm.gguf' };
+  const full = llamaArgs(model, files, defaultTuning(model, 131072, hw), hw);
+  assert.equal(full[full.indexOf('-ngl') + 1], '999');
+  assert.equal(full[full.indexOf('--fit') + 1], 'off');
+  const shared = llamaArgs(model, files, { ...defaultTuning(model, 131072, hw), layers: 'auto', fitTargetMiB: 1792 }, hw);
+  assert.equal(shared[shared.indexOf('-ngl') + 1], 'auto');
+});
+
+test('migration v2 : `layers` déduit des anciens réglages, état plus récent laissé tel quel', async () => {
+  const { migrate, SCHEMA_VERSION } = await import('../src/migrations.mjs');
+  const old = migrate({ version: 1, profiles: { a: { tuning: { fitTargetMiB: 1792 } }, b: { tuning: { fitTargetMiB: 1024 } }, c: {} } });
+  assert.equal(old.profiles.a.tuning.layers, 'auto');
+  assert.equal(old.profiles.b.tuning.layers, 'all');
+  assert.equal(old.version, SCHEMA_VERSION);
+  assert.equal(migrate({ version: SCHEMA_VERSION + 5 }).version, SCHEMA_VERSION + 5);
+});
+
+test('llamAmpere : KV K/V distincts, cache de prompts aligné sur l’officiel', async () => {
+  const { defaultTuning, describe, llamaArgs } = await import('../src/engine.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const hw = machine(24, 64);
+  const tuning = { ...defaultTuning(model, 131072, hw), fork: 'llamampere', kv: 'tq5_0', kvV: 'turbo4' };
+  const args = llamaArgs(model, { model: 'm.gguf' }, tuning, hw);
+  assert.equal(args[args.indexOf('--cache-type-k') + 1], 'tq5_0');
+  assert.equal(args[args.indexOf('--cache-type-v') + 1], 'turbo4');
+  assert.ok(args.includes('--no-cache-disk'));
+  assert.match(describe(tuning), /KV tq5_0\/turbo4.*llamAmpere/);
+});
+
+test('llamAmpere proposé seulement aux RTX 30 sous Linux avec les outils', async () => {
+  const { llamAmpereEligible } = await import('../src/levers.mjs');
+  const tools = { ok: true, nvcc: '12.4', cmake: true, hostCompiler: 'g++-13' };
+  assert.ok(llamAmpereEligible({ ...machine(24, 64), os: { platform: 'linux' }, buildTools: tools }));
+  assert.ok(!llamAmpereEligible({ ...machine(24, 64), os: { platform: 'win32' }, buildTools: tools }));
+  assert.ok(!llamAmpereEligible({ ...machine(24, 64), os: { platform: 'linux' }, buildTools: { ...tools, ok: false } }));
+});
+
+test('échec de chargement : architecture inconnue = définitif, manque de mémoire = on réessaie', async () => {
+  const { loadFailure } = await import('../src/engine.mjs');
+  assert.match(loadFailure("E llama_model_load: error loading model: unknown model architecture: 'xing4_0'\n", 'Xing4'), /architecture « xing4_0 » de Xing4/);
+  assert.equal(loadFailure('E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2048 MiB on device 0: cudaMalloc failed: out of memory\nE llama_model_load: error loading model: failed to allocate buffer\n'), null);
+  assert.equal(loadFailure('I srv llama_server: model loaded\n'), null);
+});
+
+test('architectures d’un moteur lues dans llama-arch.cpp', async () => {
+  const { parseArchs } = await import('../src/engines.mjs');
+  const source = 'static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {\n    { LLM_ARCH_LLAMA,  "llama" },\n    { LLM_ARCH_QWEN35, "qwen35" },\n    { LLM_ARCH_UNKNOWN, "(unknown)" },\n};';
+  assert.deepEqual(parseArchs(source), ['llama', 'qwen35', '(unknown)']);
+});
+
+test('fiches moteur : llamAmpere proposé au banc sur RTX 30 Linux, l’officiel face à un fork', async () => {
+  const { alternates } = await import('../src/engines.mjs');
+  const { gpuProfile } = await import('../src/levers.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const tools = { ok: true, nvcc: '12.4', cmake: true, hostCompiler: 'g++-13' };
+  const linux = { ...machine(24, 64), os: { platform: 'linux' }, buildTools: tools };
+  const profile = gpuProfile(linux);
+  const official = { context: 131072, backend: 'cuda12', kv: 'q8_0', spec: { type: 'mtp', n: 3, pMin: 0 } };
+
+  const fromOfficial = await alternates(model, official, profile, linux);
+  assert.deepEqual(fromOfficial.map((a) => a.id), ['llamampere']);
+  const [compressed, plain] = fromOfficial[0].arms('cuda12');
+  assert.equal(compressed.fork, 'llamampere');
+  assert.equal(compressed.kvV, 'turbo4');
+  assert.equal(plain.spec.n, 'auto');
+
+  const fromFork = await alternates(model, { ...compressed }, profile, linux);
+  assert.deepEqual(fromFork.map((a) => a.id), ['llama']);
+  const [back] = fromFork[0].arms('cuda12');
+  assert.equal(back.fork, undefined);
+  assert.equal(back.kv, 'q8_0');
+  assert.equal(back.kvV, undefined);
+  assert.equal(typeof back.spec.n, 'number');
+
+  assert.deepEqual(await alternates(model, official, profile, { ...linux, os: { platform: 'win32' } }), []);
+  assert.deepEqual(await alternates({ ...model, engine: 'prism' }, official, profile, linux), []);
+});
+
+test('GGUF qui annonce une couche MTP absente : métadonnée corrigée, sans anticipation', async () => {
+  const { defaultTuning, llamaArgs } = await import('../src/engine.mjs');
+  const model = { ...modelById('swift15-q27-iq3s-mtp'), profile: { arch: 'xing4_0', mtp: true } };
+  const hw = machine(24, 64);
+  const args = llamaArgs(model, { model: 'm.gguf' }, { ...defaultTuning(model, 131072, hw), noNextn: true }, hw);
+  assert.equal(args[args.indexOf('--override-kv') + 1], 'xing4_0.nextn_predict_layers=int:0');
+  assert.equal(args[args.indexOf('--spec-type') + 1], 'none');
+});
+
+test('banc : seuil de bruit, pondération selon l’usage', async () => {
+  const { isBetter, weightedHarmonic, USAGE_WEIGHTS } = await import('../src/tuner.mjs');
+  const current = { ok: true, tps: 80, spread: 0.01 };
+  assert.equal(isBetter({ ok: true, tps: 81.6, spread: 0.01 }, current), false, '2 % : dans le bruit');
+  assert.equal(isBetter({ ok: true, tps: 83, spread: 0.01 }, current), true, '3,75 % : au-delà');
+  assert.equal(isBetter({ ok: true, tps: 85, spread: 0.08 }, current), false, 'mesure trop dispersée pour trancher');
+  assert.equal(isBetter({ ok: false, tps: 200 }, current), false, 'marge VRAM insuffisante');
+  const results = [{ workload: 'code', tps: 110 }, { workload: 'prose', tps: 60 }];
+  assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.code) > weightedHarmonic(results, USAGE_WEIGHTS.balanced));
+  assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.prose) < weightedHarmonic(results, USAGE_WEIGHTS.balanced));
+});
+
+test('estimations calées à 100k sur les modèles déjà mesurés de la même famille', async () => {
+  const { measuredAt100k } = await import('../src/planner.mjs');
+  // 100 tok/s à 4k, 80 à 32k : le temps par token croît linéairement, ~54 à 100k.
+  const bench = { winner: { id: 'arm1', tps: 100 }, arms: [{ id: 'arm1', workloads: [{ workload: 'code', tps: 100, promptTokens: 4096 }] }], depth: { tokens: 32768, tps: 80 } };
+  const at100k = measuredAt100k(bench);
+  assert.ok(at100k > 53 && at100k < 55, `${at100k}`);
+  assert.equal(measuredAt100k({ winner: { id: 'arm1', tps: 100 }, arms: bench.arms }), null, 'sans profondeur : pas de calage');
+
+  const hw = machine(24, 64);
+  const raw = makePlan(hw);
+  const measuredId = 'swift15-q27-iq3s-mtp';
+  const estimate = raw.verdicts.find((v) => v.id === measuredId).tps;
+  const other = raw.verdicts.find((v) => v.id !== measuredId && v.fit === 'full' && v.tps && !modelById(v.id).moe && modelById(v.id).engine === 'llama');
+  const scaled = { ...bench, depth: { tokens: 32768, tps: 80 * (estimate * 0.6) / at100k }, arms: [{ id: 'arm1', workloads: [{ workload: 'code', tps: 100 * (estimate * 0.6) / at100k, promptTokens: 4096 }] }] };
+  const plan = makePlan(hw, {}, { [measuredId]: { bench: scaled } });
+  assert.ok(Math.abs(plan.calibration.dense - 0.6) < 0.01, `${plan.calibration.dense}`);
+  assert.equal(plan.verdicts.find((v) => v.id === other.id).tps, Math.round(other.tps * plan.calibration.dense));
+  assert.equal(plan.verdicts.find((v) => v.id === measuredId).calibration, undefined, 'le modèle mesuré garde sa mesure');
+});
+
+test('GitHub : limite atteinte dite clairement, réponses gardées en cache', async () => {
+  const { github } = await import('../src/github.mjs');
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => { calls += 1; return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 600) } }); };
+    await assert.rejects(github('/test/limite'), /Limite de l’API GitHub atteinte \(encore 10 min\).*data\/github\.token/);
+    globalThis.fetch = async () => { calls += 1; return new Response(JSON.stringify({ ok: 1 }), { status: 200 }); };
+    calls = 0;
+    await github('/test/cache');
+    await github('/test/cache');
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = realFetch; }
 });

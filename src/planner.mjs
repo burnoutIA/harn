@@ -12,8 +12,10 @@ import { RATING_WEIGHTS, globalRating, ratingFrom } from './rating.mjs';
 export const OBJECTIVE = { minContext: 100 * 1024, maxContext: 150 * 1024, minTps: 40, floorContext: 32 * 1024 };
 
 const GiB = 1024 ** 3;
+// Strata sous Linux : le seul prérequis que Harn ne peut pas poser lui-même (il faut sudo).
+export const PYTHON_MISSING = 'il faut d’abord installer Python avec venv : sudo apt install python3-venv (Ubuntu, Debian), puis relancer Harn';
 const CRAWL_TPS = 15;
-const BACKEND_LABEL = { cuda13: 'CUDA 13', cuda12: 'CUDA 12.4', vulkan: 'Vulkan', hip: 'HIP (ROCm)', cpu: 'Processeur' };
+const BACKEND_LABEL = { cuda13: 'CUDA 13', cuda12: 'CUDA 12', vulkan: 'Vulkan', hip: 'HIP (ROCm)', cpu: 'Processeur' };
 
 export function pickBackend(hardware) {
   const profile = gpuProfile(hardware);
@@ -133,6 +135,8 @@ export function assess(model, hardware) {
 
   if (hardware.diskFreeGiB !== null && hardware.diskFreeGiB < sizeGB * 1.05 + 5) reasons.push(`il faut ${Math.ceil(sizeGB + 5)} Go libres sur le disque (${hardware.diskFreeGiB} disponibles)`);
   if (model.engine === 'strata') {
+    // Strata s'installe par START-HERE.bat (Windows) ou setup.sh (Linux), rien d'autre.
+    if (hardware.os?.platform && !['win32', 'linux'].includes(hardware.os.platform)) return { fit: 'no', reasons: ['Strata n’est installé par Harn que sous Windows et Linux'] };
     // Moins de RAM que conseillé : Strata passe en mode faible RAM (la carte garde les experts les
     // plus utilisés, le reste est relu depuis le SSD) tant que RAM + carte couvrent les experts.
     if (!strataMemory(model, hardware.ramGiB, hardware.vramGiB)) {
@@ -142,6 +146,7 @@ export function assess(model, hardware) {
     if (gpu?.vendor !== 'nvidia') reasons.push('Strata demande une carte NVIDIA');
     else if (gpu.computeCapability < model.needs.nvidiaCc) reasons.push('Strata demande une RTX série 20 ou plus récente');
     if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
+    if (hardware.python?.ok === false) reasons.push(PYTHON_MISSING);
     if (reasons.length) return { fit: 'no', reasons };
     // Le KV de Strata vit en RAM au-delà de 64k (~13,7 Ko par token) : 131k tiennent dès que la RAM suit.
     // En mode faible RAM, le KV au-delà de 32k va sur la carte : ~1,4 Go à 131k, sans conséquence.
@@ -164,6 +169,49 @@ export function assess(model, hardware) {
     return finalize({ fit: 'partial', reasons: ['une partie du modèle tournera sur le processeur, plus lentement'], context, kv: shared.kv, tps });
   }
   return { fit: 'no', reasons: [`il faut au moins ${Math.ceil(capacity.weightsGiB + 4)} Go de mémoire graphique`] };
+}
+
+// Les estimations calées sur cette machine. Les formules (bande passante, MTP, MoE) sont réglées
+// sur une 3090 de référence ; ici, l'écart médian entre mesure et estimation des modèles déjà
+// passés au banc, par famille, corrige les autres. À grandeur égale : l'estimation vaut pour 100k
+// de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
+// peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
+// Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
+const familyOf = (model) => (model.engine === 'strata' || model.engine === 'prism' ? model.engine : model.moe ? 'moe' : 'dense');
+
+export function measuredAt100k(bench) {
+  const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);
+  const short = arm?.workloads?.find((w) => w.workload === 'code');
+  const deep = bench?.depth;
+  if (!short?.promptTokens || !short.tps || !deep?.tokens || !deep.tps || deep.tokens <= short.promptTokens * 2) return null;
+  const slope = (1 / deep.tps - 1 / short.tps) / (deep.tokens - short.promptTokens);
+  const perToken = 1 / deep.tps + Math.max(0, slope) * (OBJECTIVE.minContext - deep.tokens);
+  return perToken > 0 ? 1 / perToken : null;
+}
+
+export function calibrate(verdicts, profiles = {}) {
+  const ratios = {};
+  for (const entry of verdicts) {
+    const model = MODELS.find((m) => m.id === entry.id);
+    const measured = measuredAt100k(profiles[entry.id]?.bench);
+    if (model && measured && entry.tps && entry.fit === 'full') (ratios[familyOf(model)] ??= []).push(measured / entry.tps);
+  }
+  const factors = {};
+  for (const [family, values] of Object.entries(ratios)) {
+    const sorted = values.sort((a, b) => a - b);
+    const median = sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+    factors[family] = +Math.min(1.5, Math.max(0.5, median)).toFixed(3);
+  }
+  for (const entry of verdicts) {
+    const model = MODELS.find((m) => m.id === entry.id);
+    const factor = model && factors[familyOf(model)];
+    if (!factor || !entry.tps || profiles[entry.id]?.bench?.winner?.tps) continue;
+    entry.tpsUncalibrated = entry.tps;
+    entry.tps = Math.round(entry.tps * factor);
+    entry.calibration = +factor.toFixed(2);
+    entry.meetsSpeed = entry.tps >= OBJECTIVE.minTps;
+  }
+  return factors;
 }
 
 function finalize(verdict) {
@@ -189,6 +237,7 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
   const backend = pickBackend(hardware);
   const verdicts = MODELS.map((model) => ({ id: model.id, ...assess(model, hardware), intelligence: q(model), tested: scores[model.id] !== undefined }));
   const verdict = (id) => verdicts.find((entry) => entry.id === id);
+  const calibration = calibrate(verdicts, profiles);
   // Note globale : mesurée pour un modèle passé aux bancs, sinon estimée (intelligence, vitesse et
   // contexte attendus ici). C'est elle qui départage les modèles qui tiennent l'objectif.
   for (const entry of verdicts) {
@@ -240,6 +289,7 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
     targetModel: target?.id ?? null,
     targetWhy,
     verdicts,
+    calibration,
     summary: summarize(hardware, backend, first, upgrade, target ? verdict(target.id) : null),
     advice: ramAdvice(hardware),
   };
@@ -264,6 +314,7 @@ function explainTarget(target, candidates, verdict, q, profiles) {
 function ramAdvice(hardware) {
   const gpu = hardware.primary;
   if (gpu?.vendor !== 'nvidia' || gpu.computeCapability < 7.5 || hardware.vramGiB < 11.5) return null;
+  if (hardware.os?.platform && !['win32', 'linux'].includes(hardware.os.platform)) return null; // Strata : Windows et Linux
   // Seulement un modèle qui ne tourne pas encore ici : sinon on conseillerait ce qui marche déjà.
   const strata = MODELS.filter((m) => m.engine === 'strata' && hardware.vramGiB >= m.needs.vramGiB && !strataMemory(m, hardware.ramGiB, hardware.vramGiB))
     .map((m) => ({ model: m, ram: strataRamNeeded(m, hardware.vramGiB) }))

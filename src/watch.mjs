@@ -4,6 +4,7 @@
 // les fichiers ont changé sur Hugging Face. Une fois par jour, sans clé (API publique).
 import { MODELS, modelById } from './catalog.mjs';
 import { buildEntry, inspectRepo } from './custom-models.mjs';
+import { enginesFor } from './engines.mjs';
 import { OBJECTIVE, assess } from './planner.mjs';
 import { paramsOf } from './rating.mjs';
 import { getState, update } from './state.mjs';
@@ -63,6 +64,9 @@ async function inspectCandidate(candidate, hardware) {
   let report;
   try { report = await inspectRepo(candidate.repo); } catch (error) { return { ...base, usable: false, error: error.message }; }
   if (report.gated) return { ...base, usable: false, gated: true, name: report.profile?.name ?? candidate.repo.split('/')[1] };
+  // Aucun moteur ne sait charger cette architecture : on le dit au lieu de proposer un échec.
+  const engines = await enginesFor(report.profile?.arch, hardware);
+  if (engines && !engines.length) return { ...base, usable: false, engineMissing: report.profile.arch, name: report.profile?.name ?? candidate.repo.split('/')[1], license: report.license };
   const best = bestQuant(report, hardware);
   const projector = report.mmproj.find((m) => /f16/i.test(m.name)) ?? report.mmproj[0] ?? null;
   return {
@@ -80,7 +84,8 @@ async function inspectCandidate(candidate, hardware) {
       fit: best.verdict.fit,
       context: best.verdict.context,
       kv: best.verdict.kv,
-      tps: best.verdict.tps,
+      // Calée sur les modèles déjà mesurés ici, comme les estimations du catalogue.
+      tps: Math.round(best.verdict.tps * (getState().plan?.calibration?.[best.entry.moe ? 'moe' : 'dense'] ?? 1)),
       meetsObjective: Boolean(best.verdict.meetsContext && best.verdict.meetsSpeed),
     },
   };

@@ -84,6 +84,13 @@ export function backendCandidates(hardware, profile) {
   return ['cpu'];
 }
 
+// llamAmpere (github.com/JakeATX/llamAmpere) : fork de llama.cpp aux noyaux écrits pour les
+// RTX 30 (SM86), Linux seulement, à compiler. Mesuré sur la 3090 de référence (ATX IQ4_XS-M,
+// 150k) : code 98 → 111-116 tok/s, prose 67 → 63, ~3 Gio de VRAM en moins avec son KV tq5_0/turbo4.
+// Proposé au banc, jamais imposé : c'est la mesure qui tranche.
+export const isAmpereLinux = (hardware) => hardware?.os?.platform === 'linux' && hardware.primary?.vendor === 'nvidia' && hardware.primary.computeCapability === 8.6;
+export const llamAmpereEligible = (hardware) => isAmpereLinux(hardware) && Boolean(hardware.buildTools?.ok);
+
 // Le point de départ du décodage spéculatif MTP, puis ses voisins à mesurer.
 export function mtpPlan(profile) {
   if (profile.bandwidthClass === 'low') {

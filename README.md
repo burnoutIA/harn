@@ -17,6 +17,44 @@ le règle et le mesure, puis installe **pi agent** déjà branché dessus.
 
 Les trois longues attentes (moteur, poids, pi) se font en parallèle.
 
+### Avant d'installer, sous Linux
+
+Une seule chose que Harn ne peut pas faire seul, parce qu'elle demande votre mot de passe :
+si vous avez une NVIDIA d'au moins 12 Go (RTX série 20 ou plus récente), les grands MoE
+Flash-Next passent par Strata, dont l'installeur a besoin de Python 3.10+ avec venv.
+Ubuntu et Debian le livrent sans venv :
+
+```sh
+sudo apt install python3-venv
+```
+
+Fedora et Arch l'ont déjà. Sinon `Harn-install.sh` le propose, et l'application le rappelle
+dans ses vérifications et sur la carte des modèles Strata.
+
+Avec une RTX 30 (3060 à 3090 Ti), Harn peut aussi mesurer
+[llamAmpere](https://github.com/JakeATX/llamAmpere), un llama.cpp aux noyaux écrits pour ces
+cartes : sur une 3090, +15 à 20 % en code et en contexte long, un peu moins vite en prose
+française, ~3 Go de VRAM en moins. Pas de binaire publié : Harn le compile une fois (10 à 20 min,
+version figée), à condition d'avoir les outils :
+
+```sh
+sudo apt install nvidia-cuda-toolkit cmake build-essential
+```
+
+Le banc le met face au moteur officiel et garde le plus rapide.
+
+Harn interroge GitHub (versions des moteurs, recherche d'un moteur pour une architecture
+nouvelle, mises à jour). Sans compte, GitHub limite à 60 requêtes par heure ; un jeton sans
+aucune permission (github.com → Settings → Developer settings → Fine-grained token, accès
+« Public repositories ») en donne 5 000. Le mettre dans `data/github.token`, ou dans la variable
+`GITHUB_TOKEN`.
+
+Quand un modèle demande un moteur que llama.cpp ne publie pas encore (une PR non fusionnée),
+Harn le propose et attend votre accord : c'est du code que personne n'a relu. Sous Linux, ce
+moteur est compilé puis lancé dans une bulle [bubblewrap](https://github.com/containers/bubblewrap)
+(`sudo apt install bubblewrap`) : sans réseau, sans accès à vos fichiers, il ne voit que ses
+sources, le modèle qu'il sert et la carte graphique. Sans bubblewrap, la demande d'accord le dit.
+
 ## Choix du modèle
 
 | Machine | Premier modèle | Proposé ensuite |
@@ -102,6 +140,9 @@ change pas. Il reste à valider la qualité, la présence de la tête MTP et la 
   il existe. Strata est figé sur un commit (`STRATA_COMMIT` dans `src/runtimes.mjs`).
 - `node src/main.mjs --no-open --no-setup` pour développer sans lancer l'installation.
 - `npm run check` pour les tests.
+- `npm run power-test` : 30 min de créneaux repos / pleine charge pour savoir si l'alimentation
+  tient les pics de la carte graphique, avec relevé de puissance toutes les 20 ms
+  (`data/logs/power-*.csv`). Après une coupure, le relancer : il dit ce qui s'est passé.
 
 ### Lancer, relancer, arrêter
 
@@ -109,6 +150,14 @@ change pas. Il reste à valider la qualité, la présence de la tête MTP et la 
   `Harn-install.cmd` reste le premier lancement : il installe Node.js s'il manque.
 - `Harn-stop.cmd` (double-clic) : ferme Harn. Si quelque chose est en cours, il l'affiche et
   demande s'il faut arrêter quand même.
+- Sous Linux : `./Harn-install.sh`, `./Harn-start.sh` et `./Harn-stop.sh` font la même chose.
+  L'installeur pose Node.js dans `~/.local/node` (sans sudo) s'il manque, et ajoute au menu des
+  applications les lanceurs « Harn », « Harn - arrêter » et « Harn - installer » (le gestionnaire
+  de fichiers de GNOME ouvre les `.sh` dans l'éditeur au lieu de les lancer).
+  `./Harn-install.sh --lanceurs` ne fait que (re)créer ces lanceurs.
+  Moteur : builds `ubuntu` de llama.cpp (CUDA 12.8 ou 13, avec leurs bibliothèques CUDA, sans
+  toolkit à installer), `linux-cuda` de Prism, build Linux de ketch. Strata (Flash-Next) s'installe
+  par son `setup.sh` (voir « Avant d'installer, sous Linux »).
 - `npm run restart` : lance Harn, ou le relance s'il tourne déjà.
 - `npm run stop` : arrête Harn, moteur compris.
 

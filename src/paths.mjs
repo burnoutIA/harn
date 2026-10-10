@@ -5,14 +5,19 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const fromRoot = (...parts) => path.join(ROOT, ...parts);
 
+// HARN_HOME : l'installation (état, modèles, moteurs) ailleurs que dans le dépôt. Les tests s'en
+// servent pour ne jamais toucher à la vraie installation ; le code et l'interface restent ici.
+export const HOME = process.env.HARN_HOME ? path.resolve(process.env.HARN_HOME) : ROOT;
+const fromHome = (...parts) => path.join(HOME, ...parts);
+
 export const DIRS = {
-  runtime: fromRoot('runtime'),
-  models: fromRoot('models'),
-  data: fromRoot('data'),
-  logs: fromRoot('data', 'logs'),
-  downloads: fromRoot('runtime', 'downloads'),
-  piAgent: fromRoot('data', 'pi-agent'),
-  workspace: fromRoot('workspace'),
+  runtime: fromHome('runtime'),
+  models: fromHome('models'),
+  data: fromHome('data'),
+  logs: fromHome('data', 'logs'),
+  downloads: fromHome('runtime', 'downloads'),
+  piAgent: fromHome('data', 'pi-agent'),
+  workspace: fromHome('workspace'),
   public: fromRoot('public'),
 };
 

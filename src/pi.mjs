@@ -11,7 +11,7 @@ import { getState, update } from './state.mjs';
 
 const run = promisify(execFile);
 const PACKAGE = '@earendil-works/pi-coding-agent';
-const PREFIX = fromRoot('runtime', 'pi');
+const PREFIX = path.join(DIRS.runtime, 'pi');
 
 // pi s'installe dans le dépôt, avec son propre dossier d'agent (PI_CODING_AGENT_DIR) :
 // rien ne touche au ~/.pi de l'utilisateur s'il en a déjà un.
