@@ -708,16 +708,45 @@ function renderModels() {
   </div>`);
 }
 
+// ── Commande du moteur ─────────────────────────────────────
+// La commande exacte du moteur chargé, à copier telle quelle ou à partager : les chemins réduits
+// au nom du fichier (ils contiennent le nom d'utilisateur) et sans le fichier de clé de Harn.
+let engineCmd = null;
+const isPath = (arg) => /^[A-Za-z]:[\\/]|^\//.test(arg);
+const baseName = (arg) => arg.split(/[\\/]/).pop();
+const quote = (arg) => (/[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg);
+function commandText(cmd, share) {
+  const args = [];
+  for (let i = 0; i < cmd.args.length; i += 1) {
+    if (share && cmd.args[i] === '--api-key-file') { i += 1; continue; }
+    args.push(share && isPath(cmd.args[i]) ? baseName(cmd.args[i]) : cmd.args[i]);
+  }
+  const exe = share ? baseName(cmd.command) : cmd.command;
+  const build = cmd.command.split(/[\\/]/).at(-2)?.match(/^b\d+.*/)?.[0];
+  const lines = [`# ${cmd.label}${build ? ` · ${build}` : ''}`, [exe, ...args].map(quote).join(' ')];
+  if (cmd.config) lines.push('', `# ${cmd.configName}`, cmd.config.trim());
+  return lines.join('\n');
+}
+function renderEngineCmd() {
+  if (!engineCmd) return paint('tune-cmd', '');
+  if (engineCmd.error) return paint('tune-cmd', `<section class="card"><p class="empty">${esc(engineCmd.error)}</p></section>`);
+  paint('tune-cmd', `<section class="card engine-cmd">
+    <div class="view-head" style="margin-bottom:10px"><div><div class="label">Commande du moteur</div><p style="margin-top:6px;font-size:calc(13.5px * var(--fs))">Ce que Harn lance pour ${esc(engineCmd.label)}, avec le réglage retenu par le banc. La version à partager remplace les chemins par le nom des fichiers et retire la clé interne de Harn.</p></div>
+      <div class="row"><button class="btn small" data-action="cmd-copy" data-share="1">${icon.copy} Copier pour partager</button><button class="btn small ghost" data-action="cmd-copy">Copier telle quelle</button><button class="btn small ghost" data-action="cmd-close">Fermer</button></div></div>
+    <pre>${esc(commandText(engineCmd, false))}</pre></section>`);
+}
+
 // ── Réglages ───────────────────────────────────────────────
 function renderTuning() {
-  mount('tuning', `<div class="view"><div class="view-head" id="tune-head"></div><div class="tuning-grid"><div style="display:grid;gap:20px"><section class="card" id="tune-arms"></section><section class="card" id="tune-iq"></section></div><aside class="card explain" id="tune-explain"></aside></div></div>`);
+  mount('tuning', `<div class="view"><div class="view-head" id="tune-head"></div><div id="tune-cmd"></div><div class="tuning-grid"><div style="display:grid;gap:20px"><section class="card" id="tune-arms"></section><section class="card" id="tune-iq"></section></div><aside class="card explain" id="tune-explain"></aside></div></div>`);
   const id = state.active?.modelId;
   const bench = state.profiles[id]?.bench;
   const ready = state.active?.status === 'ready';
   paint('tune-head', `<div><h1>Réglages</h1><p>${bench
     ? `Harn a essayé ${bench.arms.length} réglages de ${esc(nameOf(id))} sur votre carte, en ne changeant qu’une chose à la fois, et garde le plus rapide.`
     : 'Les réglages s’affichent après la première mesure.'}</p></div>
-    ${id ? `<button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button>` : ''}`);
+    ${id ? `<div class="row"><button class="btn ghost" data-action="cmd-show">${icon.terminal} Commande ${modelOf(id)?.engine === 'strata' ? 'Strata' : 'llama.cpp'}</button><button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button></div>` : ''}`);
+  renderEngineCmd();
   if (!bench) { paint('tune-arms', '<p class="empty">Pas encore de mesure.</p>'); }
   else {
     const all = bench.arms.flatMap((a) => (a.workloads ?? []).map((w) => w.tps));
@@ -1094,6 +1123,12 @@ app.addEventListener('click', async (event) => {
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }
+    if (action === 'cmd-show') {
+      engineCmd = await fetch('/api/engine/command').then(async (r) => (r.ok ? r.json() : { error: (await r.json()).error }));
+      renderEngineCmd();
+    }
+    if (action === 'cmd-close') { engineCmd = null; renderEngineCmd(); }
+    if (action === 'cmd-copy' && engineCmd && !engineCmd.error) await copy(commandText(engineCmd, Boolean(button.dataset.share)), button.dataset.share ? 'Commande copiée, prête à partager' : 'Commande copiée');
     if (action === 'hub-check') { await post('/api/watch/check'); toast('Recherche des nouveautés sur Hugging Face'); }
     if (action === 'hub-dismiss') { await post('/api/watch/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }
     if (action === 'hub-install') {

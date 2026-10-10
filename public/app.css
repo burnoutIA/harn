@@ -270,6 +270,9 @@ main { padding: 8px clamp(16px, 4vw, 48px) 72px; max-width: 1180px; width: 100%;
 .group-title h2 { font-size: calc(15px * var(--fs)); font-weight: 600; letter-spacing: -0.01em; }
 .group-title span { color: var(--faint); font-size: calc(13px * var(--fs)); }
 .hub-head { align-items: center; flex-wrap: wrap; }
+.engine-cmd { margin-bottom: 20px; }
+.engine-cmd .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.engine-cmd pre { margin: 0; padding: 14px 16px; border-radius: 10px; background: var(--surface-2); font: calc(12.5px * var(--fs))/1.55 var(--mono); white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto; }
 .hub-head .btn { margin-left: auto; }
 .model.hub .foot a.btn { text-decoration: none; }
 .models { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }

@@ -186,6 +186,14 @@ async function api(req, res, url) {
     const text = file ? await readFile(file, 'utf8').catch(() => '') : '';
     return json(res, 200, { file, text });
   }
+  if (req.method === 'GET' && url.pathname === '/api/engine/command') {
+    // La commande exacte du moteur chargé, pour la partager. Strata : sa config JSON en plus.
+    const active = getState().active;
+    if (!active?.command) return json(res, 404, { error: 'Aucun moteur lancé depuis ce démarrage de Harn' });
+    const configArg = active.args[active.args.indexOf('--config') + 1];
+    const config = active.args.includes('--config') ? await readFile(path.resolve(active.cwd ?? '', configArg), 'utf8').catch(() => null) : null;
+    return json(res, 200, { modelId: active.modelId, label: active.label, status: active.status, command: active.command, args: active.args, cwd: active.cwd ?? null, config, configName: config ? configArg : null });
+  }
   if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
   if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
     const entry = approvalOf(parts[2]);

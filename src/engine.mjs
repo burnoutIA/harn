@@ -137,7 +137,7 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   const log = createWriteStream(path.join(DIRS.logs, 'engine.log'), { flags: 'w' });
   log.write(`# ${new Date().toISOString()}\n# ${command} ${args.join(' ')}\n\n`);
 
-  update((s) => { s.active = { modelId, label, status: 'loading', since: Date.now(), endpoint, args, error: null }; });
+  update((s) => { s.active = { modelId, label, status: 'loading', since: Date.now(), endpoint, command, args, cwd, error: null }; });
   let exited = false;
   const process_ = spawn(command, args, { cwd, env: { ...process.env, ...env }, windowsHide: true });
   child = process_;
