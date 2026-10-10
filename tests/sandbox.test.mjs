@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { MODELS, modelById } from '../src/catalog.mjs';
 import { defaultTuning, startEngine, stopEngine } from '../src/engine.mjs';
 import { recipeFor } from '../src/loading.mjs';
@@ -15,7 +16,7 @@ import { update } from '../src/state.mjs';
 // Un moteur ajouté avec l'accord de l'utilisateur tourne dans la bulle : il répond par le relais,
 // mais ne lit ni un fichier hors de ses dossiers, ni le dossier personnel, ni le réseau.
 // Sauté là où bubblewrap manque (Windows, Linux sans bwrap ou sans espaces de noms utilisateur).
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const available = await sandboxAvailable();
 after(() => stopEngine());
 

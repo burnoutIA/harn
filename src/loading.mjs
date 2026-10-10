@@ -54,7 +54,7 @@ export function recipeFor(model, tuning) {
     modelId: model.id,
     label: displayName(model),
     command: runtime.serverPath,
-    args: llamaArgs(model, files, tuning, state.hardware),
+    args: [...(runtime.serverArgs ?? []), ...llamaArgs(model, files, tuning, state.hardware)],
     cwd: runtime.dir,
     env: engineEnv(runtime.dir),
     endpoint: `http://127.0.0.1:${PORTS.engine}`,

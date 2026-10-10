@@ -1,12 +1,13 @@
 import './helpers/home.mjs';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { MODELS, modelById } from '../src/catalog.mjs';
-import { defaultTuning, stopEngine } from '../src/engine.mjs';
+import { defaultTuning, startEngine, stopEngine } from '../src/engine.mjs';
 import { setGpuSampler } from '../src/hardware.mjs';
-import { DIRS } from '../src/paths.mjs';
+import { DIRS, PORTS } from '../src/paths.mjs';
 import { makePlan } from '../src/planner.mjs';
 import { loadWithHeadroom, tuneModel } from '../src/setup.mjs';
 import { getState, update } from '../src/state.mjs';
@@ -15,7 +16,7 @@ import { getState, update } from '../src/state.mjs';
 // (tests/helpers/fake-llama-server.mjs) et une carte simulée de 24 Go : la VRAM libre dépend du
 // contexte et du type de KV du moteur lancé, comme sur la 3090 de référence.
 
-const FAKE = path.join(path.dirname(new URL(import.meta.url).pathname), 'helpers', 'fake-llama-server.mjs');
+const FAKE = fileURLToPath(new URL('./helpers/fake-llama-server.mjs', import.meta.url));
 const MiB = 2 ** 20;
 const HARDWARE = {
   os: { platform: 'linux' }, cpu: { physical: 8, model: 'x' }, ramGiB: 64, freeRamGiB: 48, diskFreeGiB: 500, gitBash: true, buildTools: null, python: null,
@@ -58,14 +59,12 @@ const launches = (id) => {
 before(() => {
   const dir = path.join(DIRS.runtime, 'llama', 'fake');
   mkdirSync(dir, { recursive: true });
-  const serverPath = path.join(dir, 'llama-server');
-  writeFileSync(serverPath, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
-  chmodSync(serverPath, 0o755);
+  // Le faux moteur est lancé par node, sans script intermédiaire : pareil sous Windows et Linux.
   setGpuSampler(async () => sampler());
   update((s) => {
     s.hardware = HARDWARE;
     s.plan = makePlan(HARDWARE);
-    s.runtimes['llama-cuda12'] = { kind: 'llama', backend: 'cuda12', tag: 'fake', dir, serverPath };
+    s.runtimes['llama-cuda12'] = { kind: 'llama', backend: 'cuda12', tag: 'fake', dir, serverPath: process.execPath, serverArgs: [FAKE] };
   });
 });
 after(() => stopEngine());
@@ -84,6 +83,13 @@ test('architecture inconnue : échec définitif, cause affichée, pas de nouvel 
   const model = addModel('t-arch', { arch: 'xing4_0', unknownArch: true });
   await assert.rejects(loadWithHeadroom(model, defaultTuning(model, 131072, HARDWARE)), /architecture « xing4_0 »/);
   assert.equal(launches(model.id).length, 1);
+});
+
+test('moteur introuvable : échec immédiat et lisible, sans attendre le délai de chargement', LIMIT, async () => {
+  const endpoint = `http://127.0.0.1:${PORTS.engine}`;
+  const recipe = { modelId: 't-missing', label: 't-missing', command: path.join(DIRS.runtime, 'absent', 'llama-server'), args: [], endpoint, health: `${endpoint}/health` };
+  await assert.rejects(startEngine(recipe), (error) => error.fatal && /n’a pas pu être lancé/.test(error.message));
+  assert.equal(getState().active.status, 'error');
 });
 
 test('GGUF qui annonce une couche MTP absente : rechargé sans elle', LIMIT, async () => {

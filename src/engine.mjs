@@ -234,6 +234,13 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   const keep = (chunk) => { tail = (tail + chunk).slice(-16_384); };
   process_.stdout.on('data', keep);
   process_.stderr.on('data', keep);
+  // Exécutable absent ou bloqué (antivirus, fichier supprimé) : pas d'« exit », seulement « error ».
+  let spawnError = null;
+  process_.on('error', (error) => {
+    spawnError = error;
+    exited = true;
+    if (child === process_) child = null;
+  });
   process_.on('exit', (code) => {
     exited = true;
     if (child === process_) child = null;
@@ -249,7 +256,8 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
     await stopRelay();
     const cause = loadFailure(tail, label);
     // tensors : le fichier ne contient pas les tenseurs que ses métadonnées annoncent.
-    const failure = cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors/.test(tail) }) : error;
+    const failure = spawnError ? Object.assign(new Error(`Le moteur n’a pas pu être lancé : ${spawnError.message}`), { fatal: true })
+      : cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors/.test(tail) }) : error;
     update((s) => { s.active = { ...s.active, status: 'error', error: failure.message }; });
     throw failure;
   }

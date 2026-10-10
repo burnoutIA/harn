@@ -1,7 +1,6 @@
 # Les tests à chaque envoi et chaque PR. L'orchestration (chargement, banc, file d'attente de la
 # carte) tourne contre un faux llama-server : pas besoin de carte graphique.
-# Windows : à ajouter (runs-on: windows-latest) une fois les tests d'orchestration portés
-# (le faux moteur est lancé par un script shell).
+# Linux et Windows : le faux moteur est lancé par node, sans script shell.
 name: Tests
 
 on:
@@ -9,8 +8,12 @@ on:
   pull_request:
 
 jobs:
-  linux:
-    runs-on: ubuntu-latest
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
