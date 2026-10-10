@@ -1218,7 +1218,9 @@ app.addEventListener('click', async (event) => {
   try {
     if (action === 'pi') {
       if (state.active && state.active.status !== 'ready') post(`/api/models/${state.active.modelId}/activate`);
-      const r = await post('/api/pi/launch', {}); toast(`pi agent s’ouvre avec ${nameOf(r.model)}`); }
+      // « Tester » vise le modèle affiché, celui qui est chargé ; le modèle par défaut (cœur)
+      // reste celui des autres lancements de pi et des applications.
+      const r = await post('/api/pi/launch', state.active?.modelId ? { model: state.active.modelId } : {}); toast(`pi agent s’ouvre avec ${nameOf(r.model)}`); }
     if (action === 'retry') await post('/api/setup/start');
     if (action === 'install') {
       if (pending.has(id) || busyModels().includes(id)) return toast('Déjà en cours : suivez-la dans « En cours »');
