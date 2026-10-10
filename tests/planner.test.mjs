@@ -223,3 +223,12 @@ test('fiches moteur : llamAmpere proposé au banc sur RTX 30 Linux, l’officiel
   assert.deepEqual(await alternates(model, official, profile, { ...linux, os: { platform: 'win32' } }), []);
   assert.deepEqual(await alternates({ ...model, engine: 'prism' }, official, profile, linux), []);
 });
+
+test('GGUF qui annonce une couche MTP absente : métadonnée corrigée, sans anticipation', async () => {
+  const { defaultTuning, llamaArgs } = await import('../src/engine.mjs');
+  const model = { ...modelById('swift15-q27-iq3s-mtp'), profile: { arch: 'xing4_0', mtp: true } };
+  const hw = machine(24, 64);
+  const args = llamaArgs(model, { model: 'm.gguf' }, { ...defaultTuning(model, 131072, hw), noNextn: true }, hw);
+  assert.equal(args[args.indexOf('--override-kv') + 1], 'xing4_0.nextn_predict_layers=int:0');
+  assert.equal(args[args.indexOf('--spec-type') + 1], 'none');
+});

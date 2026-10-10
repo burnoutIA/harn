@@ -355,6 +355,9 @@ async function loadWithHeadroom(model, tuning) {
       active = await startEngine(recipeFor(model, current));
     } catch (error) {
       if (ticket !== loadTicket) throw superseded();
+      // Un fichier qui annonce une couche MTP qu'il ne contient pas (convertisseur d'une autre
+      // version) : on recharge en ignorant cette annonce avant de conclure à l'échec.
+      if (error.tensors && model.profile?.mtp && !current.noNextn) { current = { ...current, noNextn: true, spec: { type: 'none' } }; continue; }
       if (error.fatal || exhausted(current) || model.engine === 'strata') throw error;
       current = smaller(current);
       continue;
@@ -467,7 +470,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   if (best.error) throw new Error(best.error);
   const gpu = initial.tuning.backend !== 'cpu';
 
-  if (gpu && model.mtp) {
+  if (gpu && model.mtp && !best.tuning.noNextn) {
     // Les voisins du meilleur réglage connu (n ± 1), plus les a priori de la classe de carte.
     const current = best.tuning.spec?.type === 'mtp' ? best.tuning.spec : mtpPlan(profile).base;
     const seen = new Set([`${current.n}/${current.pMin}`]);

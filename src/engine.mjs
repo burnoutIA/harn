@@ -55,6 +55,7 @@ export function describe(tuning) {
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
   if (tuning.fa === 'off') parts.push('sans FA');
+  if (tuning.noNextn) parts.push('sans MTP (absent du fichier)');
   if (layersOf(tuning) === 'auto') parts.push('partagé CPU');
   if (tuning.fork) parts.push(engineSheet(tuning.fork)?.label ?? tuning.fork);
   if (tuning.backend && !tuning.backend.startsWith('cuda')) parts.push(tuning.backend.toUpperCase());
@@ -85,7 +86,10 @@ export function llamaArgs(model, files, tuning, hardware) {
   if (gpu && layersOf(tuning) === 'auto') args.push('-ngl', 'auto', '--fit', 'on', '--fit-target', String(tuning.fitTargetMiB), '-fa', tuning.fa ?? 'on');
   else if (gpu) args.push('-ngl', '999', '--fit', 'off', '-fa', tuning.fa ?? 'on');
   else args.push('-ngl', '0');
-  const spec = tuning.spec ?? { type: 'none' };
+  // GGUF qui annonce une couche d'anticipation (MTP) absente du fichier : on corrige la métadonnée
+  // au chargement, le modèle tourne sur ses couches réelles, sans anticipation.
+  if (tuning.noNextn && model.profile?.arch) args.push('--override-kv', `${model.profile.arch}.nextn_predict_layers=int:0`);
+  const spec = tuning.noNextn ? { type: 'none' } : tuning.spec ?? { type: 'none' };
   if (spec.type === 'mtp' && spec.n === 'auto') {
     // Profondeur choisie par le moteur lui-même (llamAmpere : adaptative 3-4, réglée pour ses noyaux).
   } else if (spec.type === 'mtp') {
@@ -216,7 +220,8 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   } catch (error) {
     await killTree(process_.pid);
     const cause = loadFailure(tail, label);
-    const failure = cause ? Object.assign(new Error(cause), { fatal: true }) : error;
+    // tensors : le fichier ne contient pas les tenseurs que ses métadonnées annoncent.
+    const failure = cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors/.test(tail) }) : error;
     update((s) => { s.active = { ...s.active, status: 'error', error: failure.message }; });
     throw failure;
   }
