@@ -10,6 +10,7 @@ import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { llamAmpereEligible, mtpPlan } from './levers.mjs';
 import { github } from './github.mjs';
+import { sandboxAvailable } from './sandbox.mjs';
 import { buildEngine, installLlama, latestRelease } from './runtimes.mjs';
 import { modelById } from './catalog.mjs';
 import { DIRS } from './paths.mjs';
@@ -209,8 +210,10 @@ export async function findEngine(arch, { name = null, exclude = [] } = {}) {
 }
 
 // Accord donné : la fiche entre dans le registre, ses architectures sont connues tout de suite.
+// isolated : compilé et lancé dans la bulle (sandbox.mjs) si bubblewrap est là au moment de l'accord.
 export async function addEngine(sheet) {
-  update((s) => { s.engines = { ...s.engines, [sheet.id]: { ...sheet, approvedAt: new Date().toISOString() } }; });
+  const isolated = await sandboxAvailable();
+  update((s) => { s.engines = { ...s.engines, [sheet.id]: { ...sheet, isolated, approvedAt: new Date().toISOString() } }; });
   update((s) => { s.engineArchs = { ...s.engineArchs, [`${sheet.id}@${sheet.ref}`]: sheet.onlyArchs }; });
 }
 

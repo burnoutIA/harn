@@ -49,6 +49,12 @@ aucune permission (github.com → Settings → Developer settings → Fine-grain
 « Public repositories ») en donne 5 000. Le mettre dans `data/github.token`, ou dans la variable
 `GITHUB_TOKEN`.
 
+Quand un modèle demande un moteur que llama.cpp ne publie pas encore (une PR non fusionnée),
+Harn le propose et attend votre accord : c'est du code que personne n'a relu. Sous Linux, ce
+moteur est compilé puis lancé dans une bulle [bubblewrap](https://github.com/containers/bubblewrap)
+(`sudo apt install bubblewrap`) : sans réseau, sans accès à vos fichiers, il ne voit que ses
+sources, le modèle qu'il sert et la carte graphique. Sans bubblewrap, la demande d'accord le dit.
+
 ## Choix du modèle
 
 | Machine | Premier modèle | Proposé ensuite |

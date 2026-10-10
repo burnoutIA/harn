@@ -13,6 +13,7 @@ import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, 
 import { installKetch } from './runtimes.mjs';
 import { proposeEngine } from './setup.mjs';
 import { dropUnusedEngines } from './engines.mjs';
+import { sandboxAvailable } from './sandbox.mjs';
 import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
 import { inspectRepo, loadCustomModels } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
@@ -392,6 +393,8 @@ async function main() {
   await loadCustomModels();
   // Moteurs ajoutés dont plus aucun modèle n'a besoin (modèle supprimé avant ce nettoyage).
   await dropUnusedEngines().catch(() => {});
+  // La bulle des moteurs non relus : vérifiée une fois, lue ensuite sans attendre.
+  await sandboxAvailable();
   await loadRecent();
   await loadKeys();
   await internalKey();

@@ -5,7 +5,9 @@
 //   { "arch": "qwen35", "unknownArch": false, "phantomNextn": false, "loadMs": 50,
 //     "tps": 80, "prefillTps": 1200, "depthSlope": 0.4, "f16DepthBonus": 0 }
 // Chaque lancement est noté dans <modèle>.launches.jsonl (arguments utiles), pour les assertions.
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import http from 'node:http';
 
 const args = process.argv.slice(2);
@@ -16,7 +18,8 @@ const port = Number(arg('--port'));
 const kv = arg('--cache-type-k') ?? 'f16';
 const overrides = args.flatMap((a, i) => (a === '--override-kv' ? [args[i + 1]] : []));
 const launch = { context: Number(arg('-c')), ngl: arg('-ngl'), fit: arg('--fit'), kv, kvV: arg('--cache-type-v'), spec: arg('--spec-type'), overrides, at: Date.now() };
-appendFileSync(`${model}.launches.jsonl`, `${JSON.stringify(launch)}\n`);
+// Dans la bulle, le dossier du modèle est en lecture seule : le journal des lancements manque alors.
+try { appendFileSync(`${model}.launches.jsonl`, `${JSON.stringify(launch)}\n`); } catch {}
 
 if (args.includes('--version')) { console.log('version: 9999 (fake)'); process.exit(0); }
 
@@ -35,6 +38,17 @@ setTimeout(() => { ready = true; }, config.loadMs ?? 50);
 const server = http.createServer((req, res) => {
   const json = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
   if (req.url === '/health' || req.url === '/v1/models') return ready ? json(200, { status: 'ok' }) : json(503, { error: 'loading' });
+  // Ce que le moteur peut atteindre : un fichier hors de ses dossiers, le réseau, le dossier personnel.
+  if (req.url === '/probe') {
+    const secret = (() => { try { return readFileSync(process.env.FAKE_SECRET ?? '/nonexistent', 'utf8'); } catch { return null; } })();
+    const home = (() => { try { return readdirSync(process.env.FAKE_HOME ?? os.homedir()).length; } catch { return null; } })();
+    const socket = net.connect(Number(process.env.FAKE_NET_PORT ?? 9), '127.0.0.1');
+    const done = (reached) => { socket.destroy(); json(200, { secret, home, network: reached }); };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    socket.setTimeout(1500, () => done(false));
+    return undefined;
+  }
   if (req.url === '/v1/chat/completions' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
@@ -56,5 +70,8 @@ const server = http.createServer((req, res) => {
   }
   return json(404, { error: 'not found' });
 });
-server.listen(port, '127.0.0.1');
+// Comme le vrai : une adresse en .sock = socket Unix (moteur isolé, sans réseau).
+const host = arg('--host');
+if (host?.endsWith('.sock')) server.listen(host);
+else server.listen(port, '127.0.0.1');
 process.on('SIGTERM', () => process.exit(0));

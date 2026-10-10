@@ -1,7 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, readFile, readdir, readlink, writeFile } from 'node:fs/promises';
+import net from 'node:net';
+import { mkdir, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { modelById } from './catalog.mjs';
@@ -18,7 +19,7 @@ const run = promisify(execFile);
 // servir et lire /slots. Une clé neuve à chaque lancement de Harn, connue de lui seul, passée par
 // fichier pour ne paraître ni dans la ligne de commande, ni dans l'état, ni dans engine.log.
 const ENGINE_KEY = randomBytes(32).toString('base64url');
-const ENGINE_KEY_FILE = path.join(DIRS.data, 'engine.key');
+export const ENGINE_KEY_FILE = path.join(DIRS.data, 'engine.key');
 export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
 
 // Le point de départ d'un modèle sur CETTE machine. Les a priori viennent de levers.mjs
@@ -188,8 +189,34 @@ export function loadFailure(tail, label = 'ce modèle') {
   return null;
 }
 
-export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label }) {
+// Un moteur isolé (sandbox.mjs) n'a pas de réseau : il écoute sur un socket Unix, et ce relais
+// le rend joignable au port habituel. Le reste de Harn ne voit pas la différence.
+let relay = null;
+function startRelay(endpoint, socket) {
+  const port = Number(new URL(endpoint).port);
+  return new Promise((resolve, reject) => {
+    const server = net.createServer((client) => {
+      const upstream = net.connect(socket);
+      client.pipe(upstream).pipe(client);
+      upstream.on('error', () => client.destroy());
+      client.on('error', () => upstream.destroy());
+    });
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => resolve(server));
+  });
+}
+function stopRelay() {
+  const server = relay;
+  relay = null;
+  return server ? new Promise((resolve) => server.close(() => resolve())) : Promise.resolve();
+}
+
+export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null }) {
   await stopEngine();
+  if (socket) {
+    await rm(socket, { force: true });
+    relay = await startRelay(endpoint, socket);
+  }
   await reapOrphans();
   await mkdir(DIRS.logs, { recursive: true });
   await writeFile(ENGINE_KEY_FILE, `${ENGINE_KEY}\n`);
@@ -219,6 +246,7 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
     await waitReady(health, 900_000, () => exited);
   } catch (error) {
     await killTree(process_.pid);
+    await stopRelay();
     const cause = loadFailure(tail, label);
     // tensors : le fichier ne contient pas les tenseurs que ses métadonnées annoncent.
     const failure = cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors/.test(tail) }) : error;
@@ -230,7 +258,7 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
 }
 
 export async function stopEngine() {
-  if (!child) return;
+  if (!child) return stopRelay();
   stopping = true;
   const pid = child.pid;
   await killTree(pid);
@@ -241,6 +269,7 @@ export async function stopEngine() {
   });
   child = null;
   stopping = false;
+  await stopRelay();
   // Ce qui aurait échappé au groupe (processus détaché de son parent) : repris par son chemin.
   await reapOrphans();
   // Le pilote rend la VRAM avec un temps de retard : on attend qu'elle se stabilise, sinon le

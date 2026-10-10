@@ -1,11 +1,13 @@
 import path from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { displayName } from './catalog.mjs';
-import { defaultTuning, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
+import { ENGINE_KEY_FILE, defaultTuning, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
+import { engineSheet } from './engines.mjs';
 import { sampleGpu } from './hardware.mjs';
-import { PORTS } from './paths.mjs';
+import { DIRS, PORTS } from './paths.mjs';
 import { assess, OBJECTIVE } from './planner.mjs';
 import { engineEnv } from './runtimes.mjs';
+import { SANDBOX_INSTALL, sandboxReady, sandboxed } from './sandbox.mjs';
 import { getState } from './state.mjs';
 import { HEADROOM_MIN_MIB } from './tuner.mjs';
 
@@ -47,16 +49,37 @@ export function recipeFor(model, tuning) {
   }
   const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
   if (!runtime) throw new Error(`Moteur ${runtimeKind(model, tuning)} ${tuning.backend} non installé`);
-  return {
+  const files = modelFiles(model.id);
+  const recipe = {
     modelId: model.id,
     label: displayName(model),
     command: runtime.serverPath,
-    args: llamaArgs(model, modelFiles(model.id), tuning, state.hardware),
+    args: llamaArgs(model, files, tuning, state.hardware),
     cwd: runtime.dir,
     env: engineEnv(runtime.dir),
     endpoint: `http://127.0.0.1:${PORTS.engine}`,
     health: `http://127.0.0.1:${PORTS.engine}/health`,
   };
+  // Moteur ajouté avec l'accord de l'utilisateur (PR, fork) : il tourne dans la bulle, sans
+  // réseau, et ne voit que ses fichiers, ceux du modèle et la clé du moteur (sandbox.mjs).
+  if (!engineSheet(tuning.fork)?.isolated) return recipe;
+  if (!sandboxReady()) throw new Error(`${engineSheet(tuning.fork).label} doit tourner isolé, et bubblewrap ne répond plus : ${SANDBOX_INSTALL}`);
+  const socketDir = path.join(DIRS.runtime, tuning.fork, 'run');
+  mkdirSync(socketDir, { recursive: true });
+  const socket = path.join(socketDir, 'engine.sock');
+  const args = [...recipe.args];
+  args[args.indexOf('--host') + 1] = socket;
+  // Tous les fichiers du modèle (un GGUF découpé en parties compris), là où ils sont vraiment ;
+  // seulement ceux présents (un brouillon DFlash pas encore téléchargé n'existe pas).
+  const where = (name) => state.models[model.id]?.paths?.[name] ?? path.join(DIRS.models, model.id, name);
+  const modelPaths = [...model.files.map((f) => where(f.name)), ...Object.values(files)].filter((file) => file && existsSync(file));
+  const box = sandboxed(runtime.serverPath, args, {
+    readable: [runtime.dir, ENGINE_KEY_FILE, ...modelPaths],
+    writable: [socketDir],
+    gpu: true,
+    cwd: runtime.dir,
+  });
+  return { ...recipe, ...box, socket };
 }
 export const freeVram = async () => (getState().hardware?.primary?.vendor === 'nvidia' ? (await sampleGpu())?.freeMiB ?? null : null);
 // Charger, puis vérifier la marge VRAM. C'est le levier ×21 du poste de référence : sous

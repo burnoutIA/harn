@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { download } from './download.mjs';
 import { github } from './github.mjs';
+import { sandboxed } from './sandbox.mjs';
 import { linuxPython } from './hardware.mjs';
 import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
@@ -219,14 +220,19 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
     await rename(unpacked, repoDir);
     // nvcc refuse un g++ trop récent : on lui passe celui que la détection a retenu, par son chemin.
     const hostCompiler = (await run('sh', ['-c', `command -v ${tools.hostCompiler}`])).stdout.trim();
+    // Code non relu (fiche isolée) : compilé dans la bulle, sans réseau, ne voyant que ses sources.
+    const step = (args, options) => (sheet.isolated
+      ? (({ command, args: boxed }) => runLogged(command, boxed, options, onLog))(sandboxed('cmake', args, { writable: [repoDir], cwd: repoDir }))
+      : runLogged('cmake', args, options, onLog));
     onLog('Configuration (cmake)');
-    await runLogged('cmake', ['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
-      `-DCMAKE_CUDA_ARCHITECTURES=${sheet.cudaArch}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir }, onLog);
-    await runLogged('cmake', ['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 90 * 60_000 }, onLog);
+    await step(['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
+      `-DCMAKE_CUDA_ARCHITECTURES=${sheet.cudaArch}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir });
+    await step(['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 90 * 60_000 });
     await writeFile(path.join(repoDir, '.harn-commit'), sheet.ref);
   }
 
-  const { stdout, stderr } = await run(serverPath, ['--version'], { env: engineEnv(binDir), timeout: 30_000 }).catch((error) => error);
+  const probe = sheet.isolated ? sandboxed(serverPath, ['--version'], { readable: [binDir] }) : { command: serverPath, args: ['--version'] };
+  const { stdout, stderr } = await run(probe.command, probe.args, { env: engineEnv(binDir), timeout: 30_000 }).catch((error) => error);
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1];
   if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
   const info = { kind: sheet.id, label: sheet.label, backend, tag: sheet.version ?? sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };

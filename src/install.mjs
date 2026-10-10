@@ -3,6 +3,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { activate, runIq } from './activation.mjs';
 import { runAnalysis } from './analysis.mjs';
 import { requestApproval } from './approvals.mjs';
+import { SANDBOX_INSTALL, sandboxAvailable } from './sandbox.mjs';
 import { tuneModel } from './bench.mjs';
 import { displayName, modelById, MODELS } from './catalog.mjs';
 import { buildEntry, inspectRepo, registerModel, unregisterModel } from './custom-models.mjs';
@@ -229,10 +230,13 @@ export async function proposeEngine({ modelId = null, arch = null, name = null }
   const { sheet } = found;
   // Déjà accepté une fois (pour un autre modèle de la même architecture) : pas de nouvelle demande.
   if (getState().engines?.[sheet.id]) { after(); return { status: 'known', message: `${found.label} est déjà installé : réglage du modèle avec lui.` }; }
+  const isolated = await sandboxAvailable();
   requestApproval({
     kind: 'engine',
-    title: `Compiler ${sheet.label} pour ${name ?? arch} ?`,
-    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ».`,
+    title: `Compiler ${sheet.label} pour ${name ?? arch}${isolated ? '' : ' (sans isolation)'} ?`,
+    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ». ${isolated
+      ? 'Il est compilé et lancé isolé : sans réseau, sans accès à vos fichiers, seulement ses sources, le modèle et la carte graphique.'
+      : `Attention : il tournerait sans isolation, avec accès à vos fichiers et au réseau, car bubblewrap manque. Pour l’isoler, refusez, installez-le (${SANDBOX_INSTALL}) et relancez Harn.`}`,
     run: () => { addEngine(sheet).then(after).catch(() => {}); },
   });
   return { status: 'approval', message: `${found.label} sait charger ce modèle : acceptez la demande pour le compiler.` };
