@@ -242,6 +242,13 @@ async function api(req, res, url) {
     const body = await new Response(req).json().catch(() => ({}));
     return json(res, 200, await proposeEngine({ modelId: body.modelId ?? null, arch: body.arch ?? null, name: body.name ?? null }));
   }
+  // Ce que l'utilisateur fait surtout (code, texte) : pèse la moyenne des prochains bancs.
+  if (url.pathname === '/api/prefs') {
+    const body = await new Response(req).json().catch(() => ({}));
+    if (body.usage && !['code', 'balanced', 'prose'].includes(body.usage)) return json(res, 400, { error: 'usage : code, balanced ou prose' });
+    update((s) => { s.prefs = { ...s.prefs, ...(body.usage ? { usage: body.usage } : {}) }; });
+    return json(res, 200, { prefs: getState().prefs });
+  }
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());
   if (parts[1] === 'checks' && parts[2] && parts[3] === 'apply') {

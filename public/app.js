@@ -860,7 +860,14 @@ function renderTuning() {
   paint('tune-head', `<div><h1>Réglages</h1><p>${bench
     ? `Harn a essayé ${bench.arms.length} réglages de ${esc(nameOf(id))} sur votre carte, en ne changeant qu’une chose à la fois, et garde le plus rapide.${bench.depth ? ` Quand la conversation grossit (${kTokens(bench.depth.tokens)} de contexte), il génère encore <b>${fr(bench.depth.tps)} tok/s</b>${bench.depth.prefillTps ? ` et lit ${fr(bench.depth.prefillTps)} tok/s` : ''}.` : ''}`
     : 'Les réglages s’affichent après la première mesure.'}</p></div>
-    ${id ? `<button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button>` : ''}`);
+    <div class="tune-actions">
+      <div class="usage" role="group" aria-label="Ce que vous faites surtout">
+        <span>Vous faites surtout</span>
+        <div class="modes">${[['code', 'du code'], ['balanced', 'un peu de tout'], ['prose', 'du texte']].map(([key, label]) => `<button type="button" data-action="usage" data-id="${key}" class="${(state.prefs?.usage ?? 'balanced') === key ? 'on' : ''}" aria-pressed="${(state.prefs?.usage ?? 'balanced') === key}">${label}</button>`).join('')}</div>
+        ${bench && (bench.usage ?? 'balanced') !== (state.prefs?.usage ?? 'balanced') ? '<small>Remesurez pour en tenir compte</small>' : ''}
+      </div>
+      ${id ? `<button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button>` : ''}
+    </div>`);
   if (!bench) { paint('tune-arms', '<p class="empty">Pas encore de mesure.</p>'); }
   else {
     const all = bench.arms.flatMap((a) => (a.workloads ?? []).map((w) => w.tps));
@@ -900,7 +907,8 @@ function renderTuning() {
         return `<div class="iq-item ${cls}" title="${esc(tip)}"><span>${mark}</span>${esc(x.theme)}${extra}<small class="tier">${esc(x.tier)}</small></div>`;
       }).join('')}</div>` : (profileIq.iqRunning ? '' : '<p class="empty">Pas encore passé. Comptez une à deux minutes.</p>')}`);
   paint('tune-explain', `<h3>Comment lire</h3>
-    <p>Chaque réglage est mesuré sur trois tâches : écrire du code, écrire du texte, et répondre avec un long contexte (~20 000 tokens). Le score est la moyenne des deux premières (et de la troisième quand elle est mesurée).</p>
+    <p>Chaque réglage écrit du code et du texte, deux fois chacun ; le type de mémoire de contexte se juge aussi en profondeur, après ~32 000 tokens lus. Le score est leur moyenne, pesée selon ce que vous faites surtout.</p>
+    <p>Un réglage n’en remplace un autre que s’il va au moins 3 % plus vite : en dessous, c’est la variation normale de la carte.</p>
     <dl class="glossary">
       <dt>Anticipe N tokens</dt><dd>Le modèle devine plusieurs mots d’avance et les vérifie d’un coup. Plus profond va plus vite sur du code prévisible, moins vite sur du texte libre.</dd>
       <dt>Brouillon DFlash2</dt><dd>Un petit modèle annexe propose la suite. Souvent excellent en code.</dd>
@@ -1245,6 +1253,12 @@ app.addEventListener('click', async (event) => {
     if (action === 'retry') { await post(`/api/models/${id}/retry`); toast('Nouvelle tentative'); }
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
+    if (action === 'usage') {
+      const r = await post('/api/prefs', { usage: id });
+      state.prefs = r.prefs;
+      regions.delete('tune-head');
+      return render();
+    }
     if (action === 'engine-find') {
       toast('Recherche d’un moteur…');
       const r = await post('/api/engines/find', id ? { modelId: id } : { arch: button.dataset.arch, name: button.dataset.name });

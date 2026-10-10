@@ -12,7 +12,7 @@ import { makePlan, OBJECTIVE } from './planner.mjs';
 import { installLlama } from './runtimes.mjs';
 import { iqScores } from './scores.mjs';
 import { getState, update } from './state.mjs';
-import { HEADROOM_MIN_MIB, measure } from './tuner.mjs';
+import { HEADROOM_MIN_MIB, USAGE_WEIGHTS, isBetter, measure } from './tuner.mjs';
 
 // Le banc : une variable à la fois, le plus rapide gagne.
 const sameTuning = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -52,6 +52,8 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   // (étape KV), chaque essai suivant la mesure aussi, sinon un moteur mesuré sans elle gagnerait
   // d'office (sa moyenne ne compterait pas la partie la plus lente).
   let compared = ['code', 'prose'];
+  const usage = getState().prefs?.usage ?? 'balanced';
+  const weights = USAGE_WEIGHTS[usage] ?? USAGE_WEIGHTS.balanced;
   async function trial(stage, tuning, workloads = compared) {
     index += 1;
     const label = describe(tuning);
@@ -63,7 +65,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         loadedTuning = tuning;
         loadedHeadroom = await freeVram();
       }
-      const result = await measure(getState().active.endpoint, modelId, { workloads, onProgress: say });
+      const result = await measure(getState().active.endpoint, modelId, { workloads, weights, onProgress: say });
       const entry = { id: `arm${index}`, stage, label, tuning, headroomMiB: loadedHeadroom, ...result };
       entry.ok = model.engine === 'strata' || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
       results.push(entry);
@@ -75,7 +77,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
       return entry;
     }
   }
-  const better = (candidate, current) => (candidate.ok && !candidate.error && candidate.tps > current.tps ? candidate : current);
+  const better = (candidate, current) => (isBetter(candidate, current) ? candidate : current);
 
   if (model.engine === 'strata') {
     let best = await trial('Réglages Strata', { ...initial.tuning, strataArm: 'Réglages de l’installeur' });
@@ -119,7 +121,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   if (best.tuning.kv !== 'f16' && !best.tuning.kvV && f16Context >= OBJECTIVE.minContext) {
     const reference = await trial('KV en profondeur', best.tuning, ['code', 'prose', 'depth']);
     const f16 = await trial('KV en profondeur', { ...best.tuning, kv: 'f16', context: f16Context }, ['code', 'prose', 'depth']);
-    if (f16.ok && !f16.error && !reference.error && f16.tps > reference.tps) best = f16;
+    if (!reference.error && isBetter(f16, reference)) best = f16;
     else if (!reference.error) best = reference;
     if (!best.error) compared = ['code', 'prose', 'depth'];
   }
@@ -172,6 +174,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         arch: profile.archLabel,
         arms: results.map(({ tuning, ...rest }) => rest),
         winner: { id: best.id, label: best.label, tps: best.tps, prefillTps: best.prefillTps, throttled: best.throttled },
+        usage,
         depth: depth && { tokens: depth.promptTokens, tps: +depth.tps.toFixed(1), prefillTps: depth.prefillTps ? Math.round(depth.prefillTps) : null },
       };
     });

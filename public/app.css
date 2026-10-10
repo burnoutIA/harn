@@ -586,3 +586,7 @@ body.onboarding .topline { max-width: none; }
 .hub-missing svg { flex: none; width: 16px; height: 16px; margin-top: 2px; }
 .hub-missing a { color: var(--text); }
 .hub-missing .link { border: 0; padding: 0; background: none; color: var(--text); font: inherit; text-decoration: underline; cursor: pointer; }
+.tune-actions { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.usage { display: grid; gap: 4px; font-size: calc(12px * var(--fs)); color: var(--muted); }
+.usage .modes { min-width: 300px; }
+.usage small { color: var(--amber-ink); }

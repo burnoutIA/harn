@@ -78,9 +78,33 @@ async function complete(endpoint, model, messages, maxTokens) {
   return response.json();
 }
 
-const harmonic = (values) => values.length / values.reduce((sum, value) => sum + 1 / value, 0);
+// Moyenne harmonique pondérée : le temps total pour produire chaque charge selon son poids.
+export function weightedHarmonic(results, weights = {}) {
+  const w = (r) => weights[r.workload] ?? 1;
+  return results.reduce((sum, r) => sum + w(r), 0) / results.reduce((sum, r) => sum + w(r) / r.tps, 0);
+}
 
-export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, onProgress = () => {} } = {}) {
+// Ce que l'utilisateur fait surtout : la moyenne du banc pèse code et texte en conséquence. La
+// profondeur compte toujours (la charge d'un agent dont la conversation grossit).
+export const USAGE_WEIGHTS = {
+  code: { code: 0.7, prose: 0.3, depth: 0.5, deep: 0.5 },
+  balanced: { code: 0.5, prose: 0.5, depth: 0.5, deep: 0.5 },
+  prose: { code: 0.3, prose: 0.7, depth: 0.5, deep: 0.5 },
+};
+
+// Le bruit d'une mesure : la carte varie de quelques pour cent d'une session à l'autre (MTP2 et
+// MTP3 ont échangé leur place entre deux bancs, à 2 % près). En dessous, on garde ce qu'on a.
+export const NOISE = 0.03;
+export function isBetter(candidate, current) {
+  if (!candidate.ok || candidate.error) return false;
+  if (!current || current.error) return true;
+  const margin = Math.max(NOISE, candidate.spread ?? 0, current.spread ?? 0);
+  return candidate.tps > current.tps * (1 + margin);
+}
+
+// runs : chaque charge mesurée plusieurs fois, la moyenne gardée et l'écart noté (la profondeur,
+// longue à lire, une seule fois).
+export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, runs = 2, weights = {}, onProgress = () => {} } = {}) {
   await complete(endpoint, modelId, [{ role: 'user', content: 'Bonjour' }], 16); // échauffement
   const results = [];
   const pstates = new Set();
@@ -89,22 +113,35 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
     onProgress(workload.label);
     // L'état P ne compte que si la carte travaille vraiment (au repos elle est en P8, c'est normal).
     const watcher = setInterval(async () => { const gpu = await sampleGpu(); if (gpu && gpu.util >= 50) pstates.add(gpu.pstate); }, 1500);
-    const started = Date.now();
-    const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens).finally(() => clearInterval(watcher));
-    const t = answer.timings ?? {};
-    const generated = t.predicted_n ?? answer.usage?.completion_tokens ?? workload.maxTokens ?? maxTokens;
+    const samples = [];
+    try {
+      for (let run = 0; run < (id === 'depth' ? 1 : runs); run += 1) {
+        const started = Date.now();
+        const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens);
+        const t = answer.timings ?? {};
+        const generated = t.predicted_n ?? answer.usage?.completion_tokens ?? workload.maxTokens ?? maxTokens;
+        samples.push({
+          tps: t.predicted_per_second ?? generated / ((Date.now() - started) / 1000),
+          // La lecture du prompt se juge au premier passage : ensuite le cache de prompt la court-circuite.
+          prefillTps: t.prompt_per_second ?? null,
+          promptTokens: t.prompt_n ?? answer.usage?.prompt_tokens ?? null,
+          acceptance: t.draft_n ? t.draft_n_accepted / t.draft_n : null,
+          estimated: !answer.timings,
+        });
+      }
+    } finally { clearInterval(watcher); }
+    const tps = samples.reduce((sum, s) => sum + s.tps, 0) / samples.length;
     results.push({
+      ...samples[0],
       workload: id,
-      tps: t.predicted_per_second ?? generated / ((Date.now() - started) / 1000),
-      prefillTps: t.prompt_per_second ?? null,
-      promptTokens: t.prompt_n ?? answer.usage?.prompt_tokens ?? null,
-      acceptance: t.draft_n ? t.draft_n_accepted / t.draft_n : null,
-      estimated: !answer.timings,
+      tps,
+      spread: samples.length > 1 ? (Math.max(...samples.map((s) => s.tps)) - Math.min(...samples.map((s) => s.tps))) / tps : 0,
     });
   }
   return {
     workloads: results,
-    tps: +harmonic(results.map((r) => r.tps)).toFixed(1),
+    tps: +weightedHarmonic(results, weights).toFixed(1),
+    spread: Math.max(...results.map((r) => r.spread)),
     prefillTps: results[0].prefillTps ? +results[0].prefillTps.toFixed(0) : null,
     throttled: [...pstates].some((p) => /P([3-9]|1\d)/.test(p)),
     pstates: [...pstates],

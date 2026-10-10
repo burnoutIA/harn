@@ -239,3 +239,15 @@ test('GGUF qui annonce une couche MTP absente : métadonnée corrigée, sans ant
   assert.equal(args[args.indexOf('--override-kv') + 1], 'xing4_0.nextn_predict_layers=int:0');
   assert.equal(args[args.indexOf('--spec-type') + 1], 'none');
 });
+
+test('banc : seuil de bruit, pondération selon l’usage', async () => {
+  const { isBetter, weightedHarmonic, USAGE_WEIGHTS } = await import('../src/tuner.mjs');
+  const current = { ok: true, tps: 80, spread: 0.01 };
+  assert.equal(isBetter({ ok: true, tps: 81.6, spread: 0.01 }, current), false, '2 % : dans le bruit');
+  assert.equal(isBetter({ ok: true, tps: 83, spread: 0.01 }, current), true, '3,75 % : au-delà');
+  assert.equal(isBetter({ ok: true, tps: 85, spread: 0.08 }, current), false, 'mesure trop dispersée pour trancher');
+  assert.equal(isBetter({ ok: false, tps: 200 }, current), false, 'marge VRAM insuffisante');
+  const results = [{ workload: 'code', tps: 110 }, { workload: 'prose', tps: 60 }];
+  assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.code) > weightedHarmonic(results, USAGE_WEIGHTS.balanced));
+  assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.prose) < weightedHarmonic(results, USAGE_WEIGHTS.balanced));
+});
