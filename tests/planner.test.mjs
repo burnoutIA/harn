@@ -14,6 +14,24 @@ test('moins de 8 Go de VRAM : Bonsai', () => {
   assert.match(makePlan(machine(0, 8, null)).firstModel, /bonsai2-1bit/);
 });
 
+test('sous Linux : Strata proposé comme sous Windows', () => {
+  const linux = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
+  const windows = makePlan({ ...machine(24, 128), os: { platform: 'win32' } });
+  assert.equal(linux.upgradeModel, windows.upgradeModel);
+  assert.ok(linux.verdicts.some((v) => /strata/.test(v.id) && v.fit !== 'no'));
+});
+
+test('sous Linux sans Python venv : Strata hors de portée, avec la commande à lancer', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' }, python: { ok: false } });
+  const strata = plan.verdicts.filter((v) => /strata/.test(v.id));
+  assert.ok(strata.every((v) => v.fit === 'no' && v.reasons.some((r) => /python3-venv/.test(r))));
+});
+
+test('sous macOS : pas de Strata', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'darwin' } });
+  assert.ok(plan.verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));
+});
+
 test('16 Go de VRAM : le 27B GSQ-RCO qui atteint 100k', () => {
   assert.match(makePlan(machine(16, 32)).firstModel, /swift15-q27-/);
   assert.ok(makePlan(machine(16, 32)).verdicts.find((v) => v.id === makePlan(machine(16, 32)).firstModel).context >= 100 * 1024);
@@ -128,4 +146,52 @@ test('« Meilleur choix ici » suit la note globale mesurée, pas l’intelligen
   const profiles = { 'swift15-flashnext-iq3xxs-strata': profile(100, 90, 131072), 'swift15-q27-iq2xs-mtp': profile(100, 190, 153600) };
   const scores = { 'swift15-flashnext-iq3xxs-strata': 100, 'swift15-q27-iq2xs-mtp': 100 };
   assert.equal(makePlan(machine(24, 128), scores, profiles).targetModel, 'swift15-flashnext-iq3xxs-strata');
+});
+
+test('toutes les couches sur la carte, --fit seulement pour un modèle partagé', async () => {
+  const { defaultTuning, llamaArgs } = await import('../src/engine.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const hw = machine(24, 64);
+  const files = { model: 'm.gguf' };
+  const full = llamaArgs(model, files, defaultTuning(model, 131072, hw), hw);
+  assert.equal(full[full.indexOf('-ngl') + 1], '999');
+  assert.equal(full[full.indexOf('--fit') + 1], 'off');
+  const shared = llamaArgs(model, files, { ...defaultTuning(model, 131072, hw), layers: 'auto', fitTargetMiB: 1792 }, hw);
+  assert.equal(shared[shared.indexOf('-ngl') + 1], 'auto');
+  // Réglage enregistré avant le champ `layers` : cible --fit relevée = modèle partagé.
+  const legacy = llamaArgs(model, files, { ...defaultTuning(model, 131072, hw), layers: undefined, fitTargetMiB: 1792 }, hw);
+  assert.equal(legacy[legacy.indexOf('-ngl') + 1], 'auto');
+});
+
+test('llamAmpere : KV K/V distincts, cache de prompts aligné sur l’officiel', async () => {
+  const { defaultTuning, describe, llamaArgs } = await import('../src/engine.mjs');
+  const model = modelById('swift15-q27-iq3s-mtp');
+  const hw = machine(24, 64);
+  const tuning = { ...defaultTuning(model, 131072, hw), fork: 'llamampere', kv: 'tq5_0', kvV: 'turbo4' };
+  const args = llamaArgs(model, { model: 'm.gguf' }, tuning, hw);
+  assert.equal(args[args.indexOf('--cache-type-k') + 1], 'tq5_0');
+  assert.equal(args[args.indexOf('--cache-type-v') + 1], 'turbo4');
+  assert.ok(args.includes('--no-cache-disk'));
+  assert.match(describe(tuning), /KV tq5_0\/turbo4.*llamAmpere/);
+});
+
+test('llamAmpere proposé seulement aux RTX 30 sous Linux avec les outils', async () => {
+  const { llamAmpereEligible } = await import('../src/levers.mjs');
+  const tools = { ok: true, nvcc: '12.4', cmake: true, hostCompiler: 'g++-13' };
+  assert.ok(llamAmpereEligible({ ...machine(24, 64), os: { platform: 'linux' }, buildTools: tools }));
+  assert.ok(!llamAmpereEligible({ ...machine(24, 64), os: { platform: 'win32' }, buildTools: tools }));
+  assert.ok(!llamAmpereEligible({ ...machine(24, 64), os: { platform: 'linux' }, buildTools: { ...tools, ok: false } }));
+});
+
+test('échec de chargement : architecture inconnue = définitif, manque de mémoire = on réessaie', async () => {
+  const { loadFailure } = await import('../src/engine.mjs');
+  assert.match(loadFailure("E llama_model_load: error loading model: unknown model architecture: 'xing4_0'\n", 'Xing4'), /architecture « xing4_0 » de Xing4/);
+  assert.equal(loadFailure('E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2048 MiB on device 0: cudaMalloc failed: out of memory\nE llama_model_load: error loading model: failed to allocate buffer\n'), null);
+  assert.equal(loadFailure('I srv llama_server: model loaded\n'), null);
+});
+
+test('architectures d’un moteur lues dans llama-arch.cpp', async () => {
+  const { parseArchs } = await import('../src/engines.mjs');
+  const source = 'static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {\n    { LLM_ARCH_LLAMA,  "llama" },\n    { LLM_ARCH_QWEN35, "qwen35" },\n    { LLM_ARCH_UNKNOWN, "(unknown)" },\n};';
+  assert.deepEqual(parseArchs(source), ['llama', 'qwen35', '(unknown)']);
 });

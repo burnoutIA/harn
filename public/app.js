@@ -138,6 +138,126 @@ function progressBlock(items) {
   }).join('')}</div>`;
 }
 
+// Actions lancées mais pas encore visibles dans l'état du serveur : le clic a une réponse
+// immédiate (carte en « Lancement… », panneau « En cours »), et un second clic ne relance rien.
+const pending = new Map(); // clé → { label, since, model?, known? }
+const PENDING_MAX_MS = 90_000;
+const busyModels = () => Object.keys(state.models).filter((id) => { const m = state.models[id]; return m.phase || m.installing || m.tuning || m.waitingGpu; });
+function settlePending() {
+  for (const [key, job] of pending) {
+    const started = job.model && busyModels().includes(job.model);
+    const appeared = job.known && busyModels().some((id) => !job.known.has(id));
+    if (started || appeared || Date.now() - job.since > PENDING_MAX_MS) pending.delete(key);
+  }
+}
+
+// Ce que Harn télécharge lui-même pour un modèle. L'archive du moteur Strata n'y compte que tant
+// qu'elle arrive : une fois reçue, ses 14 Mo afficheraient « 100 % » pendant que Strata tire 70 Go.
+function downloadItems(id) {
+  const runtime = modelOf(id)?.engine === 'strata' ? downloadsFor('runtime:strata').filter((d) => !d.done) : [];
+  return downloadsFor(`model:${id}`).concat(runtime).filter((d) => d.total);
+}
+// Dernière ligne lisible du journal d'un installeur (codes de terminal et retours chariot retirés).
+function installerLine(log) {
+  const lines = String(log ?? '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  return lines.at(-1)?.slice(0, 160) ?? null;
+}
+
+// Le modèle qui tient la carte en ce moment (banc, test ou analyse en cours).
+const busyName = () => { const id = busyModels().find((m) => !state.models[m].waitingGpu && state.models[m].phase && state.models[m].phase !== 'download'); return id ? nameOf(id) : null; };
+
+// Panneau « En cours » : les actions longues, sur toutes les vues, avec leur avancement.
+const tasksEl = document.getElementById('tasks');
+let tasksOpen = true;
+function renderTasks() {
+  if (!state) return;
+  settlePending();
+  const rows = [];
+  for (const id of busyModels()) {
+    const entry = state.models[id];
+    const phase = entry.phase ?? (entry.installing ? 'download' : entry.tuning ? 'tune' : null);
+    // Un banc ou un test relancé à la main, en file derrière une autre tâche.
+    if (!phase) { rows.push({ key: id, title: nameOf(id), step: 'En file', detail: `En attente de la carte graphique${busyName() ? ` (${busyName()} passe avant)` : ''}`, pct: null }); continue; }
+    const step = Math.max(0, PHASES.findIndex(([key]) => key === phase));
+    let pct = null;
+    let detail = PHASES[step][2];
+    if (phase === 'download') {
+      const items = downloadItems(id);
+      const total = items.reduce((sum, d) => sum + d.total, 0);
+      if (items.some((d) => !d.done)) {
+        const received = items.reduce((sum, d) => sum + Math.min(d.received, d.total), 0);
+        const speed = items.reduce((sum, d) => sum + (d.done ? 0 : d.speed ?? 0), 0);
+        pct = (received / total) * 100;
+        detail = `${gb(received)} / ${gb(total)}${speed ? ` · ${rate(speed)} · reste ${duration((total - received) / speed)}` : ''}`;
+      } else {
+        // Rien (ou plus rien) que Harn télécharge lui-même : Strata tire le modèle avec son
+        // propre installeur. On montre sa dernière ligne, et son pourcentage s'il en donne un.
+        const line = installerLine(entry.log);
+        const shown = line?.match(/(\d{1,3}(?:[.,]\d+)?)\s?%/);
+        if (shown && Number.parseFloat(shown[1].replace(',', '.')) <= 100) pct = Number.parseFloat(shown[1].replace(',', '.'));
+        detail = line ?? entry.phaseDetail ?? entry.detail ?? 'Préparation…';
+      }
+    } else if (phase === 'tune') detail = entry.tuneDetail ?? 'Chargement du modèle';
+    else if (phase === 'iq') detail = state.profiles[id]?.iqRunning ?? 'Préparation';
+    // Une seule tâche à la fois sur la carte : les autres attendent leur tour.
+    if (entry.waitingGpu && phase !== 'download') { detail = `En attente de la carte graphique${busyName() ? ` (${busyName()} passe avant)` : ''}`; pct = null; }
+    // Le nom seul ne suffit pas : plusieurs variantes d'un même modèle peuvent coexister.
+    const variant = modelOf(id)?.variant?.split(' · ').find((part) => /\d/.test(part));
+    rows.push({ key: id, title: variant ? `${nameOf(id)} · ${variant}` : nameOf(id), step: `Étape ${step + 1}/4 · ${PHASES[step][1]}`, detail, pct });
+  }
+  for (const [id, profile] of Object.entries(state.profiles ?? {})) {
+    if (profile.iqRunning && !busyModels().includes(id)) rows.push({ key: `iq:${id}`, title: nameOf(id), step: 'Intelligence', detail: profile.iqRunning, pct: null });
+  }
+  for (const [key, job] of pending) rows.push({ key: `pending:${key}`, title: job.label, step: 'Lancement', detail: 'Demande prise en compte…', pct: null });
+  if (!rows.length) { tasksEl.replaceChildren(); return; }
+  // Mise à jour sur place : l'état arrive plusieurs fois par seconde pendant un téléchargement.
+  // Reconstruire le panneau relancerait ses animations à chaque fois (clignotement).
+  let panel = tasksEl.querySelector('.tasks');
+  if (!panel) {
+    tasksEl.innerHTML = `<section class="card tasks" aria-label="Actions en cours">
+      <button class="tasks-head" type="button" data-task="toggle"><span class="dot live"></span><b>En cours</b><span class="count"></span><span class="chev"></span></button>
+      <ul></ul>
+    </section>`;
+    panel = tasksEl.querySelector('.tasks');
+  }
+  const set = (el, value) => { if (el.textContent !== value) el.textContent = value; };
+  set(panel.querySelector('.count'), String(rows.length));
+  set(panel.querySelector('.chev'), tasksOpen ? 'Réduire' : 'Afficher');
+  panel.querySelector('.tasks-head').setAttribute('aria-expanded', String(tasksOpen));
+  const list = panel.querySelector('ul');
+  list.hidden = !tasksOpen;
+  const seen = new Set();
+  for (const r of rows) {
+    seen.add(r.key);
+    let li = [...list.children].find((item) => item.dataset.key === r.key);
+    if (!li) {
+      li = document.createElement('li');
+      li.dataset.key = r.key;
+      li.innerHTML = `<button type="button" data-task="go" title="Voir dans Modèles">
+        <span class="t-top"><span class="t-name"></span><span class="t-step"></span></span>
+        <span class="bar"><i></i></span>
+        <span class="t-detail"><b></b><span></span></span>
+      </button>`;
+      list.append(li);
+    }
+    set(li.querySelector('.t-name'), r.title);
+    set(li.querySelector('.t-step'), r.step);
+    const bar = li.querySelector('.bar');
+    bar.classList.toggle('indeterminate', r.pct === null);
+    const width = r.pct === null ? '' : `${r.pct.toFixed(1)}%`;
+    if (bar.firstElementChild.style.width !== width) bar.firstElementChild.style.width = width;
+    set(li.querySelector('.t-detail b'), r.pct === null ? '' : `${fr(r.pct)} % · `);
+    set(li.querySelector('.t-detail span'), r.detail);
+  }
+  for (const item of [...list.children]) if (!seen.has(item.dataset.key)) item.remove();
+}
+tasksEl.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-task]');
+  if (!button) return;
+  if (button.dataset.task === 'toggle') { tasksOpen = !tasksOpen; renderTasks(); }
+  if (button.dataset.task === 'go' && view !== 'onboard') go('models');
+});
+
 // L'avancement d'une installation : les quatre étapes, la courante en avant, et ce qu'elle fait.
 const PHASES = [
   ['download', 'Téléchargement', 'Téléchargement des fichiers'],
@@ -147,14 +267,13 @@ const PHASES = [
 ];
 function phaseBlock(id) {
   const entry = state.models[id] ?? {};
-  const phase = entry.phase ?? (entry.installing ? 'download' : entry.tuning ? 'tune' : null);
+  const phase = entry.phase ?? (entry.installing || pending.has(id) ? 'download' : entry.tuning ? 'tune' : null);
   if (!phase) return '';
   const current = PHASES.findIndex(([key]) => key === phase);
-  const model = modelOf(id);
   let detail = '';
   if (phase === 'download') {
-    const items = downloadsFor(`model:${id}`).concat(model?.engine === 'strata' ? downloadsFor('runtime:strata') : []).filter((d) => !d.done);
-    detail = progressBlock(items) || `<span class="phase-detail">${esc(entry.phaseDetail ?? entry.detail ?? 'Préparation…')}</span>`;
+    const items = downloadItems(id).filter((d) => !d.done);
+    detail = progressBlock(items) || `<span class="phase-detail">${esc(installerLine(entry.log) ?? entry.phaseDetail ?? entry.detail ?? 'Préparation…')}</span>`;
   } else {
     const text = phase === 'tune' ? (entry.tuneDetail ?? 'Chargement du modèle') : phase === 'iq' ? (state.profiles[id]?.iqRunning ?? 'Préparation') : 'L’IA locale relit ses mesures et l’écrit dans le carnet';
     detail = `<span class="phase-detail">${esc(text)}</span>`;
@@ -166,7 +285,16 @@ function phaseBlock(id) {
   </div>`;
 }
 
-const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
+// Le moteur qui sert le modèle actif (llamAmpere ou llama.cpp officiel), avec sa version.
+function engineLabel() {
+  const tuning = state.profiles?.[state.active?.modelId]?.tuning;
+  const runtimes = state.runtimes ?? {};
+  if (tuning?.fork === 'llamampere') return `llamAmpere ${runtimes['llamampere-cuda12']?.tag ?? ''}`.trim();
+  const official = runtimes[`llama-${tuning?.backend ?? state.plan?.backend?.id}`] ?? Object.values(runtimes).find((r) => r.kind === 'llama');
+  return `llama.cpp ${official?.tag ?? ''}`.trim();
+}
+
+const STAGE = { 'Moteur llamAmpere': 'Moteur', 'Moteur officiel': 'Moteur', 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
 const stageOf = (arm) => STAGE[arm.stage] ?? arm.stage ?? '';
 
 // Les réglages en mots simples ; le libellé technique reste visible en second plan.
@@ -477,7 +605,7 @@ function renderNext() {
     const verdict = verdictOf(id);
     const current = modelOf(state.active?.modelId);
     let side = `<button class="btn violet big" data-action="install" data-id="${id}">${icon.bolt} Installer et régler</button><small>${gb(model.totalBytes)} · en arrière-plan, votre IA reste disponible</small>`;
-    if (entry.phase || entry.installing || entry.tuning) side = phaseBlock(id);
+    if (entry.phase || entry.installing || entry.tuning || pending.has(id)) side = phaseBlock(id);
     paint('next', `<section class="card next">
       <div>
         <div class="label">Prochaine étape</div>
@@ -587,6 +715,14 @@ function renderHome() {
 }
 
 // ── Modèles ────────────────────────────────────────────────
+// Architecture qu'aucun moteur connu ne charge (listes tirées du code source des moteurs) : null si chargeable ou inconnu.
+function archWithoutEngine(model) {
+  const arch = model.profile?.arch;
+  const lists = Object.values(state.engineArchs ?? {});
+  if (!arch || model.engine === 'strata' || !lists.length) return null;
+  return lists.some((archs) => archs.includes(arch)) ? null : arch;
+}
+
 function modelCard(model) {
   const verdict = verdictOf(model.id) ?? { fit: 'no', reasons: [] };
   const entry = state.models[model.id] ?? {};
@@ -615,13 +751,14 @@ function modelCard(model) {
     : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}">~${verdict.tps}<small>estimé</small></div>` : '<div class="v est">—</div>';
 
   let action = '';
-  if (entry.phase || entry.installing || entry.tuning) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
+  if (entry.phase || entry.installing || entry.tuning || pending.has(model.id)) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
   else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
   else if (isActive && !loading) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">${icon.power} Recharger</button>`;
+  else if (entry.installedAt && archWithoutEngine(model)) action = `<p class="why">Architecture « ${esc(archWithoutEngine(model))} » : llama.cpp ne sait pas encore la charger. Gardez-le si une version plus récente est attendue, sinon supprimez-le.</p>`;
   else if (entry.installedAt) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">Utiliser ce modèle</button>`;
   // Le banc d'intelligence se lance depuis la carte : le modèle est chargé si besoin.
   const iqRun = state.profiles[model.id]?.iqRunning;
-  if (entry.installedAt && !entry.phase && !entry.installing && !entry.tuning) action += `<button class="btn ghost" data-action="iq" data-id="${model.id}" ${iqRun ? 'disabled' : ''} title="${iqRun ? esc(iqRun) : 'Une à deux minutes, le modèle est chargé si besoin'}">${iqRun ? 'Banc en cours…' : iqResult(model.id) ? 'Retester l’intelligence' : 'Tester l’intelligence'}</button>`;
+  if (entry.installedAt && !entry.phase && !entry.installing && !entry.tuning) action += archWithoutEngine(model) ? '' : `<button class="btn ghost" data-action="iq" data-id="${model.id}" ${iqRun ? 'disabled' : ''} title="${iqRun ? esc(iqRun) : 'Une à deux minutes, le modèle est chargé si besoin'}">${iqRun ? 'Banc en cours…' : iqResult(model.id) ? 'Retester l’intelligence' : 'Tester l’intelligence'}</button>`;
   else if (!off) action = `<button class="btn ${isUpgrade ? 'violet' : ''}" data-action="install" data-id="${model.id}">${icon.bolt} Installer et régler</button>`;
 
   return `<article class="card model ${isActive ? 'active' : ''} ${isUpgrade ? 'upgrade' : ''} ${off ? 'off' : ''}">
@@ -639,7 +776,7 @@ function modelCard(model) {
     ${isTarget ? whyTarget(model.id) : ''}
     ${off ? `<p class="why">Pas pour cette machine : ${esc(verdict.reasons.join(', '))}.</p>` : ''}
     ${entry.installing && entry.detail ? `<p class="why">${esc(entry.detail)}</p>` : ''}
-    ${entry.error ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
+    ${entry.error && !archWithoutEngine(model) ? `<div class="install-error"><p>${esc(entry.error)}</p><div class="row">
         <button class="btn small" data-action="open-log" data-id="${model.id}">Voir le journal</button>
         <button class="btn small" data-action="retry" data-id="${model.id}">Réessayer</button>
         ${helperFor(model.id) ? `<button class="btn small primary" data-action="ask-pi" data-id="${model.id}" title="pi dépanne avec ${esc(nameOf(helperFor(model.id)))}">${icon.terminal} Demander à pi</button>` : ''}
@@ -678,7 +815,10 @@ function hubSection() {
     </article>`;
   }).join('');
   const empty = !items.length && !updates.length ? `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de nouveau ces 30 derniers jours qui tourne bien sur cette machine.' : 'Harn regarde une fois par jour les modèles sortis ou mis à jour sur Hugging Face, et ne garde que ceux qui tournent bien ici.'}</p>` : '';
-  return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}</div></div>`;
+  // Écartés faute de moteur : on les nomme, pour qu'un modèle attendu ne disparaisse pas sans raison.
+  const missing = (w.items ?? []).filter((i) => i.engineMissing);
+  const noEngine = missing.length ? `<p class="hub-missing">${icon.info}<span><b>Pas encore de moteur pour ${missing.length === 1 ? 'ce modèle' : `ces ${missing.length} modèles`}</b> : ${missing.map((i) => `<a href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">${esc(i.name)}</a> (architecture « ${esc(i.engineMissing)} »)`).join(', ')}. llama.cpp ne sait pas encore les charger ; Harn les proposera dès qu’un moteur le pourra.</span></p>` : '';
+  return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}${noEngine}</div></div>`;
 }
 
 function renderModels() {
@@ -704,7 +844,7 @@ function renderModels() {
     <div class="models featured">${featured.map(([title, m]) => `<div class="feature"><div class="group-title"><h2>${title}</h2></div>${modelCard(m)}</div>`).join('')}</div>
     ${hubSection()}
     ${group('Compatibles', `${ok.length} modèles`, ok)}
-    ${group('Hors de portée', 'mémoire ou carte insuffisante', no)}
+    ${group('Hors de portée', 'le motif est sur chaque carte', no)}
   </div>`);
 }
 
@@ -790,7 +930,7 @@ function renderMachine() {
       <div><div class="k">Architecture</div><div class="v">${esc(plan?.summary?.arch ?? '—')}<small>~${fr(plan?.summary?.bandwidth ?? 0)} Go/s de bande passante</small></div></div>
       <div><div class="k">Mémoire</div><div class="v">${fr(hw.ramGiB)} Go<small>RAM système</small></div></div>
       <div><div class="k">Processeur</div><div class="v">${hw.cpu.physical} cœurs<small>${esc(hw.cpu.model.replace(/\s+\d+-Core Processor/i, ''))}</small></div></div>
-      <div><div class="k">Moteur</div><div class="v">${esc(plan?.backend?.label ?? '—')}<small>llama.cpp${state.runtimes ? ` ${esc(Object.values(state.runtimes)[0]?.tag ?? '')}` : ''}</small></div></div>
+      <div><div class="k">Moteur</div><div class="v">${esc(plan?.backend?.label ?? '—')}<small>${esc(engineLabel())}</small></div></div>
       <div><div class="k">Disque</div><div class="v">${hw.diskFreeGiB !== null ? `${fr(hw.diskFreeGiB)} Go` : '—'}<small>libres</small></div></div>`);
   }
   const checks = (state.checks ?? []).filter((c) => !dismissed.has(c.id));
@@ -1011,6 +1151,7 @@ function render() {
   if (state.setup.phase !== 'done' && view !== 'onboard') view = 'onboard';
   renderShell();
   renderUpdate();
+  renderTasks();
   renderApprovals();
   if (view === 'onboard') renderOnboard();
   else if (view === 'models') renderModels();
@@ -1076,7 +1217,13 @@ app.addEventListener('click', async (event) => {
       if (state.active && state.active.status !== 'ready') post(`/api/models/${state.active.modelId}/activate`);
       const r = await post('/api/pi/launch', {}); toast(`pi agent s’ouvre avec ${nameOf(r.model)}`); }
     if (action === 'retry') await post('/api/setup/start');
-    if (action === 'install') { await post(`/api/models/${id}/install`); toast('Téléchargement lancé · votre IA actuelle reste disponible'); }
+    if (action === 'install') {
+      if (pending.has(id) || busyModels().includes(id)) return toast('Déjà en cours : suivez-la dans « En cours »');
+      pending.set(id, { label: nameOf(id), since: Date.now(), model: id });
+      render();
+      try { await post(`/api/models/${id}/install`); } catch (error) { pending.delete(id); render(); throw error; }
+      toast('Installation lancée · suivi dans « En cours », votre IA reste disponible');
+    }
     if (action === 'favorite') { const r = await post(`/api/models/${id}/favorite`); toast(r.favorite ? `${nameOf(id)} est le modèle par défaut` : 'Plus de modèle par défaut'); }
     if (action === 'delete-model') {
       const m = modelOf(id);
@@ -1101,8 +1248,12 @@ app.addEventListener('click', async (event) => {
       if (!confirm(`Installer ${repo} · ${quant} ?
 
 Harn le télécharge, le règle pour votre carte et teste son intelligence. Votre IA actuelle reste disponible pendant ce temps.`)) return;
-      await post('/api/custom/install', { url: `https://huggingface.co/${repo}`, quant, mmproj: mmproj || null });
-      toast('Installation lancée : suivez-la dans la liste des modèles');
+      const key = `hub:${repo}:${quant}`;
+      if (pending.has(key)) return toast('Déjà en cours : suivez-la dans « En cours »');
+      pending.set(key, { label: `${repo} · ${quant}`, since: Date.now(), known: new Set(busyModels()) });
+      renderTasks();
+      try { await post('/api/custom/install', { url: `https://huggingface.co/${repo}`, quant, mmproj: mmproj || null }); } catch (error) { pending.delete(key); renderTasks(); throw error; }
+      toast('Installation lancée · suivi dans « En cours »');
     }
     if (action === 'check') { const r = await post(`/api/checks/${id}/apply`); toast(r.message); }
     if (action === 'key-revoke') {
@@ -1140,6 +1291,9 @@ async function boot() {
   benchMarks = benchMarksOf();
   live = initial.live;
   try { view = sessionStorage.getItem('harn.view') ?? 'home'; } catch { view = 'home'; }
+  // Lien direct vers une vue (http://127.0.0.1:4747/#models).
+  const linked = location.hash.slice(1);
+  if (document.querySelector(`.nav [data-view="${CSS.escape(linked)}"]`)) view = linked;
   if (state.setup.phase !== 'done') view = 'onboard';
   render();
 
@@ -1162,5 +1316,5 @@ async function boot() {
   source.onopen = () => { if (updating) location.reload(); };
   source.onerror = () => { statusEl.innerHTML = '<span class="dot error"></span><span><b>Connexion perdue</b>Harn est-il fermé ?</span>'; };
 }
-setInterval(() => { if (state?.setup.phase === 'running') render(); }, 1000);
+setInterval(() => { if (state?.setup.phase === 'running') render(); else if (pending.size) renderTasks(); }, 1000);
 boot();

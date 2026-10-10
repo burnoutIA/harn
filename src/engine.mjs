@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, readlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { modelById } from './catalog.mjs';
@@ -26,7 +26,10 @@ export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
 // - MTP sans seuil sur les cartes rapides, n-max 2 avec seuil p-min sur les cartes lentes ;
 // - KV q8_0 (K et V du même type, sinon l'attention repasse sur le CPU) ;
 // - vision sur CPU : ~0,9 Gio de VRAM rendus au contexte, débit de génération identique ;
-// - batch 1024 / ubatch 512, couches GPU en auto (forcer « all » ne rapporte rien).
+// - batch 1024 / ubatch 512 ;
+// - toutes les couches sur la carte dès que le modèle y tient : --fit, prudent, en laissait 15 sur 66
+//   au processeur sur une 3090 à 150k (59 tok/s au lieu de 95). La marge se reprend sur le contexte
+//   (loadWithHeadroom) ; --fit ne sert qu'aux modèles qui débordent vraiment (layers « auto »).
 export function defaultTuning(model, context, hardware, kv = 'q8_0') {
   const profile = gpuProfile(hardware);
   const backend = backendCandidates(hardware, profile)[0];
@@ -38,6 +41,7 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
     spec: model.mtp && backend !== 'cpu' ? { type: 'mtp', n: mtp.n, pMin: mtp.pMin } : { type: 'none' },
     fa: 'on',
     visionOnCpu: true,
+    layers: 'all',
     fitTargetMiB: 1024,
     batch: 1024,
     ubatch: 512,
@@ -46,13 +50,18 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
 
 export function describe(tuning) {
   if (tuning.strataArm) return tuning.strataArm;
-  const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}`];
-  if (tuning.spec?.type === 'mtp') parts.push(`MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
+  const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
+  if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
   if (tuning.fa === 'off') parts.push('sans FA');
+  if (layersOf(tuning) === 'auto') parts.push('partagé CPU');
+  if (tuning.fork === 'llamampere') parts.push('llamAmpere');
   if (tuning.backend && !tuning.backend.startsWith('cuda')) parts.push(tuning.backend.toUpperCase());
   return parts.join(' · ');
 }
+
+// Réglages enregistrés avant le champ `layers` : une cible --fit relevée marquait un modèle partagé.
+export const layersOf = (tuning) => tuning.layers ?? (tuning.fitTargetMiB > 1024 ? 'auto' : 'all');
 
 export function llamaArgs(model, files, tuning, hardware) {
   const gpu = tuning.backend !== 'cpu';
@@ -67,12 +76,19 @@ export function llamaArgs(model, files, tuning, hardware) {
     '--parallel', '1',
     '-t', String(threads),
     '-b', String(tuning.batch), '-ub', String(tuning.ubatch),
-    '--cache-type-k', tuning.kv, '--cache-type-v', tuning.kv,
+    // K et V du même type, sauf les paires prévues par llamAmpere (tq5_0/turbo4, noyau fusionné).
+    '--cache-type-k', tuning.kv, '--cache-type-v', tuning.kvV ?? tuning.kv,
   ];
-  if (gpu) args.push('-ngl', 'auto', '--fit', 'on', '--fit-target', String(tuning.fitTargetMiB), '-fa', tuning.fa ?? 'on');
+  // llamAmpere garde par défaut jusqu'à la moitié de la RAM et 16 Gio de disque pour son cache de
+  // prompts : on s'aligne sur le llama.cpp officiel (8 Gio de RAM, rien sur le disque).
+  if (tuning.fork === 'llamampere') args.push('--cache-ram', '8192', '--no-cache-disk');
+  if (gpu && layersOf(tuning) === 'auto') args.push('-ngl', 'auto', '--fit', 'on', '--fit-target', String(tuning.fitTargetMiB), '-fa', tuning.fa ?? 'on');
+  else if (gpu) args.push('-ngl', '999', '--fit', 'off', '-fa', tuning.fa ?? 'on');
   else args.push('-ngl', '0');
   const spec = tuning.spec ?? { type: 'none' };
-  if (spec.type === 'mtp') {
+  if (spec.type === 'mtp' && spec.n === 'auto') {
+    // llamAmpere : sa profondeur adaptative (3-4) et son vocabulaire de brouillon, réglés pour ses noyaux.
+  } else if (spec.type === 'mtp') {
     args.push('--spec-type', 'draft-mtp', '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
   } else if (spec.type === 'dflash' && files.dflash) {
     args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n));
@@ -100,21 +116,49 @@ export function engineEndpoint() {
   return active.endpoint;
 }
 
+// Un moteur peut lancer ses propres processus : Strata (Python) démarre un moteur natif qui tient
+// la VRAM. Sous Linux, chaque moteur a son groupe de processus (spawn détaché) : on arrête le
+// groupe entier, poliment puis de force, sinon un petit-enfant garderait la carte.
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function killTree(pid) {
   if (!pid) return;
-  if (process.platform === 'win32') await run('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }).catch(() => {});
-  else try { process.kill(pid, 'SIGTERM'); } catch {}
+  if (process.platform === 'win32') return void await run('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }).catch(() => {});
+  // Un orphelin repris par reapOrphans n'est pas forcément chef de groupe : on vise alors le seul PID.
+  const target = alive(-pid) ? -pid : pid;
+  try { process.kill(target, 'SIGTERM'); } catch {}
+  for (let i = 0; i < 16 && alive(target); i += 1) await new Promise((resolve) => setTimeout(resolve, 500));
+  if (alive(target)) try { process.kill(target, 'SIGKILL'); } catch {}
 }
 
 // Un seul moteur sur la carte : tout llama-server ou Strata lancé depuis nos dossiers et
 // resté orphelin (crash, arrêt brutal) est repris. On vérifie les PID, pas les ports.
 export async function reapOrphans() {
-  if (process.platform !== 'win32') return [];
+  const pids = (process.platform === 'win32' ? await windowsRuntimePids() : await linuxRuntimePids()).filter((pid) => pid !== child?.pid);
+  for (const pid of pids) await killTree(pid);
+  return pids;
+}
+
+async function windowsRuntimePids() {
   const root = path.join(ROOT, 'runtime').replaceAll("'", "''");
   const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${root}', 'OrdinalIgnoreCase') } | Select-Object -ExpandProperty ProcessId`;
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }).catch(() => ({ stdout: '' }));
-  const pids = stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => pid !== child?.pid);
-  for (const pid of pids) await killTree(pid);
+  return stdout.split(/\s+/).filter(Boolean).map(Number);
+}
+
+// Linux : l'exécutable de chaque processus se lit dans /proc/<pid>/exe. ketch, lui aussi dans
+// runtime/, sert la recherche web des sessions pi ouvertes : on le laisse.
+async function linuxRuntimePids() {
+  if (process.platform !== 'linux') return [];
+  const root = path.join(ROOT, 'runtime') + path.sep;
+  const pids = [];
+  for (const entry of await readdir('/proc').catch(() => [])) {
+    if (!/^\d+$/.test(entry)) continue;
+    // Le python du venv de Strata est un lien vers /usr/bin/python3 : exe ne le montre pas, la
+    // ligne de commande (lancée par son chemin complet) si.
+    const exe = await readlink(`/proc/${entry}/exe`).catch(() => '');
+    const argv0 = (await readFile(`/proc/${entry}/cmdline`, 'utf8').catch(() => '')).split('\0')[0];
+    if ((exe.startsWith(root) || argv0.startsWith(root)) && path.basename(exe) !== 'ketch') pids.push(Number(entry));
+  }
   return pids;
 }
 
@@ -129,6 +173,17 @@ async function waitReady(url, timeoutMs, exited) {
   throw new Error('Le moteur n’a pas répondu à temps');
 }
 
+// Un échec que plus de mémoire ne réglerait pas : réessayer avec moins de contexte ne sert à rien,
+// et l'utilisateur doit lire la vraie cause plutôt qu'un « moteur arrêté ».
+export function loadFailure(tail, label = 'ce modèle') {
+  const arch = tail.match(/unknown model architecture: '([^']+)'/);
+  if (arch) return `Ce moteur ne connaît pas encore l’architecture « ${arch[1]} » de ${label} : il faudra une version plus récente de llama.cpp`;
+  if (/out of memory|failed to allocate|cudaMalloc|unable to allocate|CUDA error/i.test(tail)) return null;
+  const load = tail.match(/llama_model_load: error loading model: ([^\n]+)/);
+  if (load) return `Le fichier de ${label} n’a pas pu être chargé : ${load[1].trim().slice(0, 200)}`;
+  return null;
+}
+
 export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label }) {
   await stopEngine();
   await reapOrphans();
@@ -139,10 +194,15 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
 
   update((s) => { s.active = { modelId, label, status: 'loading', since: Date.now(), endpoint, args, error: null }; });
   let exited = false;
-  const process_ = spawn(command, args, { cwd, env: { ...process.env, ...env }, windowsHide: true });
+  const process_ = spawn(command, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, detached: process.platform !== 'win32' });
   child = process_;
   process_.stdout.pipe(log, { end: false });
   process_.stderr.pipe(log, { end: false });
+  // La fin du journal, pour dire pourquoi un chargement a échoué.
+  let tail = '';
+  const keep = (chunk) => { tail = (tail + chunk).slice(-16_384); };
+  process_.stdout.on('data', keep);
+  process_.stderr.on('data', keep);
   process_.on('exit', (code) => {
     exited = true;
     if (child === process_) child = null;
@@ -155,8 +215,10 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
     await waitReady(health, 900_000, () => exited);
   } catch (error) {
     await killTree(process_.pid);
-    update((s) => { s.active = { ...s.active, status: 'error', error: error.message }; });
-    throw error;
+    const cause = loadFailure(tail, label);
+    const failure = cause ? Object.assign(new Error(cause), { fatal: true }) : error;
+    update((s) => { s.active = { ...s.active, status: 'error', error: failure.message }; });
+    throw failure;
   }
   update((s) => { s.active = { ...s.active, status: 'ready', readyAt: Date.now(), loadSeconds: (Date.now() - s.active.since) / 1000 }; });
   return getState().active;
@@ -174,6 +236,8 @@ export async function stopEngine() {
   });
   child = null;
   stopping = false;
+  // Ce qui aurait échappé au groupe (processus détaché de son parent) : repris par son chemin.
+  await reapOrphans();
   // Le pilote rend la VRAM avec un temps de retard : on attend qu'elle se stabilise, sinon le
   // moteur suivant mesurerait une marge fausse et réduirait son contexte pour rien.
   let previous = null;

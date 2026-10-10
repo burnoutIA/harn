@@ -12,8 +12,10 @@ import { RATING_WEIGHTS, globalRating, ratingFrom } from './rating.mjs';
 export const OBJECTIVE = { minContext: 100 * 1024, maxContext: 150 * 1024, minTps: 40, floorContext: 32 * 1024 };
 
 const GiB = 1024 ** 3;
+// Strata sous Linux : le seul prérequis que Harn ne peut pas poser lui-même (il faut sudo).
+export const PYTHON_MISSING = 'il faut d’abord installer Python avec venv : sudo apt install python3-venv (Ubuntu, Debian), puis relancer Harn';
 const CRAWL_TPS = 15;
-const BACKEND_LABEL = { cuda13: 'CUDA 13', cuda12: 'CUDA 12.4', vulkan: 'Vulkan', hip: 'HIP (ROCm)', cpu: 'Processeur' };
+const BACKEND_LABEL = { cuda13: 'CUDA 13', cuda12: 'CUDA 12', vulkan: 'Vulkan', hip: 'HIP (ROCm)', cpu: 'Processeur' };
 
 export function pickBackend(hardware) {
   const profile = gpuProfile(hardware);
@@ -133,6 +135,8 @@ export function assess(model, hardware) {
 
   if (hardware.diskFreeGiB !== null && hardware.diskFreeGiB < sizeGB * 1.05 + 5) reasons.push(`il faut ${Math.ceil(sizeGB + 5)} Go libres sur le disque (${hardware.diskFreeGiB} disponibles)`);
   if (model.engine === 'strata') {
+    // Strata s'installe par START-HERE.bat (Windows) ou setup.sh (Linux), rien d'autre.
+    if (hardware.os?.platform && !['win32', 'linux'].includes(hardware.os.platform)) return { fit: 'no', reasons: ['Strata n’est installé par Harn que sous Windows et Linux'] };
     // Moins de RAM que conseillé : Strata passe en mode faible RAM (la carte garde les experts les
     // plus utilisés, le reste est relu depuis le SSD) tant que RAM + carte couvrent les experts.
     if (!strataMemory(model, hardware.ramGiB, hardware.vramGiB)) {
@@ -142,6 +146,7 @@ export function assess(model, hardware) {
     if (gpu?.vendor !== 'nvidia') reasons.push('Strata demande une carte NVIDIA');
     else if (gpu.computeCapability < model.needs.nvidiaCc) reasons.push('Strata demande une RTX série 20 ou plus récente');
     if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
+    if (hardware.python?.ok === false) reasons.push(PYTHON_MISSING);
     if (reasons.length) return { fit: 'no', reasons };
     // Le KV de Strata vit en RAM au-delà de 64k (~13,7 Ko par token) : 131k tiennent dès que la RAM suit.
     // En mode faible RAM, le KV au-delà de 32k va sur la carte : ~1,4 Go à 131k, sans conséquence.
@@ -264,6 +269,7 @@ function explainTarget(target, candidates, verdict, q, profiles) {
 function ramAdvice(hardware) {
   const gpu = hardware.primary;
   if (gpu?.vendor !== 'nvidia' || gpu.computeCapability < 7.5 || hardware.vramGiB < 11.5) return null;
+  if (hardware.os?.platform && !['win32', 'linux'].includes(hardware.os.platform)) return null; // Strata : Windows et Linux
   // Seulement un modèle qui ne tourne pas encore ici : sinon on conseillerait ce qui marche déjà.
   const strata = MODELS.filter((m) => m.engine === 'strata' && hardware.vramGiB >= m.needs.vramGiB && !strataMemory(m, hardware.ramGiB, hardware.vramGiB))
     .map((m) => ({ model: m, ram: strataRamNeeded(m, hardware.vramGiB) }))

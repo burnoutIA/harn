@@ -3,13 +3,14 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { MODELS, displayName, downloadUrl, hfSha256, modelById, totalBytes } from './catalog.mjs';
 import { download, hashFile } from './download.mjs';
-import { defaultTuning, describe, llamaArgs, modelFiles, startEngine, stopEngine } from './engine.mjs';
+import { defaultTuning, describe, layersOf, llamaArgs, modelFiles, startEngine, stopEngine } from './engine.mjs';
 import { detectHardware, sampleGpu } from './hardware.mjs';
-import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
+import { dflashEligible, gpuProfile, llamAmpereEligible, mtpPlan } from './levers.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { configurePi, installPi } from './pi.mjs';
 import { OBJECTIVE, assess, makePlan } from './planner.mjs';
-import { installKetch, installLlama, installStrata } from './runtimes.mjs';
+import { archMissing, enginesFor } from './engines.mjs';
+import { engineEnv, installKetch, installLlama, installLlamAmpere, installStrata } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 import { systemChecks } from './system-checks.mjs';
 import { askLocalAnalysis, machineDocPath, writeMachineFacts } from './machine-doc.mjs';
@@ -69,7 +70,15 @@ export function runFirstSetup() {
   return running;
 }
 
-const runtimeKind = (model) => (model.engine === 'prism' ? 'prism' : 'llama');
+const runtimeKind = (model, tuning) => (tuning?.fork ?? (model.engine === 'prism' ? 'prism' : 'llama'));
+
+// Une compilation de llamAmpere ratée n'est retentée que si les outils ont changé (paquet ajouté).
+function failedBuild() {
+  const failure = getState().buildFailures?.llamampere;
+  return Boolean(failure) && JSON.stringify(failure.tools) === JSON.stringify(getState().hardware?.buildTools);
+}
+
+const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256 };
 
 // Le réglage de départ d'un modèle : contexte et type de KV viennent de l'objectif
 // (100k-150k), le reste des a priori de la carte.
@@ -78,7 +87,7 @@ function startingTuning(model, hardware) {
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
   // Partagé avec la RAM : --fit remplit la carte jusqu'à sa cible ; on la met au-dessus de la marge
   // exigée, sinon le contrôle de marge raccourcirait le contexte sans rien gagner.
-  if (verdict.fit === 'partial') tuning.fitTargetMiB = HEADROOM_MIN_MIB + 256;
+  if (verdict.fit === 'partial') Object.assign(tuning, sharedLayers);
   return tuning;
 }
 
@@ -112,7 +121,11 @@ async function firstSetup() {
 
     // pi et la recherche web s'installent en parallèle de tout le reste.
     const piJob = (async () => {
-      if (getState().pi.installed) return step('pi', { status: 'done', detail: `déjà installé (${getState().pi.version})` });
+      if (getState().pi.installed) {
+        // ketch a pu manquer au premier passage (réseau, pas de build pour ce système) : on le reprend.
+        const ketch = getState().ketch ?? await installKetch().catch(() => null);
+        return step('pi', { status: 'done', detail: `déjà installé (${getState().pi.version})${ketch ? ` · recherche web ketch ${ketch.version}` : ''}` });
+      }
       step('pi', { status: 'running' });
       try {
         const [version, ketch] = await Promise.all([installPi(), installKetch().catch(() => null)]);
@@ -126,31 +139,50 @@ async function firstSetup() {
     // Au premier démarrage il n'y a encore aucun modèle, donc personne pour dépanner : Harn
     // descend lui-même d'un cran à chaque échec (moteur plus simple, modèle plus petit, puis
     // Bonsai sur le processeur, qui tourne partout) jusqu'à avoir une IA qui répond.
+    // Mais un modèle plus petit ne répare qu'un échec de chargement : si c'est le moteur qui ne
+    // s'installe pas, seul un autre moteur peut aider ; si c'est le téléchargement, rien.
     const attempts = firstSetupAttempts(plan, hardware);
     let model = null;
     let loaded = null;
     const failures = [];
+    const brokenRuntimes = new Set();
+    let blocker = null; // le dernier échec qui ne tient pas à la taille du modèle
     for (const attempt of attempts) {
       const candidate = modelById(attempt.modelId);
+      const runtimeId = `${runtimeKind(candidate)}-${attempt.backend}`;
+      if (brokenRuntimes.has(runtimeId)) continue;
+      if (blocker && (blocker.stage === 'model' || candidate.id !== blocker.modelId)) continue;
       const label = `${candidate.name} · ${candidate.variant}${attempt.backend === plan.backend.id ? '' : ` (moteur ${attempt.backend})`}`;
+      let stage = 'runtime';
       try {
         step('runtime', { status: 'running', detail: attempt.backend });
         const info = await installLlama(runtimeKind(candidate), attempt.backend);
         step('runtime', { status: 'done', detail: `llama.cpp ${info.tag} · ${attempt.backend}` });
+        stage = 'model';
         step('model', { status: 'running', detail: label });
         await installModelFiles(candidate);
         step('model', { status: 'done', detail: label });
+        stage = 'load';
         step('load', { status: 'running', detail: failures.length ? `Après ${failures.length} échec(s), essai plus simple : ${label}` : null });
         loaded = await loadWithHeadroom(candidate, { ...startingTuning(candidate, hardware), backend: attempt.backend });
         model = candidate;
         break;
       } catch (error) {
-        failures.push(`${label} : ${error.message.split('\n')[0]}`);
+        const reason = error.message.split('\n')[0];
+        failures.push(stage === 'runtime' ? `moteur ${attempt.backend} : ${reason}` : `${label} : ${reason}`);
         await stopEngine().catch(() => {});
-        step('load', { status: 'running', detail: `Échec avec ${label}. On essaie plus simple…` });
+        if (stage === 'runtime') brokenRuntimes.add(runtimeId);
+        blocker = stage === 'load' ? null : { stage, modelId: candidate.id };
+        if (stage === 'runtime') step('runtime', { status: 'running', detail: `Échec du moteur ${attempt.backend}. On essaie un autre moteur…` });
+        else if (stage === 'load') step('load', { status: 'running', detail: `Échec avec ${label}. On essaie plus simple…` });
       }
     }
-    if (!model) throw new Error(`Aucun modèle n’a pu démarrer sur cette machine. ${failures.join(' | ')}`);
+    if (!model) {
+      const what = blocker?.stage === 'runtime' ? 'Le moteur n’a pas pu s’installer'
+        : blocker?.stage === 'model' ? 'Le modèle n’a pas pu se télécharger'
+          : 'Aucun modèle n’a pu démarrer sur cette machine';
+      throw new Error(`${what}. ${failures.join(' | ')}`);
+    }
     step('load', { status: 'done', detail: `${describe(loaded.tuning)} · ${loaded.active.loadSeconds.toFixed(0)} s${failures.length ? ` · repli après ${failures.length} échec(s)` : ''}` });
 
     step('tune', { status: 'running' });
@@ -282,14 +314,15 @@ function recipeFor(model, tuning) {
       health: `http://127.0.0.1:${PORTS.strata}/v1/models`,
     };
   }
-  const runtime = state.runtimes[`${runtimeKind(model)}-${tuning.backend}`];
-  if (!runtime) throw new Error(`Moteur ${tuning.backend} non installé`);
+  const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
+  if (!runtime) throw new Error(`Moteur ${runtimeKind(model, tuning)} ${tuning.backend} non installé`);
   return {
     modelId: model.id,
     label: displayName(model),
     command: runtime.serverPath,
     args: llamaArgs(model, modelFiles(model.id), tuning, state.hardware),
     cwd: runtime.dir,
+    env: engineEnv(runtime.dir),
     endpoint: `http://127.0.0.1:${PORTS.engine}`,
     health: `http://127.0.0.1:${PORTS.engine}/health`,
   };
@@ -300,12 +333,16 @@ const freeVram = async () => (getState().hardware?.primary?.vendor === 'nvidia' 
 // Charger, puis vérifier la marge VRAM. C'est le levier ×21 du poste de référence : sous
 // ~1,5 Gio libre, le préfill retombe sur la mémoire hôte sans la moindre erreur. Pour retrouver
 // la marge on cède dans l'ordre de l'objectif : contexte par paliers jusqu'à 100k, puis KV q4_0,
-// puis seulement sous 100k, par paliers jusqu'au plancher de 32k.
+// puis seulement sous 100k, par paliers jusqu'au plancher de 32k. En dernier recours, le partage
+// avec le processeur (--fit) : plus lent, mais le modèle tourne.
 function smaller(tuning) {
   if (tuning.context - 16384 >= OBJECTIVE.minContext) return { ...tuning, context: tuning.context - 16384 };
-  if (tuning.kv !== 'q4_0') return { ...tuning, kv: 'q4_0' };
-  return { ...tuning, context: Math.max(OBJECTIVE.floorContext, tuning.context - 16384) };
+  if (tuning.kv !== 'q4_0') return { ...tuning, kv: 'q4_0', kvV: undefined };
+  if (tuning.context > OBJECTIVE.floorContext) return { ...tuning, context: Math.max(OBJECTIVE.floorContext, tuning.context - 16384) };
+  return { ...tuning, ...sharedLayers };
 }
+// Plus rien à céder : plancher de contexte atteint et couches déjà partagées.
+const exhausted = (tuning) => tuning.context <= OBJECTIVE.floorContext && layersOf(tuning) === 'auto';
 
 // Chaque chargement prend un numéro : si un autre modèle est demandé entre-temps, celui-ci
 // abandonne au lieu de réessayer (sinon les deux se tueraient le moteur à tour de rôle).
@@ -315,19 +352,19 @@ const superseded = () => new Error('Chargement remplacé par celui d’un autre 
 async function loadWithHeadroom(model, tuning) {
   const ticket = ++loadTicket;
   let current = { ...tuning };
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 14; attempt += 1) {
     if (ticket !== loadTicket) throw superseded();
     let active;
     try {
       active = await startEngine(recipeFor(model, current));
     } catch (error) {
       if (ticket !== loadTicket) throw superseded();
-      if (current.context <= OBJECTIVE.floorContext || model.engine === 'strata') throw error;
+      if (error.fatal || exhausted(current) || model.engine === 'strata') throw error;
       current = smaller(current);
       continue;
     }
     const headroomMiB = await freeVram();
-    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || current.context <= OBJECTIVE.floorContext || model.engine === 'strata') {
+    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || exhausted(current) || model.engine === 'strata') {
       return { active, tuning: current, headroomMiB };
     }
     current = smaller(current);
@@ -360,15 +397,30 @@ function roomFor(model, best, extraMiB) {
 let busy = null;
 export const busyWith = () => busy;
 
+// File d'attente de la carte : bancs, tests d'intelligence et analyses passent un par un. Sans
+// elle, deux installations se volaient la carte (« chargement remplacé ») et faussaient leurs
+// mesures. Réentrant : une tâche qui tient déjà la carte pour ce modèle (installation → banc →
+// test) continue sans se remettre en file derrière elle-même.
+let gpuQueue = Promise.resolve();
+export function withGpu(modelId, task) {
+  if (busy === modelId) return task();
+  update((s) => { if (s.models[modelId]) s.models[modelId].waitingGpu = true; });
+  const turn = gpuQueue.then(async () => {
+    update((s) => { if (s.models[modelId]) s.models[modelId].waitingGpu = false; });
+    busy = modelId;
+    try { return await task(); } finally { busy = null; }
+  });
+  gpuQueue = turn.catch(() => {});
+  return turn;
+}
+
 export async function tuneModel(modelId, options = {}) {
-  const previous = busy;
-  busy = modelId;
-  try {
+  return withGpu(modelId, async () => {
     const result = await tuneModelInner(modelId, options);
     // La vitesse et le contexte mesurés changent la note globale : le plan est recalculé.
     update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
     return result;
-  } finally { busy = previous; }
+  });
 }
 
 async function tuneModelInner(modelId, { startFrom = null, onProgress = () => {} } = {}) {
@@ -461,6 +513,32 @@ async function tuneModelInner(modelId, { startFrom = null, onProgress = () => {}
     }
   }
 
+  // llamAmpere (RTX 30 sous Linux) : le même réglage sur l'autre moteur, puis son KV compressé.
+  // Compilé une seule fois (~10-20 min) ; un échec est noté et ne bloque pas le banc.
+  if (gpu && model.engine !== 'prism' && llamAmpereEligible(hardware) && !failedBuild()) {
+    try {
+      if (!best.tuning.fork) {
+        onProgress('llamAmpere · compilation du moteur (une seule fois, 10 à 20 min)');
+        const info = await installLlamAmpere(hardware.buildTools, (text) => {
+          const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
+          if (step) onProgress(`llamAmpere · compilation ${step}`);
+        });
+        // Sa propre profondeur MTP : ses noyaux rendent la vérification de 4-8 tokens bon marché,
+        // l'optimum mesuré sur l'officiel (souvent 2-3) le bride.
+        const fork = { ...best.tuning, fork: 'llamampere', backend: info.backend, spec: model.mtp ? { type: 'mtp', n: 'auto' } : best.tuning.spec };
+        best = better(await trial('Moteur llamAmpere', { ...fork, kv: 'tq5_0', kvV: 'turbo4' }), best);
+        best = better(await trial('Moteur llamAmpere', fork), best);
+      } else {
+        // Déjà sur llamAmpere : le moteur officiel reste mesuré face à lui.
+        const spec = best.tuning.spec?.n === 'auto' ? { type: 'mtp', ...mtpPlan(profile).base } : best.tuning.spec;
+        best = better(await trial('Moteur officiel', { ...best.tuning, fork: undefined, backend: getState().plan.backend.id, kv: 'q8_0', kvV: undefined, spec }), best);
+      }
+    } catch (error) {
+      update((s) => { s.buildFailures = { ...s.buildFailures, llamampere: { error: error.message.slice(0, 300), at: new Date().toISOString(), tools: hardware.buildTools } }; });
+      results.push({ id: 'llamampere', stage: 'Moteur llamAmpere', label: 'compilation', error: error.message.slice(0, 200), ok: false });
+    }
+  }
+
   return finish(model, results, best);
 
   async function finish(model, results, best) {
@@ -546,6 +624,9 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
     installs.set(modelId, (async () => {
       const model = modelById(modelId);
       const plan = getState().plan;
+      // Avant de télécharger : un moteur sait-il charger cette architecture ?
+      const engines = model.engine === 'strata' ? null : await enginesFor(model.profile?.arch);
+      if (engines && !engines.length) throw new Error(archMissing(model.profile.arch));
       if (model.engine !== 'strata') {
         setPhase(modelId, 'download', 'Préparation du moteur llama.cpp');
         await installLlama(runtimeKind(model), plan.backend.id);
@@ -554,14 +635,16 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
       await installModelFiles(model, { ggufDir });
       setPhase(modelId, 'tune');
       update((s) => { s.models[modelId].tuning = true; });
-      await tuneModel(modelId, { onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
-      update((s) => { s.models[modelId].tuning = false; s.models[modelId].tuneDetail = null; });
-      if (getState().pi.installed) await configurePi();
-      if (fromCustomJob) return; // la suite (test, analyse) est menée par installCustom
-      setPhase(modelId, 'iq');
-      await runIq(modelId).catch(() => {});
-      setPhase(modelId, 'analysis');
-      runAnalysis().finally(() => setPhase(modelId, null));
+      await withGpu(modelId, async () => {
+        await tuneModel(modelId, { onProgress: (detail) => { onDetail(detail); update((s) => { s.models[modelId].tuneDetail = detail; }); } });
+        update((s) => { s.models[modelId].tuning = false; s.models[modelId].tuneDetail = null; });
+        if (getState().pi.installed) await configurePi();
+        if (fromCustomJob) return; // la suite (test, analyse) est menée par installCustom
+        setPhase(modelId, 'iq');
+        await runIq(modelId).catch(() => {});
+        setPhase(modelId, 'analysis');
+        await runAnalysis().catch(() => {});
+      }).finally(() => { if (!fromCustomJob) setPhase(modelId, null); });
     })().catch((error) => {
       update((s) => { s.models[modelId] = { ...(s.models[modelId] ?? {}), installing: false, tuning: false, phase: null, error: error.message }; });
       throw error;
@@ -575,9 +658,7 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
 const iqRuns = new Map();
 export function runIq(modelId) {
   if (!iqRuns.has(modelId)) {
-    iqRuns.set(modelId, (async () => {
-      const previous = busy;
-      busy = modelId;
+    iqRuns.set(modelId, withGpu(modelId, async () => {
       update((s) => { (s.profiles[modelId] ??= {}).iqRunning = 'Préparation'; });
       try {
         if (getState().active?.modelId !== modelId || getState().active?.status !== 'ready') await activate(modelId);
@@ -595,10 +676,8 @@ export function runIq(modelId) {
       } catch (error) {
         update((s) => { s.profiles[modelId].iqRunning = null; s.profiles[modelId].iqError = error.message; });
         throw error;
-      } finally {
-        busy = previous;
       }
-    })().finally(() => iqRuns.delete(modelId)));
+    }).finally(() => iqRuns.delete(modelId)));
   }
   return iqRuns.get(modelId);
 }
@@ -631,6 +710,8 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     const report = await inspectRepo(url);
     const chosen = report.quants.find((q) => q.quant.toUpperCase() === String(quant).toUpperCase());
     if (!chosen) throw new Error(`Quantification « ${quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}`);
+    const engines = await enginesFor(report.profile?.arch);
+    if (engines && !engines.length) throw new Error(archMissing(report.profile.arch));
     const projector = mmproj ? report.mmproj.find((m) => m.name === mmproj) : null;
     if (mmproj && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
     // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.

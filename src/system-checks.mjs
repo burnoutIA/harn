@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { gpuProfile, hardwareNotes } from './levers.mjs';
+import { MODELS } from './catalog.mjs';
+import { gpuProfile, hardwareNotes, isAmpereLinux } from './levers.mjs';
+import { assess } from './planner.mjs';
 
 const run = promisify(execFile);
 const quiet = (command, args) => run(command, args, { windowsHide: true, timeout: 10_000 }).then((r) => r.stdout).catch(() => '');
@@ -19,6 +21,27 @@ export async function systemChecks(hardware, { vramBaselineMiB = null } = {}) {
   const checks = [];
   const profile = gpuProfile(hardware);
   for (const note of hardwareNotes(hardware, profile)) checks.push({ id: `hw-${checks.length}`, title: note.text.split(' : ')[0].split('.')[0], ...note });
+  // Linux : Python/venv manquant, et seulement quand c'est lui qui prive cette machine de Strata.
+  if (hardware.python?.ok === false && MODELS.some((m) => m.engine === 'strata' && assess(m, { ...hardware, python: null }).fit !== 'no')) {
+    checks.push({
+      id: 'python-venv',
+      level: 'warn',
+      title: 'Python avec venv manquant',
+      text: 'Les grands MoE (Strata) tiendraient sur cette machine, mais leur installeur a besoin de Python 3.10+ avec venv, et Harn ne peut pas l’installer sans votre mot de passe.',
+      how: 'Dans un terminal : sudo apt install python3-venv (Ubuntu, Debian), puis relancer Harn.',
+    });
+  }
+  // RTX 30 sous Linux : llamAmpere, plus rapide en code, se compile ici si les outils sont là.
+  if (isAmpereLinux(hardware) && !hardware.buildTools?.ok) {
+    const tools = hardware.buildTools ?? {};
+    checks.push({
+      id: 'build-tools',
+      level: 'info',
+      title: 'Moteur llamAmpere possible',
+      text: `Votre RTX 30 peut utiliser llamAmpere, un llama.cpp écrit pour elle (+15 à 20 % en code mesurés sur une 3090). Harn le compile lui-même, mais il manque ${[!tools.nvcc && 'le toolkit CUDA', !tools.cmake && 'cmake', tools.nvcc && !tools.hostCompiler && `un g++ accepté par nvcc ${tools.nvcc}`].filter(Boolean).join(', ') || 'des outils de compilation'}.`,
+      how: 'Dans un terminal : sudo apt install nvidia-cuda-toolkit cmake build-essential, puis relancer Harn et refaire le banc du modèle.',
+    });
+  }
   if (process.platform !== 'win32') return checks;
 
   const scheme = (await quiet('powercfg', ['/getactivescheme'])).match(/[0-9a-f-]{36}/i)?.[0]?.toLowerCase();

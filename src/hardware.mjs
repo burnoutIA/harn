@@ -87,13 +87,43 @@ async function gitBash() {
   return Boolean(await tryRun('bash.exe', ['-c', 'echo ok']));
 }
 
+// Linux : Strata (setup.sh) a besoin d'un Python 3.10+ capable de créer un venv avec pip.
+// Debian/Ubuntu livrent venv sans ensurepip (paquet python3-venv à part), et l'installer demande
+// sudo : Harn ne peut que le signaler. Même test que setup.sh. null hors Linux.
+export async function linuxPython() {
+  if (process.platform !== 'linux') return null;
+  const probe = 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 10) else 1)';
+  for (const command of ['python3', 'python']) if ((await tryRun(command, ['-c', probe])) !== null) return { ok: true, command };
+  return { ok: false };
+}
+
+// Linux : de quoi compiler un moteur CUDA (llamAmpere). nvcc n'accepte qu'une plage de g++ :
+// 12.4-12.6 jusqu'à g++ 13, 12.8-12.9 jusqu'à 14, 13.x jusqu'à 15. Ubuntu récent livre un g++ plus
+// neuf que ce que son nvcc accepte : on cherche alors un g++-N installé à côté.
+export async function buildTools() {
+  if (process.platform !== 'linux') return null;
+  const nvcc = (await tryRun('nvcc', ['--version']))?.match(/release (\d+)\.(\d+)/);
+  const cmake = Boolean(await tryRun('cmake', ['--version']));
+  if (!nvcc) return { ok: false, nvcc: null, cmake, hostCompiler: null };
+  const [major, minor] = [Number(nvcc[1]), Number(nvcc[2])];
+  const maxGcc = major >= 13 ? 15 : minor >= 8 ? 14 : 13;
+  let hostCompiler = null;
+  for (const name of ['g++', ...Array.from({ length: maxGcc - 10 }, (_, i) => `g++-${maxGcc - i}`)]) {
+    const version = Number.parseInt(await tryRun(name, ['-dumpversion']) ?? '', 10);
+    if (version && version <= maxGcc) { hostCompiler = name; break; }
+  }
+  return { ok: Boolean(cmake && hostCompiler), nvcc: `${major}.${minor}`, cmake, hostCompiler };
+}
+
 export async function detectHardware() {
-  const [nvidia, others, cpu, disk, hasGitBash] = await Promise.all([
+  const [nvidia, others, cpu, disk, hasGitBash, python, tools] = await Promise.all([
     nvidiaGpus(),
     windowsOtherGpus(),
     cpuInfo(),
     statfs(ROOT).catch(() => null),
     gitBash(),
+    linuxPython(),
+    buildTools(),
   ]);
   const gpus = [...nvidia, ...others];
   // La carte de référence : la plus grosse NVIDIA, sinon la plus grosse tout court.
@@ -110,6 +140,8 @@ export async function detectHardware() {
     diskFreeGiB: disk ? +((disk.bavail * disk.bsize) / GiB).toFixed(0) : null,
     node: process.versions.node,
     gitBash: hasGitBash,
+    python,
+    buildTools: tools,
   };
 }
 
