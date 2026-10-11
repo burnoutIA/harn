@@ -56,8 +56,13 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
 ## Limites à dire franchement
 
 - Harn ne sert que des fichiers GGUF. Un dépôt sans GGUF ne s'installe pas ici.
-- Un dépôt à accès restreint (`gated`) demande d'accepter la licence sur Hugging Face et un jeton :
-  Harn ne le gère pas encore.
+- Un dépôt à accès restreint (`gated`) ne se télécharge pas : Harn n'a pas de jeton Hugging Face.
+  Il s'installe quand même si son fichier est déjà sur la machine (`alreadyOnDisk` dans
+  `inspect_model_repo`) : même procédure, `install_model` reprend le fichier sans rien télécharger.
+  Sinon, dis à l'utilisateur de placer le fichier dans le dossier `models/` de Harn.
+- Un outil de Harn qui échoue : rends son message à l'utilisateur et arrête-toi là. N'écris pas de
+  script pour lire ou analyser toi-même un fichier de modèle : ils font des dizaines de
+  gigaoctets, et un script maladroit remplit la mémoire de la machine.
 - Une architecture trop récente peut ne pas se charger avec le moteur installé : l'erreur du banc
   le dira. Signale-le plutôt que de réessayer.
 - Le banc d'intelligence (test adaptatif par paliers : plancher, difficile, limite, en cinq domaines)

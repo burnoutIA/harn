@@ -1,3 +1,5 @@
+import { open } from 'node:fs/promises';
+
 // Lecture des métadonnées d'un GGUF distant sans le télécharger : l'en-tête est au début du
 // fichier, on le lit par requêtes HTTP partielles (Range). Il dit l'architecture exacte :
 // couches, têtes KV, couches d'attention pleine (modèles hybrides), experts, tête MTP.
@@ -79,6 +81,27 @@ export async function readGgufMetadata(url, headers = {}) {
       if (!(error instanceof NeedMore) || buffer.length < size) throw error;
       size *= 2;
     }
+  }
+  throw new Error('En-tête GGUF trop grand');
+}
+
+// Le même en-tête, lu dans un fichier déjà sur le disque : seul le début est chargé, jamais le
+// fichier entier.
+export async function readGgufFile(file) {
+  const handle = await open(file, 'r');
+  try {
+    const { size: total } = await handle.stat();
+    for (let size = 4 * 1024 * 1024; size <= 256 * 1024 * 1024; size *= 2) {
+      const buffer = Buffer.alloc(Math.min(size, total));
+      await handle.read(buffer, 0, buffer.length, 0);
+      try {
+        return parse(buffer);
+      } catch (error) {
+        if (!(error instanceof NeedMore) || buffer.length === total) throw error;
+      }
+    }
+  } finally {
+    await handle.close();
   }
   throw new Error('En-tête GGUF trop grand');
 }

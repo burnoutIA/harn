@@ -82,7 +82,7 @@ export async function inspectForMachine(url) {
   report.quants = report.quants.map((quant) => {
     const entry = buildEntry({ repo: report.repo, quant, profile: report.profile });
     const verdict = assess(entry, hardware);
-    return { quant: quant.quant, gigabytes: +(quant.bytes / 1e9).toFixed(1), files: quant.files.length, verdict: { fit: verdict.fit, context: verdict.context ?? null, kv: verdict.kv ?? null, tpsAt100k: verdict.tps ?? null, meetsObjective: Boolean(verdict.meetsContext && verdict.meetsSpeed), reasons: verdict.reasons } };
+    return { quant: quant.quant, gigabytes: +(quant.bytes / 1e9).toFixed(1), files: quant.files.length, alreadyOnDisk: quant.files.every((file) => report.local[file.name]), verdict: { fit: verdict.fit, context: verdict.context ?? null, kv: verdict.kv ?? null, tpsAt100k: verdict.tps ?? null, meetsObjective: Boolean(verdict.meetsContext && verdict.meetsSpeed), reasons: verdict.reasons } };
   });
   report.objective = { minContext: OBJECTIVE.minContext, maxContext: OBJECTIVE.maxContext, minTps: OBJECTIVE.minTps };
   report.machine = getState().plan?.summary?.machine ?? null;
@@ -111,7 +111,8 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, sampling });
     const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
     await refreshHardware();
-    onProgress({ step: 'download', detail: `Téléchargement de ${(chosen.bytes / 1e9).toFixed(1)} Go` });
+    const onDisk = chosen.files.every((file) => report.local[file.name]);
+    onProgress({ step: 'download', detail: onDisk ? 'Fichier déjà sur cette machine : rien à télécharger' : `Téléchargement de ${(chosen.bytes / 1e9).toFixed(1)} Go` });
     await installAndTune(entry.id, (detail) => onProgress({ step: 'bench', detail: `Banc · ${detail}` }), { fromCustomJob: true });
     onProgress({ step: 'iq', detail: 'Test d’intelligence' });
     setPhase(entry.id, 'iq');

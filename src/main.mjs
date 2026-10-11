@@ -313,10 +313,12 @@ async function api(req, res, url) {
     if (!chosen) return json(res, 400, { error: `Quantification « ${options.quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}` });
     const projector = options.mmproj ? report.mmproj.find((m) => m.name === options.mmproj) : null;
     const bytes = chosen.bytes + (projector?.bytes ?? 0);
+    const onDisk = chosen.files.every((file) => report.local[file.name]);
+    const source = onDisk ? `Fichier déjà sur cette machine (${report.local[chosen.files[0].name]}) : rien à télécharger` : `${(bytes / 1e9).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go à télécharger depuis huggingface.co${projector ? ' (vision comprise)' : ''}`;
     const approval = requestApproval({
       kind: 'install',
       title: `Installer ${report.repo} · ${chosen.quant}`,
-      detail: `${(bytes / 1e9).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go à télécharger depuis huggingface.co${projector ? ' (vision comprise)' : ''}, puis réglage, banc et test d’intelligence. Licence : ${report.license ?? 'non précisée'}.`,
+      detail: `${source}, puis réglage, banc et test d’intelligence. Licence : ${report.license ?? 'non précisée'}.`,
       run: () => installCustom(options),
     });
     return json(res, 202, { approval, status: 'pending' });
@@ -393,6 +395,8 @@ async function api(req, res, url) {
     if (parts[3] === 'iq') { background(runIq(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
     if (parts[3] === 'bench') { background(tuneModel(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
   }
+  // Un identifiant que le catalogue ne connaît pas : le dire, pi lit cette réponse.
+  if (parts[1] === 'models' && parts[2]) return json(res, 404, { error: `Modèle « ${parts[2]} » absent du catalogue de Harn : un nouveau modèle s’ajoute avec install_model et l’adresse de son dépôt Hugging Face, même si son fichier est déjà sur cette machine. harn_status liste les identifiants connus.` });
   return json(res, 404, { error: 'inconnu' });
 }
 

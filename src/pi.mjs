@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { internalKey } from './api-keys.mjs';
@@ -225,6 +226,21 @@ async function hasWindowsTerminal() {
   return run('where', ['wt.exe'], { windowsHide: true }).then(() => true).catch(() => false);
 }
 
+// Sous Linux, pi et tout ce qu'il lance (son shell, ses scripts, ses serveurs MCP) tournent dans
+// un groupe à mémoire plafonnée : un script qui s'emballe est tué par le noyau, au lieu de
+// remplir la RAM et de figer la machine. Un quart de la mémoire, 4 Go au moins, sans échange.
+let memoryCap;
+async function cappedMemory() {
+  if (process.platform !== 'linux') return [];
+  if (!memoryCap) {
+    const max = Math.max(4 * 1024 ** 3, Math.round(os.totalmem() / 4));
+    const prefix = ['systemd-run', '--user', '--scope', '--quiet', '--collect', '-p', `MemoryMax=${max}`, '-p', 'MemorySwapMax=0', '--'];
+    // Sans systemd utilisateur (conteneur, session sans bus) : pi se lance quand même, sans plafond.
+    memoryCap = await run(prefix[0], [...prefix.slice(1), 'true']).then(() => prefix, () => []);
+  }
+  return memoryCap;
+}
+
 const STAMP = '@harn-stamp';
 // Les agents tournent sur un serveur tmux à part (tmux -L harn) : Harn y pose ses réglages sans
 // toucher aux sessions tmux de l'utilisateur. Pour s'y rattacher à la main : tmux -L harn attach.
@@ -258,6 +274,7 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     }
     return { resumed: false };
   }
+  const capped = await cappedMemory();
   if (session && await run('tmux', ['-V']).then(() => true).catch(() => false)) {
     const target = `=${session}`;
     // « =nom » : ce nom exactement ; les options d'une session se visent par « =nom: ».
@@ -273,13 +290,13 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     }
     if (!resumed) {
       // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
-      await tmux([...TMUX_SETUP, 'new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, process.execPath, cli, ...(restarted ? ['--continue'] : [])]);
+      await tmux([...TMUX_SETUP, 'new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, ...capped, process.execPath, cli, ...(restarted ? ['--continue'] : [])]);
       if (stamp) await tmux(['set-option', '-t', `${target}:`, STAMP, stamp]).catch(() => {});
     }
     if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
     return { resumed, restarted, session };
   }
-  spawn('x-terminal-emulator', ['-e', process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();
+  spawn('x-terminal-emulator', ['-e', ...capped, process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();
   return { resumed: false };
 }
 

@@ -32,5 +32,7 @@ Tu as les outils MCP de Harn : `read_install_log`, `retry_install`, `harn_status
 
 - Ne modifie pas les fichiers de Harn ni ceux des moteurs à la main. Passe par les outils.
 - Ne supprime jamais de fichiers de modèle : ils font des dizaines de gigaoctets.
+- N'écris pas de script pour lire ou analyser toi-même un fichier de modèle : un script maladroit
+  remplit la mémoire de la machine. `inspect_model_repo` lit l'en-tête pour toi.
 - Si tu ne trouves pas la cause, dis-le franchement et donne le chemin du journal
   (`data/logs/install-<modèle>.log`) pour demander de l'aide ailleurs.

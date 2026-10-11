@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { appendFile, mkdir as makeDir, readFile } from 'node:fs/promises';
 import { displayName, downloadUrl, hfSha256 } from './catalog.mjs';
-import { download, hashFile } from './download.mjs';
+import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
@@ -34,20 +34,12 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
       await installStrata(model, context, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); }, { ggufDir });
     } else {
       for (const file of files) {
-        // Une copie trouvée sur le disque n'a que le bon nom et la bonne taille : son empreinte
-        // doit aussi correspondre, sinon on télécharge l'original.
-        if (local[file.name]) {
-          note(`${file.name} trouvé dans ${local[file.name]} : vérification de l’empreinte`);
-          const actual = (await hashFile(local[file.name])).digest('hex');
-          if (actual !== await expectedSha(file)) {
-            note(`${file.name} (${local[file.name]}) ne correspond pas à l’original : ignoré`);
-            delete local[file.name];
-          }
-        }
+        // Une copie déjà sur le disque est reprise telle quelle : c'est le fichier de l'utilisateur,
+        // on ne le compare pas à l'original. L'empreinte ne sert qu'à ce que Harn télécharge.
         if (local[file.name]) {
           const used = await adoptLocalCopy(local[file.name], path.join(dir, file.name));
           if (used !== path.join(dir, file.name)) paths[file.name] = used;
-          note(`${file.name} déjà présent (${local[file.name]}) : réutilisé`);
+          note(`${file.name} déjà présent (${local[file.name]}) : réutilisé sans téléchargement`);
         } else {
           note(`Téléchargement de ${file.name}`);
           await downloadFile(model, file);

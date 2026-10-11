@@ -16,7 +16,7 @@ const TOOLS = [
   },
   {
     name: 'install_model',
-    description: 'Télécharge une quantification choisie, la règle et la mesure (banc par étapes), puis lance le banc d’intelligence. Harn affiche d’abord la demande (dépôt, taille, licence) dans sa fenêtre : rien ne démarre avant que l’utilisateur clique sur Accepter. Préviens-le avant d’appeler l’outil. Bloque jusqu’à la fin (plusieurs minutes) et rend les résultats.',
+    description: 'Installe une quantification choisie : la télécharge (ou reprend le fichier s’il est déjà sur cette machine, ce que dit alreadyOnDisk dans inspect_model_repo), la règle et la mesure (banc par étapes), puis lance le banc d’intelligence. Harn affiche d’abord la demande (dépôt, taille, licence) dans sa fenêtre : rien ne démarre avant que l’utilisateur clique sur Accepter. Préviens-le avant d’appeler l’outil. Bloque jusqu’à la fin (plusieurs minutes) et rend les résultats.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -1,7 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { MODELS } from './catalog.mjs';
-import { profileFromMetadata, readGgufMetadata } from './gguf.mjs';
+import { profileFromMetadata, readGgufFile, readGgufMetadata } from './gguf.mjs';
+import { findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 
 // Les modèles ajoutés depuis Hugging Face rejoignent le catalogue : même planification, même
@@ -56,14 +57,24 @@ export async function inspectRepo(input) {
   if (!quants.length) throw new Error('Aucun fichier GGUF dans ce dépôt : Harn ne sait servir que des GGUF (llama.cpp).');
 
   // L'architecture est la même pour toutes les quantifications : on lit l'en-tête de la plus petite.
-  const sample = quants[0].files[0].name;
-  const metadata = await readGgufMetadata(`${HF}/${repo}/resolve/main/${encodeURIComponent(sample).replace(/%2F/g, '/')}`);
+  // Dépôt à accès restreint : Hugging Face liste les fichiers mais refuse leur contenu. Un fichier
+  // déjà sur la machine (même nom, même taille) donne le même en-tête, et servira à l'installation.
+  const sample = quants[0].files[0];
+  let local = {};
+  const metadata = await readGgufMetadata(`${HF}/${repo}/resolve/main/${encodeURIComponent(sample.name).replace(/%2F/g, '/')}`).catch(async (error) => {
+    local = await findLocalCopies(quants.flatMap((q) => q.files));
+    if (local[sample.name]) return readGgufFile(local[sample.name]);
+    if (!info.gated) throw error;
+    throw new Error(`Dépôt à accès restreint : Hugging Face refuse de donner ses fichiers sans compte autorisé. Harn sait l’installer si le fichier est déjà sur cette machine : placez ${sample.name} (${(sample.bytes / 1e9).toFixed(1)} Go) dans le dossier models/ de Harn, puis relancez.`);
+  });
   const profile = profileFromMetadata(metadata);
   const sampling = readme.split('\n').filter((line) => /temperature|temp=|top_p|top-p|top_k|top-k|min_p|presence_penalty|--spec|mmproj/i.test(line)).slice(0, 12).map((line) => line.trim().slice(0, 240));
   return {
     repo,
     license: info.cardData?.license ?? null,
     gated: Boolean(info.gated),
+    // Fichiers du dépôt déjà sur cette machine (cherchés quand Hugging Face refuse le contenu).
+    local,
     tags: (info.tags ?? []).filter((t) => !t.includes(':')).slice(0, 12),
     profile,
     quants,
