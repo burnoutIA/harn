@@ -43,6 +43,16 @@ sudo apt install nvidia-cuda-toolkit cmake build-essential
 
 Le banc le met face au moteur officiel et garde le plus rapide.
 
+Pour les agents (voir « Agents »), `tmux` est conseillé :
+
+```sh
+sudo apt install tmux
+```
+
+Avec lui, un agent tourne sans fenêtre, survit à la fermeture de son terminal, et « Ouvrir »
+rouvre le même au lieu d'en lancer un second. Sans lui, chaque « Ouvrir » lance un nouveau pi dans
+une nouvelle fenêtre, et Harn ne sait pas dire si un agent est en marche.
+
 Harn interroge GitHub (versions des moteurs, recherche d'un moteur pour une architecture
 nouvelle, mises à jour). Sans compte, GitHub limite à 60 requêtes par heure ; un jeton sans
 aucune permission (github.com → Settings → Developer settings → Fine-grained token, accès
@@ -67,6 +77,17 @@ sources, le modèle qu'il sert et la carte graphique. Sans bubblewrap, la demand
 
 Flash-Next (68 à 76 Go) n'est jamais téléchargé d'office : il est proposé une fois que la
 machine a déjà une IA qui marche, et il s'installe pendant que le premier modèle continue de servir.
+
+### Ajouter un modèle depuis Hugging Face
+
+Vue Modèles : coller l'adresse d'un dépôt GGUF. pi l'analyse pour la carte, propose la meilleure
+quantification, puis Harn la télécharge, la règle, la mesure et teste son intelligence.
+
+Un fichier déjà sur la machine (même nom, même taille : dossier `models/`, LM Studio, cache
+Hugging Face, Documents, Téléchargements) est repris tel quel, sans téléchargement. C'est aussi
+la façon d'installer un dépôt à accès restreint (`gated`), que Harn ne peut pas télécharger faute
+de jeton Hugging Face : copier le fichier dans `models/`, puis donner l'adresse du dépôt. Harn
+lit alors l'architecture dans le fichier local.
 
 ## Les réglages : des a priori par carte, puis la mesure
 
@@ -116,6 +137,46 @@ change pas. Il reste à valider la qualité, la présence de la tête MTP et la 
 - API OpenAI : `http://127.0.0.1:4747/v1`. Si le champ `model` désigne un autre modèle installé,
   celui-ci est chargé.
 
+## Agents
+
+Vue Agents : un agent par personne. Chacun a sa fiche, son dossier pi et son dossier de travail
+dans `data/agents/<id>/` (hors dépôt), sans rien de commun avec les autres ni avec le pi de test.
+
+```text
+data/agents/<id>/agent.json                   la fiche : nom, modèle, cases, bot Telegram
+data/agents/<id>/MEMORY.md                    sa mémoire
+data/agents/<id>/workspace/                   son dossier de travail
+data/agents/<id>/workspace/files/             les fichiers qu'on lui envoie
+data/agents/<id>/pi-agent/APPEND_SYSTEM.md    ses consignes
+data/agents/<id>/pi-agent/sessions/           ses conversations
+```
+
+- **Créer** : le champ « Prénom de la personne » en haut de la vue, puis « Créer un agent ».
+- **Cases** : shell, outils de Harn, recherche web, mémoire, lancer avec Harn. Un nouvel agent n'a
+  ni shell ni outils de Harn : on coche ce dont il a besoin.
+- **Mémoire** : l'agent note lui-même ce qu'il juge durable et le relit au début de chaque
+  conversation (6 000 caractères au plus, modifiables dans la fiche).
+- **Telegram** : un bot par agent. Le jeton vient de @BotFather, l'identifiant de la personne de
+  @userinfobot ; seule cette personne est écoutée. Ses messages vont à l'agent, la réponse finale
+  lui revient, `/new` ouvre une nouvelle conversation. Photos et fichiers (20 Mo au plus, limite
+  de Telegram) sont rangés dans `workspace/files/` ; une image est aussi montrée au modèle quand
+  il sait voir. Cocher « Lancer avec Harn » pour que le bot réponde sans ouvrir de fenêtre.
+- **La carte graphique** : avant d'injecter un message reçu, l'agent la demande. Libre, il la
+  prend. Occupée par quelqu'un d'autre, la demande s'affiche dans la fenêtre de Harn.
+
+Sous Linux avec tmux :
+
+- Chaque agent tourne dans sa session, sur un serveur tmux propre à Harn : vos sessions tmux ne
+  sont pas touchées. Pour s'y rattacher à la main : `tmux -L harn ls`, puis
+  `tmux -L harn attach -t harn-<id>`.
+- La fiche affiche « en marche » quand le pi de l'agent tourne.
+- « Ouvrir » rouvre le terminal de l'agent. Si son modèle, ses outils, ses consignes ou son bot ont
+  changé depuis son démarrage, son pi est relancé et reprend sa conversation.
+- « Tout voir » (dès que deux agents sont en marche) : tous dans une seule fenêtre, un panneau
+  chacun. La souris choisit le panneau ; un agent qui démarre la rejoint ; la fermer n'arrête
+  personne.
+- Supprimer un agent arrête son pi et efface tout son dossier.
+
 ## Sécurité de l'inférence
 
 - **Clés API** (Machine → Brancher une application, ou `npm run keys -- create "Portable — Copilot"`,
@@ -135,9 +196,13 @@ change pas. Il reste à valider la qualité, la présence de la tête MTP et la 
   permission).
 - **Ce que pi demande** (installer depuis Hugging Face, relancer une installation) s'affiche dans
   la fenêtre de Harn et n'est lancé qu'après un clic sur Accepter.
-- **Intégrité** : chaque GGUF est vérifié contre l'empreinte SHA-256 publiée par Hugging Face
-  (copies locales réutilisées comprises), les binaires contre le digest des releases GitHub quand
-  il existe. Strata est figé sur un commit (`STRATA_COMMIT` dans `src/runtimes.mjs`).
+- **Intégrité** : chaque GGUF téléchargé est vérifié contre l'empreinte SHA-256 publiée par
+  Hugging Face, les binaires contre le digest des releases GitHub quand il existe. Un fichier déjà
+  sur la machine est repris sans vérification : c'est le vôtre. Strata est figé sur un commit
+  (`STRATA_COMMIT` dans `src/runtimes.mjs`).
+- **Mémoire de pi** (Linux) : pi et tout ce qu'il lance (son shell, ses scripts) tournent avec un
+  quart de la RAM au plus, sans échange. Un script qui s'emballe est tué par le noyau au lieu de
+  figer la machine ; le bureau affiche alors qu'une application a été arrêtée faute de mémoire.
 - `node src/main.mjs --no-open --no-setup` pour développer sans lancer l'installation.
 - `npm run check` pour les tests.
 - `npm run power-test` : 30 min de créneaux repos / pleine charge pour savoir si l'alimentation
@@ -187,6 +252,10 @@ src/tuner.mjs      banc de démarrage
 src/setup.mjs      parcours du premier démarrage, installation, activation
 src/gateway.mjs    endpoint /v1, bascule de modèle, mesure des requêtes
 src/metrics.mjs    direct : GPU, débit, historique
-src/pi.mjs         installation, configuration et lancement de pi
+src/pi.mjs         installation, configuration et lancement de pi (terminal, tmux, vue d'ensemble)
+src/agents.mjs     les agents : fiche, dossier, lancement, demande de la carte
+src/pi-extensions/ extensions pi fournies par Harn : ctx-optimizer, telegram-follow, agent-memory
+src/harn-mcp.mjs   les outils de Harn donnés à pi (analyser, installer, mesurer, tester)
+src/skills/        les marches à suivre de pi : installer un modèle, dépanner une installation
 public/            interface
 ```
