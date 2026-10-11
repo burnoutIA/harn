@@ -4,7 +4,7 @@ import path from 'node:path';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { getLive } from './metrics.mjs';
-import { closePiSession, configurePiDir, openPiTerminal } from './pi.mjs';
+import { closePiSession, configurePiDir, joinPiOverview, openPiOverview, openPiTerminal, piSessions } from './pi.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { bus, getState } from './state.mjs';
 
@@ -27,6 +27,8 @@ const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g
 const dirOf = (id) => path.join(DIRS.agents, id);
 const piDirOf = (id) => path.join(dirOf(id), 'pi-agent');
 const workspaceOf = (id) => path.join(dirOf(id), 'workspace');
+// Les fichiers qu'on envoie à l'agent (par Telegram) arrivent ici.
+const filesOf = (id) => path.join(workspaceOf(id), 'files');
 const promptFileOf = (id) => path.join(piDirOf(id), 'APPEND_SYSTEM.md');
 // Lus par l'extension telegram-follow dans le dossier pi de l'agent : ce qu'elle doit écouter, et
 // le pid du pi qui écoute déjà.
@@ -44,6 +46,7 @@ Ce texte est ajouté au prompt système de cet agent à chaque démarrage.
 
 - Réponds en français, de façon claire et concise.
 - Tu tournes en local sur cette machine, servi par Harn.
+- Les fichiers qu'on t'envoie arrivent dans le dossier files/ de ton dossier de travail.
 `;
 
 // L'identifiant sert de nom de dossier : rien d'autre que ce que slugify produit.
@@ -71,6 +74,8 @@ async function describe(agent) {
     memoryMax: MAX_MEMORY,
     workspace: workspaceOf(agent.id),
     modelInstalled: agent.model ? installed(agent.model) : true,
+    // Son pi tourne (session tmux vivante). Sans tmux, Harn ne le sait pas : toujours faux.
+    running: (await piSessions()).includes(sessionOf(agent.id)),
   };
 }
 
@@ -120,7 +125,7 @@ export async function createAgent({ name, model } = {}) {
   for (let n = 2; taken.has(id); n += 1) id = `${base}-${n}`;
   const agent = { id, name: label, model: checkModel(model), options: { ...DEFAULT_OPTIONS }, createdAt: new Date().toISOString() };
   await mkdir(piDirOf(id), { recursive: true });
-  await mkdir(workspaceOf(id), { recursive: true });
+  await mkdir(filesOf(id), { recursive: true });
   await writeAgent(agent);
   await writeFile(promptFileOf(id), defaultPrompt(label));
   return describe(agent);
@@ -167,8 +172,11 @@ export async function launchAgent(id, { window = true } = {}) {
   if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
   const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
-  // harn, agent : pour demander la carte avant chaque message (claimCard).
-  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify({ ...agent.telegram, agent: id, harn: `http://127.0.0.1:${PORTS.app}` }));
+  // Les agents d'avant ce dossier le reçoivent à leur prochain lancement.
+  await mkdir(filesOf(id), { recursive: true });
+  // harn, agent : pour demander la carte avant chaque message (claimCard). files : où ranger ce
+  // que la personne envoie.
+  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify({ ...agent.telegram, agent: id, harn: `http://127.0.0.1:${PORTS.app}`, files: filesOf(id) }));
   else await rm(telegramFileOf(id), { force: true });
   if (agent.options.memory) await writeFile(memoryConfigOf(id), JSON.stringify({ file: memoryFileOf(id), maxChars: MAX_MEMORY }));
   else await rm(memoryConfigOf(id), { force: true });
@@ -178,7 +186,19 @@ export async function launchAgent(id, { window = true } = {}) {
   const { autostart, ...tools } = agent.options;
   const stamp = createHash('sha256').update(JSON.stringify([agent.model, tools, prompt, agent.telegram ?? null])).digest('hex').slice(0, 16);
   const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: sessionOf(id), stamp, window });
+  if (opened.session && !opened.resumed) await joinPiOverview(overviewPane(agent));
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
+}
+
+// Le panneau d'un agent dans la vue d'ensemble : sa session, et son nom en titre.
+const overviewPane = (agent) => ({ session: sessionOf(agent.id), title: agent.name.replace(/[#{}]/g, ' ') });
+
+// Les agents en marche, tous dans une seule fenêtre de terminal.
+export async function openOverview() {
+  const running = (await listAgents()).filter((agent) => agent.running);
+  if (!running.length) throw failure(409, 'Aucun agent en marche : ouvrez-en un d’abord');
+  const { already } = await openPiOverview(running.map(overviewPane));
+  return { agents: running.map((agent) => agent.id), already };
 }
 
 // Un pi de cet agent écoute déjà son bot (verrou posé par l'extension, pid encore vivant).

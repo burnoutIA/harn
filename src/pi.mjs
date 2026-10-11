@@ -256,6 +256,65 @@ export async function closePiSession(session) {
   await tmux(['kill-session', '-t', `=${session}`]).catch(() => {});
 }
 
+// Les sessions de pi en marche sur le serveur de Harn (sans tmux : aucune).
+export async function piSessions() {
+  const { stdout } = await tmux(['list-sessions', '-F', '#{session_name}']).catch(() => ({ stdout: '' }));
+  return stdout.split('\n').filter((name) => name && name !== OVERVIEW);
+}
+
+// Tous les pi en marche dans une seule fenêtre : une session à part, découpée en panneaux, chacun
+// rattaché à la session d'un pi. Elle ne porte rien elle-même : la fermer n'arrête personne. La
+// souris choisit le panneau ; son titre dit de qui il s'agit. Un pi qui s'arrête ferme son panneau.
+const OVERVIEW = 'vue-ensemble';
+const SHOWN = '@harn-session';
+const overview = `=${OVERVIEW}:`;
+
+// Les sessions affichées en ce moment, lues sur les panneaux eux-mêmes. null : pas de vue.
+async function overviewSessions() {
+  return tmux(['list-panes', '-t', overview, '-F', `#{${SHOWN}}`]).then((r) => r.stdout.split('\n').filter(Boolean), () => null);
+}
+
+async function addOverviewPane({ session, title }, first) {
+  const attach = ['env', '-u', 'TMUX', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', `=${session}`];
+  const made = first
+    ? await tmux(['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', OVERVIEW, '-x', '220', '-y', '60', ...attach])
+    : await tmux(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', overview, ...attach]);
+  const pane = made.stdout.trim();
+  await tmux(['select-pane', '-t', pane, '-T', title]);
+  await tmux(['set-option', '-p', '-t', pane, SHOWN, session]);
+  // Rangés à chaque ajout (un panneau trop petit ne se laisse plus découper). Jusqu'à trois : côte
+  // à côte, chacun sur toute la hauteur. Au-delà, la grille.
+  const count = (await overviewSessions())?.length ?? 1;
+  await tmux(['select-layout', '-t', overview, count <= 3 ? 'even-horizontal' : 'tiled']);
+}
+
+export async function openPiOverview(panes) {
+  if (!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) throw new Error('Pas d’écran où ouvrir un terminal');
+  const open = () => spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', `=${OVERVIEW}`], { detached: true, stdio: 'ignore' }).unref();
+  // Déjà là avec les mêmes pi : on n'y touche pas (la refaire fermerait la fenêtre sous les yeux de
+  // l'utilisateur). Fenêtre encore ouverte : rien à faire ; refermée : on la rouvre sur la même vue.
+  const shown = await overviewSessions();
+  const wanted = panes.map((pane) => pane.session);
+  if (shown && shown.length === wanted.length && wanted.every((session) => shown.includes(session))) {
+    const clients = await tmux(['display-message', '-p', '-t', overview, '#{session_attached}']).then((r) => Number(r.stdout), () => 0);
+    if (clients > 0) return { already: true };
+    open();
+    return { already: false };
+  }
+  await closePiSession(OVERVIEW);
+  for (const [index, pane] of panes.entries()) await addOverviewPane(pane, index === 0);
+  for (const [option, value] of [['mouse', 'on'], ['pane-border-status', 'top'], ['pane-border-format', ' #{pane_title} ']]) await tmux(['set-option', '-t', overview, option, value]);
+  open();
+  return { already: false };
+}
+
+// Un pi qui démarre rejoint la vue d'ensemble si elle existe : elle suit les pi en marche sans
+// qu'il faille la rouvrir.
+export async function joinPiOverview(pane) {
+  const shown = await overviewSessions();
+  if (shown && !shown.includes(pane.session)) await addOverviewPane(pane, false).catch(() => {});
+}
+
 // pi est une application de terminal : on lui ouvre sa propre fenêtre, déjà branchée sur son
 // dossier (piDir). session : sous Linux avec tmux, pi tourne dans une session de ce nom, qui
 // survit à la fenêtre et se passe d'écran ; la relancer s'y rattache au lieu d'ouvrir un second pi.
@@ -296,7 +355,9 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
     return { resumed, restarted, session };
   }
-  spawn('x-terminal-emulator', ['-e', ...capped, process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();
+  // Dossier et variable passent par la commande elle-même : un terminal déjà ouvert qui reprend la
+  // demande à son compte (une seule instance par application) ne garde ni l'un ni l'autre.
+  spawn('x-terminal-emulator', ['-e', 'env', '-C', cwd, `PI_CODING_AGENT_DIR=${piDir}`, ...capped, process.execPath, cli, ...(prompt ? [prompt] : [])], { env, cwd, detached: true, stdio: 'ignore' }).unref();
   return { resumed: false };
 }
 

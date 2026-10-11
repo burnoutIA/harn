@@ -1,6 +1,6 @@
 import './helpers/home.mjs';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -35,10 +35,16 @@ function fakeTelegram(updates, harn = []) {
       const answer = harn.shift();
       return { json: async () => answer };
     }
+    // Le contenu d'un fichier : servi à l'adresse que getFile a donnée.
+    if (String(url).includes('/file/bot')) {
+      calls.push(['download', String(url).split('/file/bot')[1]]);
+      return { ok: !String(url).includes('perdu'), status: 404, arrayBuffer: async () => Buffer.from('contenu du fichier') };
+    }
     const method = String(url).split('/').pop();
     const params = JSON.parse(body);
     calls.push([method, params]);
     let result = true;
+    if (method === 'getFile') result = { file_path: `documents/${params.file_id}.bin` };
     if (method === 'getUpdates') {
       result = updates.splice(0).filter((u) => u.update_id >= params.offset);
       if (!result.length) await new Promise((resolve, reject) => { const t = setTimeout(resolve, 20); signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('abandon')); }); });
@@ -120,4 +126,52 @@ test('carte occupée : la personne est prévenue, puis servie ou refusée selon 
   const texts = calls.filter(([method]) => method === 'sendMessage').map(([, params]) => params.text);
   assert.equal(texts.filter((text) => /occupée/.test(text)).length, 2);
   assert.equal(texts.filter((text) => /pas possible/.test(text)).length, 1);
+});
+
+test('photos et fichiers : rangés dans files/, annoncés à l’agent, montrés au modèle qui sait voir', async () => {
+  const files = path.join(process.env.HARN_HOME, 'workspace-telegram', 'files');
+  writeFileSync(path.join(dir, 'telegram.json'), JSON.stringify({ token: 'jeton-de-test', ownerId: OWNER, files }));
+  const attached = (update_id, extra) => ({ update_id, message: { message_id: update_id, chat: { id: OWNER, type: 'private' }, from: { id: OWNER }, ...extra } });
+  const photo = [{ file_id: 'petite', file_size: 10 }, { file_id: 'grande', file_size: 900 }];
+  const calls = fakeTelegram([
+    attached(20, { photo, caption: 'regarde ça' }),
+    attached(21, { document: { file_id: 'doc', file_name: '../../Relevé été 2026.pdf', mime_type: 'application/pdf', file_size: 1200 } }),
+    attached(22, { document: { file_id: 'enorme', file_name: 'film.mkv', mime_type: 'video/x-matroska', file_size: 50 * 1024 * 1024 }, caption: 'trop gros' }),
+    attached(23, { document: { file_id: 'perdu', file_name: 'note.txt', mime_type: 'text/plain', file_size: 5 } }),
+    attached(24, { sticker: { file_id: 'autocollant' } }),
+  ]);
+  const pi = fakePi();
+  (await load())(pi);
+  // Le modèle chargé sait voir : la photo lui est jointe en plus d'être rangée.
+  pi.emit('session_start');
+  pi.emit('model_select', { model: { input: ['text', 'image'] } });
+  await settle();
+  pi.emit('session_shutdown');
+
+  const [withPhoto, withDocument, tooBig] = pi.sent.map(([content]) => content);
+  assert.equal(pi.sent.length, 3);
+  assert.match(withPhoto[0].text, /^regarde ça\n\n\[Fichier reçu par Telegram, enregistré dans .*photo(-\d+)?\.jpg \(image\/jpeg/);
+  assert.deepEqual(withPhoto[1], { type: 'image', data: Buffer.from('contenu du fichier').toString('base64'), mimeType: 'image/jpeg' });
+  // La plus grande taille de la photo, et un nom de fichier qui ne sort pas du dossier.
+  assert.ok(calls.some(([method, params]) => method === 'getFile' && params.file_id === 'grande'));
+  assert.match(withDocument, /^\[Fichier reçu par Telegram, enregistré dans .*Releve-ete-2026\.pdf \(application\/pdf/);
+  const saved = readdirSync(files);
+  assert.equal(saved.length, 2);
+  assert.ok(saved.every((name) => /^\d{8}-\d{6}-/.test(name)));
+  assert.equal(readFileSync(path.join(files, saved.find((name) => name.endsWith('.pdf'))), 'utf8'), 'contenu du fichier');
+  // Trop gros ou introuvable : la personne est prévenue, la légende passe quand même.
+  assert.equal(tooBig, 'trop gros');
+  const texts = calls.filter(([method]) => method === 'sendMessage').map(([, params]) => params.text);
+  assert.equal(texts.filter((text) => /pas pu récupérer votre fichier/.test(text)).length, 2);
+});
+
+test('un modèle qui ne voit pas reçoit le chemin de l’image, pas l’image', async () => {
+  fakeTelegram([{ update_id: 30, message: { message_id: 30, chat: { id: OWNER, type: 'private' }, from: { id: OWNER }, photo: [{ file_id: 'p', file_size: 10 }] } }]);
+  const pi = fakePi();
+  (await load())(pi);
+  pi.emit('session_start');
+  await settle();
+  pi.emit('session_shutdown');
+  assert.equal(typeof pi.sent[0][0], 'string');
+  assert.match(pi.sent[0][0], /photo(-\d+)?\.jpg .*ne sait pas voir/);
 });

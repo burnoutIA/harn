@@ -1103,7 +1103,7 @@ function agentCard(agent) {
     ...installed.map((id) => `<option value="${esc(id)}" ${id === agent.model ? 'selected' : ''}>${esc(nameOf(id))} · ${esc(modelOf(id).variant)}</option>`),
   ].join('');
   return `<section class="card agent"><form data-form="agent-edit" data-id="${esc(agent.id)}">
-      <div class="head"><h3>${esc(agent.name)}</h3>
+      <div class="head"><h3>${esc(agent.name)}${agent.running ? ' <span class="live" title="Son pi tourne : il répond sur Telegram, et « Ouvrir » rouvre son terminal">en marche</span>' : ''}</h3>
         <div class="acts"><button class="btn small ghost" type="button" data-action="agent-delete" data-id="${esc(agent.id)}" title="Supprimer cet agent" aria-label="Supprimer cet agent">${icon.trash}</button><button class="btn small primary" type="button" data-action="agent-launch" data-id="${esc(agent.id)}">${icon.terminal} Ouvrir</button></div></div>
       <label class="field"><span>Nom</span><input type="text" name="name" maxlength="60" value="${esc(agent.name)}" autocomplete="off" spellcheck="false"></label>
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
@@ -1122,10 +1122,12 @@ function agentCard(agent) {
 function renderAgents() {
   mount('agents', `<div class="view">
     <div class="view-head"><div><h1>Agents</h1><p>Un agent par personne : ses consignes, son modèle, ses outils et son dossier de travail. Rien n’est partagé entre eux.</p></div></div>
-    <form class="add-form agent-new" data-form="agent-new"><input id="agent-name" type="text" maxlength="60" placeholder="Prénom de la personne" autocomplete="off" spellcheck="false" aria-label="Nom du nouvel agent"><button class="btn small" type="submit">Créer un agent</button></form>
+    <form class="add-form agent-new" data-form="agent-new"><input id="agent-name" type="text" maxlength="60" placeholder="Prénom de la personne" autocomplete="off" spellcheck="false" aria-label="Nom du nouvel agent"><button class="btn small" type="submit">Créer un agent</button><span id="agents-all"></span></form>
     <div class="agents" id="agents-list"></div>
     <section class="card" id="pi-test"></section>
   </div>`);
+  // Le cadre de la vue n'est posé qu'une fois : ce bouton dépend des agents en marche, il est repeint.
+  paint('agents-all', (agents ?? []).filter((a) => a.running).length > 1 ? `<button class="btn small" type="button" data-action="agents-overview" title="Tous les agents en marche dans une seule fenêtre de terminal, un panneau chacun">${icon.terminal} Tout voir</button>` : '');
   paint('agents-list', agents === null ? '<p class="empty">Lecture…</p>' : agents.length ? agents.map(agentCard).join('') : '<p class="empty">Aucun agent pour l’instant.</p>');
   paint('pi-test', `<div class="label">pi de test</div>
     <div class="pi-block">
@@ -1427,7 +1429,13 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       // Lancé avec ce qui est à l'écran : la fiche est enregistrée d'abord.
       const saved = await saveAgent(button.closest('form'));
       const r = await post(`/api/agents/${id}/launch`);
+      // Avec tmux, Harn sait qu'il tourne : la fiche le montre tout de suite.
+      if (r.session) { agents = agents.map((a) => (a.id === id ? { ...a, running: true } : a)); renderAgents(); }
       toast(r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
+    }
+    if (action === 'agents-overview') {
+      const r = await post('/api/agents/_overview');
+      toast(r.already ? 'La vue d’ensemble est déjà ouverte dans un terminal' : `${r.agents.length} agents dans une seule fenêtre`);
     }
     if (action === 'agent-delete') {
       const agent = agents.find((a) => a.id === id);

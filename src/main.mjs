@@ -20,7 +20,7 @@ import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
-import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, startAgents, updateAgent } from './agents.mjs';
+import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -242,6 +242,8 @@ async function api(req, res, url) {
     const body = await new Response(req).json().catch(() => ({}));
     try {
       if (!parts[2]) return json(res, 200, await createAgent(body));
+      // « _overview » : jamais l'identifiant d'un agent (lettres, chiffres et tirets seulement).
+      if (parts[2] === '_overview') return json(res, 200, await openOverview());
       if (!parts[3]) return json(res, 200, await updateAgent(parts[2], body));
       if (parts[3] === 'launch') return json(res, 200, await launchAgent(parts[2]));
       if (parts[3] === 'delete') return json(res, 200, await deleteAgent(parts[2]));

@@ -21,6 +21,8 @@ test('un agent naît avec son dossier, ses consignes et le moins de droits possi
   assert.match(agent.prompt, /Consignes de Éloïse/);
   assert.equal(agent.workspace, path.join(DIRS.agents, 'eloise', 'workspace'));
   assert.ok(existsSync(agent.workspace));
+  // Le dossier où arrivent les fichiers qu'on lui envoie.
+  assert.ok(existsSync(path.join(agent.workspace, 'files')));
   // Deux agents du même nom ne partagent pas leur dossier.
   assert.equal((await createAgent({ name: 'Eloise' })).id, 'eloise-2');
   assert.deepEqual((await listAgents()).map((a) => a.id), ['eloise', 'eloise-2']);

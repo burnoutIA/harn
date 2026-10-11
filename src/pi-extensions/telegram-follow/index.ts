@@ -2,6 +2,8 @@
 //
 //   - la réponse finale de chaque run part vers le chat de la personne ;
 //   - ses messages reçus par le bot sont injectés dans l'agent ;
+//   - ses photos et fichiers sont rangés dans le dossier files/ du workspace, et annoncés à l'agent
+//     (une image est aussi montrée au modèle quand il sait voir) ;
 //   - « écrit… » reste affiché tant que l'agent travaille ; /new ouvre une nouvelle conversation.
 //
 // Aucun secret ici : le jeton du bot et l'identifiant Telegram de la personne sont lus dans
@@ -11,14 +13,22 @@
 // Accès limité à la personne : en privé, son chat seulement ; en groupe, ses messages seulement.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, extname, join, relative } from "node:path";
 
 interface Config {
   token: string;
   ownerId: number;
   agent?: string; // identifiant de l'agent dans Harn
   harn?: string; // adresse de Harn, pour demander la carte
+  files?: string; // où ranger les fichiers reçus (le dossier files/ du workspace)
+}
+
+interface Attachment {
+  id: string;
+  name: string;
+  mime: string;
+  bytes: number;
 }
 
 const DIR = process.env.PI_CODING_AGENT_DIR ?? "";
@@ -27,6 +37,35 @@ const NEW_COMMAND = "telegram-new";
 const POLL_CLAIM_MS = Number(process.env.HARN_TELEGRAM_CLAIM_MS ?? 2000); // rythme d'attente de la décision
 const TYPING_EVERY_MS = 4000; // Telegram éteint « écrit… » au bout de 5 s
 const TYPING_MAX_MS = 20 * 60_000; // un run qui ne se termine jamais ne laisse pas le voyant allumé
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // au-delà, Telegram ne laisse pas un bot télécharger le fichier
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+// Ce qu'un message porte en plus de son texte. Une photo arrive en plusieurs tailles : la dernière
+// est la plus grande. Les autres pièces jointes ont la même forme (file_id, nom, type, taille).
+function attachmentOf(msg: any): Attachment | null {
+  if (Array.isArray(msg?.photo) && msg.photo.length) {
+    const photo = msg.photo[msg.photo.length - 1];
+    return { id: photo.file_id, name: "photo.jpg", mime: "image/jpeg", bytes: photo.file_size ?? 0 };
+  }
+  for (const kind of ["document", "video", "audio", "voice", "animation", "video_note"]) {
+    const file = msg?.[kind];
+    if (file?.file_id) return { id: file.file_id, name: file.file_name ?? kind, mime: file.mime_type ?? "", bytes: file.file_size ?? 0 };
+  }
+  return null;
+}
+
+// Un nom de fichier sûr et qui n'écrase rien : daté, sans chemin ni caractère spécial.
+function fileName(dir: string, wanted: string, remotePath: string): string {
+  const ext = (extname(wanted) || extname(remotePath)).replace(/[^.\w]/g, "").slice(0, 12);
+  const stem = basename(wanted, extname(wanted)).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w.-]+/g, "-").replace(/^[-.]+|-+$/g, "").slice(0, 60) || "fichier";
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  for (let n = 1; ; n += 1) {
+    const name = `${stamp}-${stem}${n > 1 ? `-${n}` : ""}${ext}`;
+    if (!existsSync(join(dir, name))) return name;
+  }
+}
+
+const megabytes = (bytes: number) => (bytes < 1e6 ? `${Math.max(1, Math.round(bytes / 1000))} Ko` : `${(bytes / 1e6).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo`);
 
 function readConfig(): Config | null {
   try {
@@ -163,8 +202,51 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // --- Fichiers reçus : rangés dans files/, puis annoncés à l'agent avec le texte du message ---
+  // Le modèle ne voit une image que s'il sait voir ; sinon il en connaît seulement le chemin.
+  let vision = false;
+  const sees = (model: any) => Array.isArray(model?.input) && model.input.includes("image");
+  pi.on("model_select", (event: any) => {
+    vision = sees(event?.model);
+  });
+
+  async function receive(file: Attachment, signal: AbortSignal): Promise<{ note: string; image?: { type: "image"; data: string; mimeType: string } }> {
+    if (file.bytes > MAX_FILE_BYTES) throw new Error(`il pèse ${megabytes(file.bytes)}, et Telegram ne laisse pas un bot télécharger plus de ${megabytes(MAX_FILE_BYTES)}`);
+    const remote = await tg("getFile", { file_id: file.id }, signal);
+    const res = await fetch(`https://api.telegram.org/file/bot${config!.token}/${remote.file_path}`, { signal });
+    if (!res.ok) throw new Error(`Telegram a répondu ${res.status}`);
+    const data = Buffer.from(await res.arrayBuffer());
+    const dir = config!.files ?? join(process.cwd(), "files");
+    mkdirSync(dir, { recursive: true });
+    const saved = join(dir, fileName(dir, file.name, remote.file_path ?? ""));
+    writeFileSync(saved, data);
+    const shown = relative(process.cwd(), saved);
+    const where = shown.startsWith("..") ? saved : shown;
+    const image = IMAGE_TYPES.has(file.mime);
+    const note = `[Fichier reçu par Telegram, enregistré dans ${where} (${file.mime || "type inconnu"}, ${megabytes(data.length)})${image && !vision ? ". C'est une image, mais le modèle actuel ne sait pas voir : dis-le si on te demande de la regarder" : ""}]`;
+    return image && vision ? { note, image: { type: "image", data: data.toString("base64"), mimeType: file.mime } } : { note };
+  }
+
+  // Ce que l'agent reçoit : le texte ou la légende, et la pièce jointe s'il y en a une. Un fichier
+  // qui ne se télécharge pas n'emporte pas le message avec lui : la personne est prévenue.
+  async function contentOf(msg: any, signal: AbortSignal): Promise<string | any[]> {
+    const text = String(msg.text ?? msg.caption ?? "").trim();
+    const file = attachmentOf(msg);
+    if (!file) return text;
+    try {
+      const { note, image } = await receive(file, signal);
+      const full = text ? `${text}\n\n${note}` : note;
+      return image ? [{ type: "text", text: full }, image] : full;
+    } catch (error: any) {
+      if (signal.aborted) throw error;
+      sendText(msg.chat.id, `Je n'ai pas pu récupérer votre fichier : ${error.message}.`);
+      return text;
+    }
+  }
+
   function allowed(msg: any): boolean {
-    if (!msg?.chat || typeof msg.text !== "string" || !msg.text.trim() || msg.from?.is_bot) return false;
+    const text = msg?.text ?? msg?.caption;
+    if (!msg?.chat || msg.from?.is_bot || !((typeof text === "string" && text.trim()) || attachmentOf(msg))) return false;
     return msg.chat.type === "private" ? msg.chat.id === config!.ownerId : msg.from?.id === config!.ownerId;
   }
 
@@ -181,7 +263,7 @@ export default function (pi: ExtensionAPI) {
           if (!allowed(msg)) continue;
           shared.chat = msg.chat.id;
           // En groupe, la commande arrive sous la forme /new@nom_du_bot.
-          const command = /^\/(\w+)(?:@\w+)?\s*$/.exec(msg.text.trim())?.[1];
+          const command = /^\/(\w+)(?:@\w+)?\s*$/.exec(String(msg.text ?? "").trim())?.[1];
           if (command === "start") {
             sendText(msg.chat.id, "Bonjour. Écrivez-moi ; /new ouvre une nouvelle conversation.");
           } else if (command === "new") {
@@ -189,9 +271,14 @@ export default function (pi: ExtensionAPI) {
             // file après ce /new, la position étant gardée hors de la session.
             pi.sendUserMessage(`/${NEW_COMMAND}`, { expandPromptTemplates: true });
           } else if (running || (await mayUse(msg.chat.id, signal))) {
-            asked = true;
             startTyping();
-            pi.sendUserMessage(msg.text.trim(), { expandPromptTemplates: true, deliverAs: "followUp" });
+            const content = await contentOf(msg, signal);
+            if (!content.length) {
+              if (!running) stopTyping();
+              continue;
+            }
+            asked = true;
+            pi.sendUserMessage(content, { expandPromptTemplates: true, deliverAs: "followUp" });
           } else if (!signal.aborted) {
             sendText(msg.chat.id, "Ce n'est pas possible pour l'instant. Réessayez un peu plus tard.");
           }
@@ -203,6 +290,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx: any) => {
+    vision = sees(ctx?.model);
     if (stop) return;
     if (!takeLock()) return ctx.ui.notify("Telegram : ce bot est déjà suivi par un autre pi de cet agent.", "warning");
     stop = new AbortController();
