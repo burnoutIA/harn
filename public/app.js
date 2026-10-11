@@ -1055,8 +1055,8 @@ let approvalsHtml = '';
 function renderApprovals() {
   const pending = (state.approvals ?? []).filter((a) => a.status === 'pending');
   const html = pending.map((a) => `<section class="card approval" role="alertdialog" aria-label="${esc(a.title)}">
-      <div class="label">pi agent demande</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
-      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">Refuser</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">Accepter</button></div>
+      <div class="label">${a.kind === 'card' ? 'Inférence occupée' : 'pi agent demande'}</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
+      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">${a.kind === 'card' ? 'Pas maintenant' : 'Refuser'}</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">${a.kind === 'card' ? 'Laisser ma place' : 'Accepter'}</button></div>
     </section>`).join('');
   if (html !== approvalsHtml) { approvalsHtml = html; approvalsEl.innerHTML = html; }
   document.title = pending.length ? `(${pending.length}) ${baseTitle}` : baseTitle;
@@ -1067,7 +1067,8 @@ approvalsEl.addEventListener('click', async (event) => {
   for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = true;
   try {
     const r = await post(`/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
-    toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
+    if (r.kind === 'card') toast(r.status === 'accepted' ? 'Place laissée' : 'Refusé : la personne en est avertie');
+    else toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
   } catch (error) {
     toast(error.message);
     for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = false;
@@ -1090,6 +1091,7 @@ const AGENT_OPTIONS = [
   ['shell', 'Shell', 'Exécuter des commandes sur cette machine.'],
   ['harnTools', 'Outils de Harn', 'Installer, mesurer et tester des modèles, lire le carnet de la machine.'],
   ['web', 'Recherche web', 'Chercher et lire des pages web avec ketch.'],
+  ['memory', 'Mémoire', 'Note lui-même ce qu’il juge durable et le relit à chaque conversation.'],
   ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
 ];
 
@@ -1107,6 +1109,7 @@ function agentCard(agent) {
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
       <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
       <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
+      <label class="field"><span>Mémoire (${fr(agent.memory.length)} / ${fr(agent.memoryMax)} caractères)</span><textarea class="memory" name="memory" maxlength="${agent.memoryMax}" spellcheck="false" placeholder="Vide : l’agent n’a encore rien noté.">${esc(agent.memory)}</textarea></label>
       <div class="telegram"><h4>Telegram</h4>
         <label class="field"><span>Identifiant Telegram de la personne</span><input type="text" name="tgOwner" inputmode="numeric" value="${esc(agent.telegram?.ownerId ?? '')}" placeholder="Le nombre donné par @userinfobot" autocomplete="off"></label>
         <label class="field"><span>Jeton du bot</span><input type="password" name="tgToken" placeholder="${agent.telegram ? 'Enregistré · laisser vide pour le garder' : '123456:ABC…, donné par @BotFather'}" autocomplete="new-password"></label>
@@ -1143,11 +1146,16 @@ async function loadAgents() {
 
 async function saveAgent(form) {
   const data = new FormData(form);
+  // La mémoire n'est renvoyée que si elle a été retouchée ici : l'agent a pu y écrire depuis
+  // l'affichage, et l'ancienne copie de l'écran ne doit pas écraser ses notes.
+  const shown = agents.find((a) => a.id === form.dataset.id)?.memory ?? '';
+  const memory = data.get('memory').replace(/\r\n/g, '\n');
   const saved = await post(`/api/agents/${form.dataset.id}`, {
     name: data.get('name'),
     model: data.get('model') || null,
     prompt: data.get('prompt'),
     telegram: { ownerId: data.get('tgOwner'), token: data.get('tgToken') },
+    ...(memory !== shown.replace(/\r\n/g, '\n') ? { memory } : {}),
     options: Object.fromEntries(AGENT_OPTIONS.map(([key]) => [key, data.has(key)])),
   });
   agents = agents.map((a) => (a.id === saved.id ? saved : a));
@@ -1469,6 +1477,7 @@ async function boot() {
     render();
     if (view === 'machine') loadDoc();
   });
+  source.addEventListener('toast', (event) => toast(JSON.parse(event.data)));
   source.addEventListener('live', (event) => {
     live = JSON.parse(event.data);
     if (view === 'home') { renderGauge(); renderActivity(); }

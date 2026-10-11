@@ -17,11 +17,14 @@ import { join } from "node:path";
 interface Config {
   token: string;
   ownerId: number;
+  agent?: string; // identifiant de l'agent dans Harn
+  harn?: string; // adresse de Harn, pour demander la carte
 }
 
 const DIR = process.env.PI_CODING_AGENT_DIR ?? "";
 const LOCK = join(DIR, "telegram.lock");
 const NEW_COMMAND = "telegram-new";
+const POLL_CLAIM_MS = Number(process.env.HARN_TELEGRAM_CLAIM_MS ?? 2000); // rythme d'attente de la décision
 const TYPING_EVERY_MS = 4000; // Telegram éteint « écrit… » au bout de 5 s
 const TYPING_MAX_MS = 20 * 60_000; // un run qui ne se termine jamais ne laisse pas le voyant allumé
 
@@ -108,12 +111,17 @@ export default function (pi: ExtensionAPI) {
   // --- Sortie : la dernière réponse de chaque run terminé ---
   let lastTurnText = "";
   let asked = false; // le run en cours vient d'un message Telegram : il lui faut une réponse
-  pi.on("agent_start", () => startTyping());
+  let running = false; // l'agent travaille déjà : la carte est à lui
+  pi.on("agent_start", () => {
+    running = true;
+    startTyping();
+  });
   pi.on("turn_end", (event: any) => {
     const text = assistantText(event?.message);
     if (text) lastTurnText = text;
   });
   pi.on("agent_settled", () => {
+    running = false;
     stopTyping();
     const chat = shared.chat || config.ownerId;
     if (lastTurnText) sendText(chat, lastTurnText);
@@ -132,6 +140,28 @@ export default function (pi: ExtensionAPI) {
       sendText(chat, result.cancelled ? "La conversation en cours n'a pas pu être fermée." : "Nouvelle conversation.");
     },
   });
+
+  // --- La carte : demandée à Harn avant d'injecter un message ---
+  // Libre, Harn répond tout de suite. Occupée par quelqu'un d'autre, il pose la question dans sa
+  // fenêtre : on prévient la personne et on attend la décision (au plus une minute côté Harn).
+  // Harn injoignable ou trop ancien : le message passe, comme avant.
+  async function mayUse(chat: number, signal: AbortSignal): Promise<boolean> {
+    if (!config!.harn || !config!.agent) return true;
+    try {
+      const claim: any = await (await fetch(`${config!.harn}/api/agents/${config!.agent}/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal })).json();
+      if (claim.status !== "pending") return true;
+      sendText(chat, "L'IA est occupée par quelqu'un d'autre. Je préviens, un instant…");
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_CLAIM_MS));
+        if (signal.aborted) return false;
+        const approval: any = await (await fetch(`${config!.harn}/api/approvals/${claim.approval}`, { signal })).json();
+        if (approval.status === "pending") continue;
+        return approval.status !== "refused";
+      }
+    } catch {
+      return !signal.aborted;
+    }
+  }
 
   function allowed(msg: any): boolean {
     if (!msg?.chat || typeof msg.text !== "string" || !msg.text.trim() || msg.from?.is_bot) return false;
@@ -158,10 +188,12 @@ export default function (pi: ExtensionAPI) {
             // La session remplacée coupe cette boucle (session_shutdown) ; la suivante reprend la
             // file après ce /new, la position étant gardée hors de la session.
             pi.sendUserMessage(`/${NEW_COMMAND}`, { expandPromptTemplates: true });
-          } else {
+          } else if (running || (await mayUse(msg.chat.id, signal))) {
             asked = true;
             startTyping();
             pi.sendUserMessage(msg.text.trim(), { expandPromptTemplates: true, deliverAs: "followUp" });
+          } else if (!signal.aborted) {
+            sendText(msg.chat.id, "Ce n'est pas possible pour l'instant. Réessayez un peu plus tard.");
           }
         }
       } catch {

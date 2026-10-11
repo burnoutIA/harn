@@ -509,6 +509,7 @@ body.onboarding .topline { max-width: none; }
 .agent .field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: calc(13px * var(--fs)); color: var(--muted); }
 .agent .field input, .agent .field select, .agent .field textarea { width: 100%; min-width: 0; min-height: 40px; padding: 0 12px; border-radius: var(--r-btn); border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font-family: inherit; font-size: calc(13.5px * var(--fs)); }
 .agent .field textarea { min-height: 180px; padding: 10px 12px; resize: vertical; font: calc(12.5px * var(--fs))/1.5 var(--mono); }
+.agent .field textarea.memory { min-height: 110px; }
 .agent .field :focus { outline: 2px solid var(--signal-2); border-color: var(--signal); }
 .agent .opts { display: grid; gap: 10px; }
 .agent .opt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; font-size: calc(13.5px * var(--fs)); cursor: pointer; }

@@ -1,9 +1,11 @@
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { modelById } from './catalog.mjs';
+import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
+import { displayName, modelById } from './catalog.mjs';
+import { getLive } from './metrics.mjs';
 import { configurePiDir, openPiTerminal } from './pi.mjs';
-import { DIRS } from './paths.mjs';
-import { getState } from './state.mjs';
+import { DIRS, PORTS } from './paths.mjs';
+import { bus, getState } from './state.mjs';
 
 // Les agents : un par personne, chacun dans data/agents/<id> (hors dépôt). Sa fiche (agent.json),
 // son dossier pi (consignes, sessions, outils) et son workspace y vivent ensemble. Le pi de test
@@ -11,9 +13,12 @@ import { getState } from './state.mjs';
 
 const MAX_NAME = 60;
 const MAX_PROMPT = 20_000;
+// La mémoire est jointe au prompt de chaque conversation : ~1 500 tokens au plus.
+const MAX_MEMORY = 6000;
 // Ce qu'un nouvel agent peut faire : le moins possible, on coche ce dont il a besoin.
 // autostart : lancé avec Harn, pour que son bot Telegram réponde sans qu'on y pense.
-const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, autostart: false };
+// memory : il note lui-même ce qu'il juge durable, et le relit à chaque conversation.
+const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, memory: true, autostart: false };
 
 const failure = (status, message) => Object.assign(new Error(message), { status });
 const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -26,6 +31,9 @@ const promptFileOf = (id) => path.join(piDirOf(id), 'APPEND_SYSTEM.md');
 // le pid du pi qui écoute déjà.
 const telegramFileOf = (id) => path.join(piDirOf(id), 'telegram.json');
 const telegramLockOf = (id) => path.join(piDirOf(id), 'telegram.lock');
+// La mémoire de l'agent, et ce que l'extension agent-memory lit pour la trouver.
+const memoryFileOf = (id) => path.join(dirOf(id), 'MEMORY.md');
+const memoryConfigOf = (id) => path.join(piDirOf(id), 'memory.json');
 const installed = (modelId) => Boolean(getState().models[modelId]?.installedAt && modelById(modelId));
 
 const defaultPrompt = (name) => `# Consignes de ${name}
@@ -57,6 +65,8 @@ async function describe(agent) {
     ...agent,
     telegram: agent.telegram ? { ownerId: agent.telegram.ownerId } : null,
     prompt: await readFile(promptFileOf(agent.id), 'utf8').catch(() => ''),
+    memory: await readFile(memoryFileOf(agent.id), 'utf8').catch(() => ''),
+    memoryMax: MAX_MEMORY,
     workspace: workspaceOf(agent.id),
     modelInstalled: agent.model ? installed(agent.model) : true,
   };
@@ -130,11 +140,15 @@ export async function updateAgent(id, patch = {}) {
     await mkdir(piDirOf(id), { recursive: true });
     await writeFile(promptFileOf(id), patch.prompt);
   }
+  if (typeof patch.memory === 'string') {
+    if (patch.memory.length > MAX_MEMORY) throw failure(400, `Mémoire limitée à ${MAX_MEMORY.toLocaleString('fr-FR')} caractères : retirez ce qui ne sert plus`);
+    await writeFile(memoryFileOf(id), patch.memory);
+  }
   await writeAgent(agent);
   return describe(agent);
 }
 
-// Tout le dossier part : la fiche, les consignes, les sessions et le workspace.
+// Tout le dossier part : la fiche, les consignes, la mémoire, les sessions et le workspace.
 export async function deleteAgent(id) {
   const agent = await readAgent(id);
   await rm(dirOf(id), { recursive: true, force: true });
@@ -149,8 +163,11 @@ export async function launchAgent(id, { window = true } = {}) {
   if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
   const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
-  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify(agent.telegram));
+  // harn, agent : pour demander la carte avant chaque message (claimCard).
+  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify({ ...agent.telegram, agent: id, harn: `http://127.0.0.1:${PORTS.app}` }));
   else await rm(telegramFileOf(id), { force: true });
+  if (agent.options.memory) await writeFile(memoryConfigOf(id), JSON.stringify({ file: memoryFileOf(id), maxChars: MAX_MEMORY }));
+  else await rm(memoryConfigOf(id), { force: true });
   // Le titre passe par la ligne de commande du terminal : sans ses caractères spéciaux.
   const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: `harn-${id}`, window });
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
@@ -171,4 +188,43 @@ export async function startAgents() {
     if (!agent.options.autostart || await listening(agent.id)) continue;
     await launchAgent(agent.id, { window: false }).catch((error) => console.error(`[harn] agent « ${agent.name} » non lancé : ${error.message}`));
   }
+}
+
+// ── À qui est l'inférence ──────────────────────────────────────
+// Avant d'injecter un message reçu, l'agent demande la carte. Aucune réponse en cours : il la
+// prend, et la fenêtre de Harn le dit d'un mot. Une réponse en cours pour quelqu'un d'autre : la
+// demande s'affiche dans la fenêtre, où l'utilisateur laisse sa place ou non. Sans réponse de sa
+// part, elle passe au bout d'une minute, ou dès que la réponse en cours se termine.
+const CLAIM_TIMEOUT_MS = 60_000;
+const claims = new Map(); // id de l'agent → demande en attente
+
+export async function claimCard(id) {
+  const agent = await readAgent(id);
+  const pending = claims.get(id);
+  if (pending && approvalOf(pending)?.status === 'pending') return { status: 'pending', approval: pending };
+  const current = getLive().request;
+  if (!current) {
+    bus.emit('toast', `${agent.name} utilise l’IA`);
+    return { status: 'free' };
+  }
+  const state = getState();
+  const wanted = agent.model ?? (installed(state.favorite) ? state.favorite : state.active?.modelId);
+  const busyModel = modelById(current.model);
+  const effect = wanted === current.model ? 'Même modèle : rien n’est interrompu, sa demande passe à la suite.' : 'Son modèle est différent : accepter interrompt la réponse en cours.';
+  const approval = requestApproval({
+    kind: 'card',
+    title: `${agent.name} veut utiliser l’IA`,
+    detail: `Une réponse est en cours (${busyModel ? displayName(busyModel) : current.model}, ${current.client}). ${effect} Sans réponse de votre part, sa demande passe dans une minute.`,
+    run: () => {},
+  });
+  claims.set(id, approval);
+  const since = Date.now();
+  const watch = setInterval(() => {
+    if (approvalOf(approval)?.status !== 'pending') return clearInterval(watch);
+    if (getLive().request && Date.now() - since < CLAIM_TIMEOUT_MS) return;
+    clearInterval(watch);
+    try { decideApproval(approval, true); } catch { /* décidée entre-temps */ }
+  }, 1000);
+  watch.unref?.();
+  return { status: 'pending', approval };
 }

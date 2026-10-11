@@ -8,6 +8,7 @@ import test from 'node:test';
 const dir = path.join(process.env.HARN_HOME, 'pi-telegram');
 mkdirSync(dir, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = dir;
+process.env.HARN_TELEGRAM_CLAIM_MS = '10';
 const OWNER = 42;
 
 function fakePi() {
@@ -25,9 +26,15 @@ function fakePi() {
 }
 
 // Telegram simulé : une file de mises à jour servie une fois, puis des attentes vides.
-function fakeTelegram(updates) {
+// harn : les réponses successives de Harn à la demande de carte, puis à la lecture de la décision.
+function fakeTelegram(updates, harn = []) {
   const calls = [];
-  globalThis.fetch = async (url, { body, signal }) => {
+  globalThis.fetch = async (url, { body, signal } = {}) => {
+    if (String(url).startsWith('http://harn')) {
+      calls.push(['harn', String(url).slice('http://harn'.length)]);
+      const answer = harn.shift();
+      return { json: async () => answer };
+    }
     const method = String(url).split('/').pop();
     const params = JSON.parse(body);
     calls.push([method, params]);
@@ -95,4 +102,22 @@ test('la session suivante reprend la file après le dernier message lu', async (
   pi.emit('session_shutdown');
   assert.equal(calls.find(([method]) => method === 'getUpdates')[1].offset, 6);
   assert.deepEqual(pi.sent.map(([text]) => text), ['suite']);
+});
+
+test('carte occupée : la personne est prévenue, puis servie ou refusée selon la décision', async () => {
+  writeFileSync(path.join(dir, 'telegram.json'), JSON.stringify({ token: 'jeton-de-test', ownerId: OWNER, agent: 'eloise', harn: 'http://harn' }));
+  const calls = fakeTelegram(
+    [message(7, 'libre'), message(8, 'on me laisse la place'), message(9, 'on me refuse')],
+    [{ status: 'free' }, { status: 'pending', approval: 'a1' }, { status: 'pending' }, { status: 'accepted' }, { status: 'pending', approval: 'a2' }, { status: 'refused' }],
+  );
+  const pi = fakePi();
+  (await load())(pi);
+  pi.emit('session_start');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  pi.emit('session_shutdown');
+  assert.deepEqual(pi.sent.map(([text]) => text), ['libre', 'on me laisse la place']);
+  assert.deepEqual(calls.filter(([kind]) => kind === 'harn').map(([, url]) => url), ['/api/agents/eloise/claim', '/api/agents/eloise/claim', '/api/approvals/a1', '/api/approvals/a1', '/api/agents/eloise/claim', '/api/approvals/a2']);
+  const texts = calls.filter(([method]) => method === 'sendMessage').map(([, params]) => params.text);
+  assert.equal(texts.filter((text) => /occupée/.test(text)).length, 2);
+  assert.equal(texts.filter((text) => /pas possible/.test(text)).length, 1);
 });

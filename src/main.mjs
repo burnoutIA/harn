@@ -20,7 +20,7 @@ import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
-import { createAgent, deleteAgent, launchAgent, listAgents, startAgents, updateAgent } from './agents.mjs';
+import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -126,12 +126,15 @@ function events(req, res) {
   send('live', getLive());
   const onState = (state) => send('state', state);
   const onLive = (snapshot) => send('live', snapshot);
+  const onToast = (message) => send('toast', message);
   bus.on('state', onState);
+  bus.on('toast', onToast);
   live.on('live', onLive);
   const release = addViewer();
   const keepAlive = setInterval(() => res.write(': ping\n\n'), 15_000);
   req.on('close', () => {
     bus.off('state', onState);
+    bus.off('toast', onToast);
     live.off('live', onLive);
     clearInterval(keepAlive);
     release();
@@ -231,6 +234,10 @@ async function api(req, res, url) {
   // Agents : créés, réglés et lancés depuis la fenêtre de Harn seulement (un agent ne s'accorde
   // pas lui-même le shell).
   if (parts[1] === 'agents') {
+    // La seule demande qu'un agent fait lui-même : la carte, avant d'injecter un message reçu.
+    if (parts[2] && parts[3] === 'claim') {
+      try { return json(res, 200, await claimCard(parts[2])); } catch (error) { return json(res, error.status ?? 500, { error: error.message }); }
+    }
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
     const body = await new Response(req).json().catch(() => ({}));
     try {
