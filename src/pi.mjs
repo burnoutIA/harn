@@ -228,7 +228,8 @@ async function hasWindowsTerminal() {
 // pi est une application de terminal : on lui ouvre sa propre fenêtre, déjà branchée sur son
 // dossier (piDir). session : sous Linux avec tmux, pi tourne dans une session de ce nom, qui
 // survit à la fenêtre et se passe d'écran ; la relancer s'y rattache au lieu d'ouvrir un second pi.
-export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null }) {
+// window : false la laisse tourner sans fenêtre (tmux seulement).
+export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null, window = true }) {
   await mkdir(cwd, { recursive: true });
   const cli = await piCli();
   const env = { ...process.env, PI_CODING_AGENT_DIR: piDir };
@@ -245,7 +246,7 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     const resumed = await run('tmux', ['has-session', '-t', target]).then(() => true).catch(() => false);
     // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
     if (!resumed) await run('tmux', ['new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, process.execPath, cli]);
-    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) spawn('x-terminal-emulator', ['-e', 'tmux', 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
+    if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
     return { resumed, session };
   }
   spawn('x-terminal-emulator', ['-e', process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();

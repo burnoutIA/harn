@@ -516,6 +516,8 @@ body.onboarding .topline { max-width: none; }
 .agent .opt small { display: block; color: var(--faint); font-size: calc(12px * var(--fs)); }
 .agent .hint code { font: calc(11.5px * var(--fs)) var(--mono); overflow-wrap: anywhere; }
 .agent .foot { display: flex; align-items: center; gap: 12px; }
+.agent .telegram { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+.agent .telegram h4 { font-size: calc(13.5px * var(--fs)); font-weight: 600; }
 .iq-mini { font: calc(11.5px * var(--fs)) var(--mono); color: var(--muted); margin-top: 2px; }
 .iq-score { display: flex; align-items: baseline; gap: 14px; margin: 10px 0 14px; }
 .iq-score .num { font: 600 calc(34px * var(--fs)) var(--figures); letter-spacing: -0.04em; }

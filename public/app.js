@@ -1090,6 +1090,7 @@ const AGENT_OPTIONS = [
   ['shell', 'Shell', 'Exécuter des commandes sur cette machine.'],
   ['harnTools', 'Outils de Harn', 'Installer, mesurer et tester des modèles, lire le carnet de la machine.'],
   ['web', 'Recherche web', 'Chercher et lire des pages web avec ketch.'],
+  ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
 ];
 
 function agentCard(agent) {
@@ -1106,6 +1107,10 @@ function agentCard(agent) {
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
       <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
       <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
+      <div class="telegram"><h4>Telegram</h4>
+        <label class="field"><span>Identifiant Telegram de la personne</span><input type="text" name="tgOwner" inputmode="numeric" value="${esc(agent.telegram?.ownerId ?? '')}" placeholder="Le nombre donné par @userinfobot" autocomplete="off"></label>
+        <label class="field"><span>Jeton du bot</span><input type="password" name="tgToken" placeholder="${agent.telegram ? 'Enregistré · laisser vide pour le garder' : '123456:ABC…, donné par @BotFather'}" autocomplete="new-password"></label>
+        <p class="hint">Un bot par agent : seule cette personne peut lui parler. Vider l’identifiant retire Telegram de l’agent.</p></div>
       <p class="hint">Dossier de travail : <code>${esc(agent.workspace)}</code></p>
       <div class="foot"><button class="btn small" type="submit">Enregistrer</button><p class="hint">Pris en compte au prochain lancement de l’agent.</p></div>
     </form></section>`;
@@ -1142,6 +1147,7 @@ async function saveAgent(form) {
     name: data.get('name'),
     model: data.get('model') || null,
     prompt: data.get('prompt'),
+    telegram: { ownerId: data.get('tgOwner'), token: data.get('tgToken') },
     options: Object.fromEntries(AGENT_OPTIONS.map(([key]) => [key, data.has(key)])),
   });
   agents = agents.map((a) => (a.id === saved.id ? saved : a));

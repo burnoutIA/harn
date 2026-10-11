@@ -13,7 +13,7 @@ const json = async (file) => JSON.parse(await readFile(file, 'utf8'));
 test('un agent naît avec son dossier, ses consignes et le moins de droits possible', async () => {
   const agent = await createAgent({ name: 'Éloïse' });
   assert.equal(agent.id, 'eloise');
-  assert.deepEqual(agent.options, { shell: false, harnTools: false, web: true });
+  assert.deepEqual(agent.options, { shell: false, harnTools: false, web: true, autostart: false });
   assert.equal(agent.model, null);
   assert.match(agent.prompt, /Consignes de Éloïse/);
   assert.equal(agent.workspace, path.join(DIRS.agents, 'eloise', 'workspace'));
@@ -27,13 +27,28 @@ test('la fiche se modifie, sans accepter n’importe quoi', async () => {
   const saved = await updateAgent('eloise', { name: 'Élo', prompt: 'Sois brève.', options: { shell: true, inconnu: true, web: 'oui' } });
   assert.equal(saved.name, 'Élo');
   assert.equal(saved.prompt, 'Sois brève.');
-  assert.deepEqual(saved.options, { shell: true, harnTools: false, web: true });
+  assert.deepEqual(saved.options, { shell: true, harnTools: false, web: true, autostart: false });
   await assert.rejects(updateAgent('eloise', { name: '  ' }), { status: 400 });
   await assert.rejects(updateAgent('eloise', { model: 'pas-installe' }), { status: 409 });
   // L'identifiant est un nom de dossier : rien ne sort de data/agents.
   await assert.rejects(updateAgent('../pi-agent', { name: 'x' }), { status: 404 });
   await assert.rejects(deleteAgent('..'), { status: 404 });
   await assert.rejects(createAgent({ name: '???' }), { status: 400 });
+});
+
+test('Telegram : le jeton s’enregistre mais ne ressort jamais', async () => {
+  const token = `123456789:${'A'.repeat(35)}`;
+  await assert.rejects(updateAgent('eloise', { telegram: { ownerId: '42', token: '' } }), { status: 400 });
+  await assert.rejects(updateAgent('eloise', { telegram: { ownerId: 'moi', token } }), { status: 400 });
+  await assert.rejects(updateAgent('eloise', { telegram: { ownerId: '42', token: 'pas-un-jeton' } }), { status: 400 });
+  const saved = await updateAgent('eloise', { telegram: { ownerId: ' 42 ', token } });
+  assert.deepEqual(saved.telegram, { ownerId: 42 });
+  assert.ok(!JSON.stringify(await listAgents()).includes(token));
+  assert.equal((await json(path.join(DIRS.agents, 'eloise', 'agent.json'))).telegram.token, token);
+  // Jeton vide : celui enregistré reste. Identifiant vide : Telegram est retiré.
+  assert.deepEqual((await updateAgent('eloise', { telegram: { ownerId: '43', token: '' } })).telegram, { ownerId: 43 });
+  assert.equal((await json(path.join(DIRS.agents, 'eloise', 'agent.json'))).telegram.token, token);
+  assert.equal((await updateAgent('eloise', { telegram: { ownerId: '', token: '' } })).telegram, null);
 });
 
 test('sans pi installé, un agent ne se lance pas', async () => {
@@ -47,6 +62,8 @@ test('le dossier pi d’un agent ne reçoit que ce qui est coché', async () => 
   assert.equal((await json(path.join(dir, 'mcp.json'))).mcpServers.harn, undefined);
   assert.ok(!existsSync(path.join(dir, 'skills', 'installer-un-modele')));
   assert.ok(existsSync(path.join(dir, 'extensions', 'ctx-optimizer')));
+  // L'extension Telegram est copiée partout, sans secret : inerte tant que telegram.json manque.
+  assert.ok(!/\d{6,}:[\w-]{30,}/.test(await readFile(path.join(dir, 'extensions', 'telegram-follow', 'index.ts'), 'utf8')));
 
   await configurePiDir(dir, { options: { shell: true, harnTools: true, web: true } });
   assert.equal((await json(path.join(dir, 'settings.json'))).defaultTools, undefined);

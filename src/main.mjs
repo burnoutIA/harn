@@ -20,7 +20,7 @@ import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
-import { createAgent, deleteAgent, launchAgent, listAgents, updateAgent } from './agents.mjs';
+import { createAgent, deleteAgent, launchAgent, listAgents, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -459,6 +459,7 @@ async function main() {
       // Le modèle par défaut (cœur) s'il y en a un, sinon le dernier chargé.
       const last = (state.models[state.favorite]?.installedAt ? state.favorite : null) ?? state.active?.modelId ?? Object.keys(state.models).find((id) => state.models[id].installedAt);
       if (last && state.models[last]?.installedAt && !state.active?.unloadedByUser) background(activate(last));
+      background(startAgents());
     }
   });
 }

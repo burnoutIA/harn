@@ -12,7 +12,8 @@ import { getState } from './state.mjs';
 const MAX_NAME = 60;
 const MAX_PROMPT = 20_000;
 // Ce qu'un nouvel agent peut faire : le moins possible, on coche ce dont il a besoin.
-const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true };
+// autostart : lancé avec Harn, pour que son bot Telegram réponde sans qu'on y pense.
+const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, autostart: false };
 
 const failure = (status, message) => Object.assign(new Error(message), { status });
 const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -21,6 +22,10 @@ const dirOf = (id) => path.join(DIRS.agents, id);
 const piDirOf = (id) => path.join(dirOf(id), 'pi-agent');
 const workspaceOf = (id) => path.join(dirOf(id), 'workspace');
 const promptFileOf = (id) => path.join(piDirOf(id), 'APPEND_SYSTEM.md');
+// Lus par l'extension telegram-follow dans le dossier pi de l'agent : ce qu'elle doit écouter, et
+// le pid du pi qui écoute déjà.
+const telegramFileOf = (id) => path.join(piDirOf(id), 'telegram.json');
+const telegramLockOf = (id) => path.join(piDirOf(id), 'telegram.lock');
 const installed = (modelId) => Boolean(getState().models[modelId]?.installedAt && modelById(modelId));
 
 const defaultPrompt = (name) => `# Consignes de ${name}
@@ -47,8 +52,10 @@ async function writeAgent(agent) {
 }
 
 async function describe(agent) {
+  // Le jeton du bot ne ressort jamais : l'interface sait seulement qu'il y en a un.
   return {
     ...agent,
+    telegram: agent.telegram ? { ownerId: agent.telegram.ownerId } : null,
     prompt: await readFile(promptFileOf(agent.id), 'utf8').catch(() => ''),
     workspace: workspaceOf(agent.id),
     modelInstalled: agent.model ? installed(agent.model) : true,
@@ -67,6 +74,18 @@ function checkModel(value) {
   if (!value) return null;
   if (!installed(value)) throw failure(409, 'Seul un modèle installé peut être attaché à un agent');
   return value;
+}
+
+// Un bot par agent, une personne par bot. Jeton vide : celui déjà enregistré reste. Identifiant
+// vide : Telegram est retiré de l'agent.
+function checkTelegram(patch, current) {
+  const owner = String(patch.ownerId ?? '').trim();
+  if (!owner) return null;
+  if (!/^\d{1,15}$/.test(owner)) throw failure(400, 'L’identifiant Telegram est un nombre (celui que donne @userinfobot)');
+  const token = String(patch.token ?? '').trim() || current?.token;
+  if (!token) throw failure(400, 'Collez le jeton du bot, donné par @BotFather');
+  if (!/^\d+:[\w-]{30,}$/.test(token)) throw failure(400, 'Ce jeton n’a pas la forme d’un jeton de bot Telegram (123456:ABC…)');
+  return { token, ownerId: Number(owner) };
 }
 
 export async function listAgents() {
@@ -102,6 +121,10 @@ export async function updateAgent(id, patch = {}) {
   for (const key of Object.keys(DEFAULT_OPTIONS)) {
     if (typeof patch.options?.[key] === 'boolean') agent.options[key] = patch.options[key];
   }
+  if (patch.telegram) {
+    const telegram = checkTelegram(patch.telegram, agent.telegram);
+    if (telegram) agent.telegram = telegram; else delete agent.telegram;
+  }
   if (typeof patch.prompt === 'string') {
     if (patch.prompt.length > MAX_PROMPT) throw failure(400, `Consignes limitées à ${MAX_PROMPT.toLocaleString('fr-FR')} caractères`);
     await mkdir(piDirOf(id), { recursive: true });
@@ -120,13 +143,32 @@ export async function deleteAgent(id) {
 
 // Le dossier pi de l'agent est réécrit à chaque lancement : modèles installés, options cochées.
 // Son modèle se charge à sa première requête, comme pour toute application branchée sur /v1.
-export async function launchAgent(id) {
+export async function launchAgent(id, { window = true } = {}) {
   const agent = await readAgent(id);
   if (!getState().pi.installed) throw failure(409, 'pi agent n’est pas encore installé');
   if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
   const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
+  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify(agent.telegram));
+  else await rm(telegramFileOf(id), { force: true });
   // Le titre passe par la ligne de commande du terminal : sans ses caractères spéciaux.
-  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: `harn-${id}` });
+  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: `harn-${id}`, window });
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
+}
+
+// Un pi de cet agent écoute déjà son bot (verrou posé par l'extension, pid encore vivant).
+async function listening(id) {
+  const pid = Number(await readFile(telegramLockOf(id), 'utf8').catch(() => 0));
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// Au démarrage de Harn : les agents cochés repartent, sans fenêtre quand tmux les porte. Celui
+// qui tourne encore (Harn seul a redémarré) n'est pas relancé.
+export async function startAgents() {
+  if (!getState().pi.installed) return;
+  for (const agent of await listAgents()) {
+    if (!agent.options.autostart || await listening(agent.id)) continue;
+    await launchAgent(agent.id, { window: false }).catch((error) => console.error(`[harn] agent « ${agent.name} » non lancé : ${error.message}`));
+  }
 }
