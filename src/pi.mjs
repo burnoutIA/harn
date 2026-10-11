@@ -225,11 +225,28 @@ async function hasWindowsTerminal() {
   return run('where', ['wt.exe'], { windowsHide: true }).then(() => true).catch(() => false);
 }
 
+const STAMP = '@harn-stamp';
+// Les agents tournent sur un serveur tmux à part (tmux -L harn) : Harn y pose ses réglages sans
+// toucher aux sessions tmux de l'utilisateur. Pour s'y rattacher à la main : tmux -L harn attach.
+const TMUX_SERVER = 'harn';
+const tmux = (args) => run('tmux', ['-L', TMUX_SERVER, ...args]);
+// Posés avant le premier pi : sans extended-keys, Maj+Entrée lui arrive comme une Entrée simple.
+const TMUX_SETUP = [
+  'start-server', ';', 'set-option', '-s', 'extended-keys', 'on', ';', 'set-option', '-s', 'extended-keys-format', 'csi-u', ';', 'set-option', '-as', 'terminal-features', 'xterm*:extkeys', ';',
+];
+
+// Ferme la session tmux d'un pi, et le pi avec. Sans tmux ou sans session : rien à faire.
+export async function closePiSession(session) {
+  await tmux(['kill-session', '-t', `=${session}`]).catch(() => {});
+}
+
 // pi est une application de terminal : on lui ouvre sa propre fenêtre, déjà branchée sur son
 // dossier (piDir). session : sous Linux avec tmux, pi tourne dans une session de ce nom, qui
 // survit à la fenêtre et se passe d'écran ; la relancer s'y rattache au lieu d'ouvrir un second pi.
+// stamp : l'empreinte des réglages avec lesquels pi démarre, gardée sur la session. Changée
+// depuis, le pi qui tourne est remplacé (il ne relit rien en route) et reprend sa conversation.
 // window : false la laisse tourner sans fenêtre (tmux seulement).
-export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null, window = true }) {
+export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null, stamp = null, window = true }) {
   await mkdir(cwd, { recursive: true });
   const cli = await piCli();
   const env = { ...process.env, PI_CODING_AGENT_DIR: piDir };
@@ -243,11 +260,24 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
   }
   if (session && await run('tmux', ['-V']).then(() => true).catch(() => false)) {
     const target = `=${session}`;
-    const resumed = await run('tmux', ['has-session', '-t', target]).then(() => true).catch(() => false);
-    // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
-    if (!resumed) await run('tmux', ['new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, process.execPath, cli]);
-    if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
-    return { resumed, session };
+    // « =nom » : ce nom exactement ; les options d'une session se visent par « =nom: ».
+    let resumed = await tmux(['has-session', '-t', target]).then(() => true).catch(() => false);
+    let restarted = false;
+    if (resumed && stamp) {
+      const running = await tmux(['show-options', '-t', `${target}:`, '-v', STAMP]).then((r) => r.stdout.trim()).catch(() => '');
+      if (running !== stamp) {
+        await closePiSession(session);
+        resumed = false;
+        restarted = true;
+      }
+    }
+    if (!resumed) {
+      // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
+      await tmux([...TMUX_SETUP, 'new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, process.execPath, cli, ...(restarted ? ['--continue'] : [])]);
+      if (stamp) await tmux(['set-option', '-t', `${target}:`, STAMP, stamp]).catch(() => {});
+    }
+    if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
+    return { resumed, restarted, session };
   }
   spawn('x-terminal-emulator', ['-e', process.execPath, cli], { env, cwd, detached: true, stdio: 'ignore' }).unref();
   return { resumed: false };

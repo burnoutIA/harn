@@ -1427,7 +1427,7 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       // Lancé avec ce qui est à l'écran : la fiche est enregistrée d'abord.
       const saved = await saveAgent(button.closest('form'));
       const r = await post(`/api/agents/${id}/launch`);
-      toast(r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
+      toast(r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
     }
     if (action === 'agent-delete') {
       const agent = agents.find((a) => a.id === id);

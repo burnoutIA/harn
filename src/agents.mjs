@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { getLive } from './metrics.mjs';
-import { configurePiDir, openPiTerminal } from './pi.mjs';
+import { closePiSession, configurePiDir, openPiTerminal } from './pi.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { bus, getState } from './state.mjs';
 
@@ -34,6 +35,7 @@ const telegramLockOf = (id) => path.join(piDirOf(id), 'telegram.lock');
 // La mémoire de l'agent, et ce que l'extension agent-memory lit pour la trouver.
 const memoryFileOf = (id) => path.join(dirOf(id), 'MEMORY.md');
 const memoryConfigOf = (id) => path.join(piDirOf(id), 'memory.json');
+const sessionOf = (id) => `harn-${id}`;
 const installed = (modelId) => Boolean(getState().models[modelId]?.installedAt && modelById(modelId));
 
 const defaultPrompt = (name) => `# Consignes de ${name}
@@ -148,9 +150,11 @@ export async function updateAgent(id, patch = {}) {
   return describe(agent);
 }
 
-// Tout le dossier part : la fiche, les consignes, la mémoire, les sessions et le workspace.
+// Tout le dossier part : la fiche, les consignes, la mémoire, les sessions et le workspace. Son pi
+// s'arrête aussi : un agent recréé sous le même nom ne doit pas retomber dans l'ancien.
 export async function deleteAgent(id) {
   const agent = await readAgent(id);
+  await closePiSession(sessionOf(id));
   await rm(dirOf(id), { recursive: true, force: true });
   return agent;
 }
@@ -169,7 +173,11 @@ export async function launchAgent(id, { window = true } = {}) {
   if (agent.options.memory) await writeFile(memoryConfigOf(id), JSON.stringify({ file: memoryFileOf(id), maxChars: MAX_MEMORY }));
   else await rm(memoryConfigOf(id), { force: true });
   // Le titre passe par la ligne de commande du terminal : sans ses caractères spéciaux.
-  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: `harn-${id}`, window });
+  // Ce que pi ne lit qu'à son démarrage : modèle, outils, consignes, bot. Changé, son pi est relancé.
+  const prompt = await readFile(promptFileOf(id), 'utf8').catch(() => '');
+  const { autostart, ...tools } = agent.options;
+  const stamp = createHash('sha256').update(JSON.stringify([agent.model, tools, prompt, agent.telegram ?? null])).digest('hex').slice(0, 16);
+  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: sessionOf(id), stamp, window });
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
 }
 
