@@ -4,6 +4,8 @@
 //   - ses messages reçus par le bot sont injectés dans l'agent ;
 //   - ses photos et fichiers sont rangés dans le dossier files/ du workspace, et annoncés à l'agent
 //     (une image est aussi montrée au modèle quand il sait voir) ;
+//   - l'agent lui montre une image ou lui envoie un fichier (outil send_file) ; une image générée
+//     part toute seule ;
 //   - « écrit… » reste affiché tant que l'agent travaille ; /new ouvre une nouvelle conversation.
 //
 // Aucun secret ici : le jeton du bot et l'identifiant Telegram de la personne sont lus dans
@@ -13,8 +15,8 @@
 // Accès limité à la personne : en privé, son chat seulement ; en groupe, ses messages seulement.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, extname, join, relative } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 interface Config {
   token: string;
@@ -37,6 +39,7 @@ const NEW_COMMAND = "telegram-new";
 const POLL_CLAIM_MS = Number(process.env.HARN_TELEGRAM_CLAIM_MS ?? 2000); // rythme d'attente de la décision
 const TYPING_EVERY_MS = 4000; // Telegram éteint « écrit… » au bout de 5 s
 const TYPING_MAX_MS = 20 * 60_000; // un run qui ne se termine jamais ne laisse pas le voyant allumé
+const MAX_SEND_BYTES = 50 * 1024 * 1024; // ce qu'un bot peut envoyer
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // au-delà, Telegram ne laisse pas un bot télécharger le fichier
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
@@ -128,6 +131,76 @@ export default function (pi: ExtensionAPI) {
       sendQueue = sendQueue.then(() => tg("sendMessage", { chat_id: chat, text: part, disable_web_page_preview: true }).catch(() => {}));
     }
   }
+
+  // Un fichier de l'agent part dans le chat : en photo quand c'en est une (Telegram l'affiche),
+  // sinon en document. deliver rend le résultat à qui l'attend ; sendFile, offert aux autres
+  // extensions par l'objet partagé (image-gen), prévient la personne en cas d'échec.
+  function deliver(file: string, caption = ""): Promise<void> {
+    const chat = shared.chat || config!.ownerId;
+    const photo = /\.(png|jpe?g|webp)$/i.test(file);
+    const sent = sendQueue.then(async () => {
+      const form = new FormData();
+      form.set("chat_id", String(chat));
+      if (caption) form.set("caption", caption.slice(0, 1000));
+      form.set(photo ? "photo" : "document", new Blob([readFileSync(file)]), basename(file));
+      const res = await fetch(`${api}/${photo ? "sendPhoto" : "sendDocument"}`, { method: "POST", body: form });
+      const json: any = await res.json();
+      if (!json.ok) throw new Error(json.description);
+    });
+    sendQueue = sent.catch(() => {});
+    return sent;
+  }
+  function sendFile(file: string, caption = "") {
+    deliver(file, caption).catch((error: any) => sendText(shared.chat || config!.ownerId, `Je n'ai pas pu vous envoyer le fichier : ${error.message}.`));
+  }
+  (shared as any).sendFile = sendFile;
+
+  // Ce que le modèle doit savoir de la situation : la personne n'est pas devant ce terminal. Sans
+  // cela, il « montre » une image en la lisant pour lui-même, et elle n'arrive jamais.
+  pi.on("before_agent_start", (event: any) => {
+    event.systemPromptOptions.sections = {
+      ...(event.systemPromptOptions.sections ?? {}),
+      telegram:
+        "The person talks to you through Telegram, from their phone. They receive only the text of your final reply: they do not see this terminal, your tool calls, or any file on this machine. " +
+        "Reading an image with `read` shows it to you, never to them. " +
+        "Whenever they ask to see, show, display or receive an image or a file (\"montre-moi l'image\", \"envoie-la\"), call `send_file` with its path, then answer in one short sentence. " +
+        "Never say an image is displayed or visible unless `send_file` or `generate_image` has just succeeded.",
+    };
+  });
+
+  // L'outil de l'agent pour montrer un fichier à la personne : une image qu'il a faite ou reçue,
+  // un document de son dossier de travail. Rien ne sort d'ailleurs que de ce dossier.
+  import("typebox").then(({ Type }: any) => {
+    pi.registerTool({
+      name: "send_file",
+      label: "send_file",
+      description:
+        "Send a file from your working directory to the person on Telegram. Images (png, jpg, webp) are displayed in the chat; other files arrive as documents. " +
+        "Images made with generate_image are already sent automatically: use this for any other file, or to show one again.",
+      promptSnippet: "send_file: show an image or send a file to the person on Telegram",
+      promptGuidelines: [
+        "The person reads you on Telegram and cannot open files on this machine: when they ask to see an image or want a file, send it with `send_file` instead of giving its path.",
+      ],
+      parameters: Type.Object({
+        path: Type.String({ description: "Path of the file, inside your working directory" }),
+        caption: Type.Optional(Type.String({ description: "Short text shown under the image or file" })),
+      }),
+      async execute(_id: string, args: any) {
+        const answer = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: undefined, isError });
+        const file = resolve(process.cwd(), String(args.path ?? ""));
+        const inside = relative(process.cwd(), file);
+        if (!inside || inside.startsWith("..") || isAbsolute(inside)) return answer("Only files inside your working directory can be sent.", true);
+        if (!existsSync(file) || !statSync(file).isFile()) return answer(`No such file: ${inside}`, true);
+        if (statSync(file).size > MAX_SEND_BYTES) return answer(`File too large for Telegram (${megabytes(statSync(file).size)}, limit ${megabytes(MAX_SEND_BYTES)}).`, true);
+        try {
+          await deliver(file, typeof args.caption === "string" ? args.caption : "");
+          return answer(`Sent to the person on Telegram: ${inside}`);
+        } catch (error: any) {
+          return answer(`Telegram refused the file: ${error.message}`, true);
+        }
+      },
+    });
+  }).catch(() => {});
 
   // --- Voyant « écrit… » ---
   let typing: ReturnType<typeof setInterval> | null = null;

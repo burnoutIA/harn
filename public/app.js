@@ -824,6 +824,35 @@ function hubSection() {
   return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}${noEngine}</div></div>`;
 }
 
+// ── Modèles d'images ───────────────────────────────────────
+// Leur description vient de /api/images (lue une fois) ; l'avancement, de l'état diffusé.
+let imageCatalog = null;
+async function loadImageCatalog() {
+  const report = await fetch('/api/images').then((r) => r.json()).catch(() => null);
+  if (!report?.models) return;
+  imageCatalog = report.models;
+  if (view === 'models') renderImageModels();
+}
+function imageModelRow(model) {
+  const entry = state.images?.models?.[model.id] ?? {};
+  const parts = downloadsFor(`image:${model.id}:`).filter((d) => !d.done);
+  const percent = parts.length && parts[0].total ? Math.round((parts[0].received / parts[0].total) * 100) : null;
+  const working = state.images?.job?.model === model.id;
+  const status = entry.installing ? `<span class="hint">${esc(entry.detail ?? 'Installation')}${percent !== null ? ` · ${percent} %` : ''}</span>`
+    : entry.installedAt ? `<span class="live">${working ? 'génère une image' : 'installé'}</span><button class="btn ghost small" data-action="image-delete" data-id="${model.id}" title="Supprimer ses fichiers" ${working ? 'disabled' : ''}>${icon.trash}</button>`
+    : `<button class="btn small" data-action="image-install" data-id="${model.id}">${entry.error ? 'Réessayer' : 'Installer'}</button>`;
+  return `<div class="image-model"><div><h3>${esc(model.name)}</h3><p>${esc(model.tagline)}</p>
+      <p class="hint">${String(model.gigabytes).replace('.', ',')} Go à télécharger · demande ${esc(model.needs)}${model.fits ? '' : ' (votre carte en a moins : ce sera lent, ou impossible)'} · licence ${esc(model.license)}</p>
+      ${entry.error && !entry.installing ? `<p class="hint bad">${esc(entry.error)}</p>` : ''}</div>
+    <div class="acts">${status}</div></div>`;
+}
+function renderImageModels() {
+  if (!imageCatalog) { loadImageCatalog(); return paint('image-models', '<div class="label">Images</div><p class="empty">Lecture…</p>'); }
+  paint('image-models', `<div class="label">Images</div>
+    <p class="intro">Un agent dont la case « Images » est cochée peut générer et retoucher des images. La carte graphique passe au modèle d’images le temps de l’image, puis revient au modèle de texte.</p>
+    ${imageCatalog.map(imageModelRow).join('')}`);
+}
+
 function renderModels() {
   mount('models', `<div class="view">
     <div class="view-head"><div><h1>Modèles</h1><p>Pour chacun, ce que votre machine en tire : contexte qui tient sur la carte, vitesse attendue à 100k, intelligence.</p></div></div>
@@ -834,8 +863,10 @@ function renderModels() {
         <button class="btn primary" type="submit">${icon.terminal} Installer avec pi</button>
       </form>
     </section>
+    <section class="card image-models" id="image-models"></section>
     <div id="models-body"></div>
   </div>`);
+  renderImageModels();
   const mine = catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id);
   const upgrade = catalog.filter((m) => !mine.includes(m) && state.plan?.upgradeModel === m.id);
   const rest = catalog.filter((m) => !mine.includes(m) && !upgrade.includes(m)).sort((a, b) => b.quality - a.quality);
@@ -1092,6 +1123,7 @@ const AGENT_OPTIONS = [
   ['harnTools', 'Outils de Harn', 'Installer, mesurer et tester des modèles, lire le carnet de la machine.'],
   ['web', 'Recherche web', 'Chercher et lire des pages web avec ketch.'],
   ['memory', 'Mémoire', 'Note lui-même ce qu’il juge durable et le relit à chaque conversation.'],
+  ['images', 'Images', 'Générer et retoucher des images avec un modèle d’images installé (vue Modèles).'],
   ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
 ];
 
@@ -1115,7 +1147,7 @@ function agentCard(agent) {
         <label class="field"><span>Jeton du bot</span><input type="password" name="tgToken" placeholder="${agent.telegram ? 'Enregistré · laisser vide pour le garder' : '123456:ABC…, donné par @BotFather'}" autocomplete="new-password"></label>
         <p class="hint">Un bot par agent : seule cette personne peut lui parler. Vider l’identifiant retire Telegram de l’agent.</p></div>
       <p class="hint">Dossier de travail : <code>${esc(agent.workspace)}</code></p>
-      <div class="foot"><button class="btn small" type="submit">Enregistrer</button><p class="hint">Pris en compte au prochain lancement de l’agent.</p></div>
+      <div class="foot"><button class="btn small" type="submit">Enregistrer</button><p class="hint">Un agent en marche est relancé avec ses nouveaux réglages et reprend sa conversation.</p></div>
     </form></section>`;
 }
 
@@ -1305,8 +1337,8 @@ app.addEventListener('submit', async (event) => {
     button.disabled = true;
     try {
       if (agentForm.dataset.form === 'agent-edit') {
-        await saveAgent(agentForm);
-        toast('Agent enregistré');
+        const saved = await saveAgent(agentForm);
+        toast(saved.restarted ? `${saved.name} enregistré et relancé avec ses nouveaux réglages` : 'Agent enregistré');
       } else {
         const input = agentForm.querySelector('#agent-name');
         const created = await post('/api/agents', { name: input.value });
@@ -1365,6 +1397,12 @@ app.addEventListener('click', async (event) => {
       toast('Installation lancée · suivi dans « En cours », votre IA reste disponible');
     }
     if (action === 'favorite') { const r = await post(`/api/models/${id}/favorite`); toast(r.favorite ? `${nameOf(id)} est le modèle par défaut` : 'Plus de modèle par défaut'); }
+    if (action === 'image-install') { await post(`/api/images/${id}/install`); toast('Installation du modèle d’images'); }
+    if (action === 'image-delete') {
+      if (!confirm('Supprimer ce modèle d’images et ses fichiers ?')) return;
+      await post(`/api/images/${id}/delete`);
+      toast('Modèle d’images supprimé');
+    }
     if (action === 'delete-model') {
       const m = modelOf(id);
       const warn = state.active?.modelId === id ? '\n\nC’est le modèle chargé : il sera déchargé.' : '';
@@ -1431,7 +1469,7 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       const r = await post(`/api/agents/${id}/launch`);
       // Avec tmux, Harn sait qu'il tourne : la fiche le montre tout de suite.
       if (r.session) { agents = agents.map((a) => (a.id === id ? { ...a, running: true } : a)); renderAgents(); }
-      toast(r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
+      toast(r.restarted || saved.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
     }
     if (action === 'agents-overview') {
       const r = await post('/api/agents/_overview');

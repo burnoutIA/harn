@@ -91,10 +91,13 @@ export function llamaArgs(model, files, tuning, hardware) {
   // au chargement, le modèle tourne sur ses couches réelles, sans anticipation.
   if (tuning.noNextn && model.profile?.arch) args.push('--override-kv', `${model.profile.arch}.nextn_predict_layers=int:0`);
   const spec = tuning.noNextn ? { type: 'none' } : tuning.spec ?? { type: 'none' };
+  // Tête MTP livrée dans un fichier à part : le moteur la charge comme brouillon.
+  const draft = files.mtpDraft ? ['--spec-draft-model', files.mtpDraft] : [];
   if (spec.type === 'mtp' && spec.n === 'auto') {
     // Profondeur choisie par le moteur lui-même (llamAmpere : adaptative 3-4, réglée pour ses noyaux).
+    if (draft.length) args.push('--spec-type', 'draft-mtp', ...draft);
   } else if (spec.type === 'mtp') {
-    args.push('--spec-type', 'draft-mtp', '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
+    args.push('--spec-type', 'draft-mtp', ...draft, '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
   } else if (spec.type === 'dflash' && files.dflash) {
     args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n));
   } else if (model.mtp) {
@@ -255,9 +258,9 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
     await killTree(process_.pid);
     await stopRelay();
     const cause = loadFailure(tail, label);
-    // tensors : le fichier ne contient pas les tenseurs que ses métadonnées annoncent.
+    // tensors : le fichier ne contient pas les tenseurs (ou la tête MTP) que ses métadonnées annoncent.
     const failure = spawnError ? Object.assign(new Error(`Le moteur n’a pas pu être lancé : ${spawnError.message}`), { fatal: true })
-      : cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors/.test(tail) }) : error;
+      : cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors|doesn't contain MTP layers/.test(tail) }) : error;
     update((s) => { s.active = { ...s.active, status: 'error', error: failure.message }; });
     throw failure;
   }
@@ -300,6 +303,7 @@ export function modelFiles(modelId) {
   return {
     model: where(model.files[0].name),
     mmproj: model.mmproj ? where(model.mmproj.name) : null,
+    mtpDraft: model.mtpDraft ? where(model.mtpDraft.name) : null,
     dflash: model.dflash ? path.join(dir, model.dflash.name) : null,
   };
 }

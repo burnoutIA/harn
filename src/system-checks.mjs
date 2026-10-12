@@ -42,6 +42,22 @@ export async function systemChecks(hardware, { vramBaselineMiB = null } = {}) {
       how: 'Dans un terminal : sudo apt install nvidia-cuda-toolkit cmake build-essential, puis relancer Harn et refaire le banc du modèle.',
     });
   }
+  // Linux : pi gère lui-même la sélection à la souris et copie par un outil du bureau. Sans lui,
+  // rien n'arrive dans le presse-papiers (ni la sélection, ni /copy).
+  if (process.platform === 'linux' && (process.env.WAYLAND_DISPLAY || process.env.DISPLAY)) {
+    const wayland = Boolean(process.env.WAYLAND_DISPLAY);
+    const tools = wayland ? ['wl-copy'] : ['xclip', 'xsel'];
+    const found = (await Promise.all(tools.map((tool) => quiet('sh', ['-c', `command -v ${tool}`])))).some(Boolean);
+    if (!found) {
+      checks.push({
+        id: 'clipboard',
+        level: 'warn',
+        title: 'Copier depuis pi ne marche pas',
+        text: `pi (le pi de test comme les agents) copie le texte sélectionné avec ${wayland ? 'wl-copy' : 'xclip'}, qui n’est pas installé : la sélection à la souris et la commande /copy ne mettent rien dans le presse-papiers.`,
+        how: `Dans un terminal : sudo apt install ${wayland ? 'wl-clipboard' : 'xclip'}. Les pi déjà ouverts en profitent tout de suite.`,
+      });
+    }
+  }
   if (process.platform !== 'win32') return checks;
 
   const scheme = (await quiet('powercfg', ['/getactivescheme'])).match(/[0-9a-f-]{36}/i)?.[0]?.toLowerCase();

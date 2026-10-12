@@ -20,7 +20,9 @@ import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
-import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
+import { gpuFree, isImageJob } from './gpu-queue.mjs';
+import { deleteImageModel, generateImage, imagesReport, installImageModel } from './images.mjs';
+import { agentForImages, claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -154,7 +156,8 @@ function activity() {
     if (m.installing) out.push(`Installation de ${name(id)}`);
     else if (m.tuneDetail) out.push(`Réglage de ${name(id)} (${m.tuneDetail})`);
   }
-  if (busyWith() && !s.models?.[busyWith()]?.tuneDetail) out.push(`Banc de vitesse sur ${name(busyWith())}`);
+  if (isImageJob(busyWith())) out.push('Génération d’une image');
+  else if (busyWith() && !s.models?.[busyWith()]?.tuneDetail) out.push(`Banc de vitesse sur ${name(busyWith())}`);
   for (const [id, p] of Object.entries(s.profiles ?? {})) if (p.iqRunning) out.push(`Test d’intelligence de ${name(id)} (${p.iqRunning})`);
   for (const [, d] of Object.entries(s.downloads ?? {})) if (!d.done) out.push(`Téléchargement de ${d.label}`);
   if (s.machineDoc?.analysing) out.push('Analyse de la machine par pi');
@@ -170,6 +173,7 @@ async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // api, ...
   if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, { state: getState(), live: getLive(), catalog: catalog() });
   if (req.method === 'GET' && url.pathname === '/api/catalog') return json(res, 200, catalog());
+  if (req.method === 'GET' && url.pathname === '/api/images') return json(res, 200, imagesReport());
   if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, compactStatus());
   if (req.method === 'GET' && url.pathname === '/api/custom/job') return json(res, 200, customJobState() ?? { running: false });
   if (req.method === 'GET' && url.pathname === '/api/activity') return json(res, 200, { pid: process.pid, activity: activity() });
@@ -225,6 +229,24 @@ async function api(req, res, url) {
         return json(res, 200, accessReport(await listKeys()));
       }
       if (parts[1] === 'approvals' && parts[2] && ['accept', 'refuse'].includes(parts[3])) return json(res, 200, decideApproval(parts[2], parts[3] === 'accept'));
+    } catch (error) {
+      return json(res, error.status ?? 500, { error: error.message });
+    }
+    return json(res, 404, { error: 'inconnu' });
+  }
+
+  // Images : un agent en demande une (outil generate_image de son pi) ; installer ou supprimer un
+  // modèle d'images se fait depuis la fenêtre de Harn seulement.
+  if (parts[1] === 'images') {
+    const body = await new Response(req).json().catch(() => ({}));
+    try {
+      if (parts[2] === 'generate') {
+        const from = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
+        return json(res, 200, await generateImage({ ...from, model: body.model, prompt: body.prompt, negative: body.negative, width: body.width, height: body.height, seed: body.seed, references: body.references }));
+      }
+      if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+      if (parts[2] && parts[3] === 'install') { background(installImageModel(parts[2])); return json(res, 202, { ok: true }); }
+      if (parts[2] && parts[3] === 'delete') { await deleteImageModel(parts[2]); return json(res, 200, imagesReport()); }
     } catch (error) {
       return json(res, error.status ?? 500, { error: error.message });
     }
@@ -437,7 +459,7 @@ async function main() {
   await loadRecent();
   await loadKeys();
   await internalKey();
-  setActivator(activate, busyWith);
+  setActivator(activate, busyWith, gpuFree);
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {

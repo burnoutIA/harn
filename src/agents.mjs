@@ -4,7 +4,7 @@ import path from 'node:path';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { getLive } from './metrics.mjs';
-import { closePiSession, configurePiDir, joinPiOverview, openPiOverview, openPiTerminal, piSessions } from './pi.mjs';
+import { closePiSession, configurePiDir, extensionsDigest, joinPiOverview, openPiOverview, openPiTerminal, piSessions } from './pi.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { bus, getState } from './state.mjs';
 
@@ -12,6 +12,8 @@ import { bus, getState } from './state.mjs';
 // son dossier pi (consignes, sessions, outils) et son workspace y vivent ensemble. Le pi de test
 // lancé depuis un modèle garde les siens (data/pi-agent, workspace) : les deux ne se voient pas.
 
+// À augmenter quand la façon de lancer pi change : les agents en marche sont alors relancés.
+const LAUNCH_VERSION = 2;
 const MAX_NAME = 60;
 const MAX_PROMPT = 20_000;
 // La mémoire est jointe au prompt de chaque conversation : ~1 500 tokens au plus.
@@ -19,7 +21,7 @@ const MAX_MEMORY = 6000;
 // Ce qu'un nouvel agent peut faire : le moins possible, on coche ce dont il a besoin.
 // autostart : lancé avec Harn, pour que son bot Telegram réponde sans qu'on y pense.
 // memory : il note lui-même ce qu'il juge durable, et le relit à chaque conversation.
-const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, memory: true, autostart: false };
+const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, memory: true, images: false, autostart: false };
 
 const failure = (status, message) => Object.assign(new Error(message), { status });
 const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -152,7 +154,11 @@ export async function updateAgent(id, patch = {}) {
     await writeFile(memoryFileOf(id), patch.memory);
   }
   await writeAgent(agent);
-  return describe(agent);
+  // Un agent en marche prend ses nouveaux réglages tout de suite : s'ils changent ce que son pi a
+  // lu au démarrage, il est relancé et reprend sa conversation.
+  const running = (await piSessions()).includes(sessionOf(id));
+  const restarted = running && Boolean((await launchAgent(id, { window: false }).catch(() => null))?.restarted);
+  return { ...(await describe(agent)), restarted };
 }
 
 // Tout le dossier part : la fiche, les consignes, la mémoire, les sessions et le workspace. Son pi
@@ -170,7 +176,7 @@ export async function launchAgent(id, { window = true } = {}) {
   const agent = await readAgent(id);
   if (!getState().pi.installed) throw failure(409, 'pi agent n’est pas encore installé');
   if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
-  const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options });
+  const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options, agent: id });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
   // Les agents d'avant ce dossier le reçoivent à leur prochain lancement.
   await mkdir(filesOf(id), { recursive: true });
@@ -181,13 +187,21 @@ export async function launchAgent(id, { window = true } = {}) {
   if (agent.options.memory) await writeFile(memoryConfigOf(id), JSON.stringify({ file: memoryFileOf(id), maxChars: MAX_MEMORY }));
   else await rm(memoryConfigOf(id), { force: true });
   // Le titre passe par la ligne de commande du terminal : sans ses caractères spéciaux.
-  // Ce que pi ne lit qu'à son démarrage : modèle, outils, consignes, bot. Changé, son pi est relancé.
+  // Ce que pi ne lit qu'à son démarrage : modèle, outils, consignes, bot, et les extensions de Harn.
+  // Changé, son pi est relancé.
   const prompt = await readFile(promptFileOf(id), 'utf8').catch(() => '');
   const { autostart, ...tools } = agent.options;
-  const stamp = createHash('sha256').update(JSON.stringify([agent.model, tools, prompt, agent.telegram ?? null])).digest('hex').slice(0, 16);
-  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: sessionOf(id), stamp, window });
+  const stamp = createHash('sha256').update(JSON.stringify([LAUNCH_VERSION, agent.model, tools, prompt, agent.telegram ?? null, await extensionsDigest()])).digest('hex').slice(0, 16);
+  const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: sessionOf(id), stamp, window, model: defaultModel });
   if (opened.session && !opened.resumed) await joinPiOverview(overviewPane(agent));
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
+}
+
+// Qui demande une image, et où la ranger : seulement un agent dont la case Images est cochée.
+export async function agentForImages(id) {
+  const agent = await readAgent(id);
+  if (!agent.options.images) throw failure(403, 'La génération d’images n’est pas cochée pour cet agent');
+  return { who: agent.name, workspace: workspaceOf(id) };
 }
 
 // Le panneau d'un agent dans la vue d'ensemble : sa session, et son nom en titre.

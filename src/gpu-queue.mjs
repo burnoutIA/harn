@@ -24,4 +24,12 @@ export function withGpu(modelId, task) {
 }
 // Charger un modèle décharge celui qui tourne (startEngine arrête l'ancien moteur). Refusé
 // pendant le banc ou le test d'un autre modèle : la carte lui appartient.
-export const activationBlocker = (modelId) => (busy && busy !== modelId ? `Harn mesure « ${modelById(busy)?.name ?? busy} » : attendez la fin du banc pour changer de modèle` : null);
+export const activationBlocker = (modelId) => {
+  if (!busy || busy === modelId) return null;
+  if (isImageJob(busy)) return 'Harn génère une image : la carte graphique revient dans un instant';
+  return `Harn mesure « ${modelById(busy)?.name ?? busy} » : attendez la fin du banc pour changer de modèle`;
+};
+// Une image en cours occupe la carte quelques secondes à quelques minutes : la passerelle attend
+// qu'elle soit rendue au lieu de refuser la requête.
+export const isImageJob = (id) => String(id ?? '').startsWith('image:');
+export const gpuFree = () => gpuQueue;

@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,10 +52,11 @@ export async function configurePi(preferredModel = null) {
 
 // Le pi de test reçoit tout. Un agent (agents.mjs) a son propre dossier et choisit : shell,
 // outils de Harn, recherche web.
-const EVERYTHING = { shell: true, harnTools: true, web: true };
+const EVERYTHING = { shell: true, harnTools: true, web: true, images: true };
 const NO_SHELL = ['-bash', '-powershell'];
 
-export async function configurePiDir(dir, { preferredModel = null, options = EVERYTHING } = {}) {
+// agent : l'identifiant de l'agent à qui est ce dossier (null pour le pi de test).
+export async function configurePiDir(dir, { preferredModel = null, options = EVERYTHING, agent = null } = {}) {
   const state = getState();
   await mkdir(dir, { recursive: true });
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelById(id));
@@ -102,6 +104,10 @@ export async function configurePiDir(dir, { preferredModel = null, options = EVE
   await installSkills(dir, options.harnTools);
   await installExtensions(dir);
   await configureMcp(dir, options);
+  // Lu par l'extension image-gen : sans ce fichier, pas d'outil de génération d'images.
+  const imageFile = path.join(dir, 'image.json');
+  if (options.images) await writeFile(imageFile, JSON.stringify({ harn: `http://127.0.0.1:${PORTS.app}`, agent }));
+  else await rm(imageFile, { force: true });
   return { modelsFile, settingsFile, defaultModel };
 }
 
@@ -215,6 +221,17 @@ async function installSkills(piDir, wanted) {
 // Les extensions pi fournies par Harn (src/pi-extensions, un dossier par extension), recopiées
 // à chaque configuration comme les skills. ctx-optimizer vient du projet ctx_optimizer/pi : on
 // l'y fait évoluer, puis on recopie ses fichiers ici.
+// L'empreinte des extensions fournies : un pi lancé avant leur dernière version tourne encore avec
+// l'ancienne, et doit être relancé pour prendre la nouvelle.
+export async function extensionsDigest() {
+  const hash = createHash('sha256');
+  const source = fromRoot('src', 'pi-extensions');
+  for (const entry of (await readdir(source, { recursive: true, withFileTypes: true }).catch(() => [])).filter((e) => e.isFile()).sort((a, b) => path.join(a.parentPath, a.name).localeCompare(path.join(b.parentPath, b.name)))) {
+    hash.update(entry.name).update(await readFile(path.join(entry.parentPath, entry.name)));
+  }
+  return hash.digest('hex').slice(0, 12);
+}
+
 async function installExtensions(piDir) {
   const source = fromRoot('src', 'pi-extensions');
   for (const entry of await readdir(source, { withFileTypes: true }).catch(() => [])) {
@@ -244,7 +261,8 @@ async function cappedMemory() {
 const STAMP = '@harn-stamp';
 // Les agents tournent sur un serveur tmux à part (tmux -L harn) : Harn y pose ses réglages sans
 // toucher aux sessions tmux de l'utilisateur. Pour s'y rattacher à la main : tmux -L harn attach.
-const TMUX_SERVER = 'harn';
+// HARN_TMUX : un autre nom de serveur, pour que les tests ne voient jamais les vrais agents.
+const TMUX_SERVER = process.env.HARN_TMUX ?? 'harn';
 const tmux = (args) => run('tmux', ['-L', TMUX_SERVER, ...args]);
 // Posés avant le premier pi : sans extended-keys, Maj+Entrée lui arrive comme une Entrée simple.
 const TMUX_SETUP = [
@@ -321,7 +339,9 @@ export async function joinPiOverview(pane) {
 // stamp : l'empreinte des réglages avec lesquels pi démarre, gardée sur la session. Changée
 // depuis, le pi qui tourne est remplacé (il ne relit rien en route) et reprend sa conversation.
 // window : false la laisse tourner sans fenêtre (tmux seulement).
-export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null, stamp = null, window = true }) {
+// model : imposé au démarrage. Une conversation reprise (--continue) garde sinon le modèle
+// qu'elle avait, quoi que dise la fiche de l'agent.
+export async function openPiTerminal({ title, cwd, piDir, prompt = null, session = null, stamp = null, window = true, model = null }) {
   await mkdir(cwd, { recursive: true });
   const cli = await piCli();
   const env = { ...process.env, PI_CODING_AGENT_DIR: piDir };
@@ -339,9 +359,13 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     // « =nom » : ce nom exactement ; les options d'une session se visent par « =nom: ».
     let resumed = await tmux(['has-session', '-t', target]).then(() => true).catch(() => false);
     let restarted = false;
+    let hadWindow = false;
     if (resumed && stamp) {
       const running = await tmux(['show-options', '-t', `${target}:`, '-v', STAMP]).then((r) => r.stdout.trim()).catch(() => '');
       if (running !== stamp) {
+        // Une fenêtre de terminal y était ouverte (la vue d'ensemble, elle, s'y rattache depuis
+        // tmux) : elle se ferme avec la session, on en rouvre une sur le nouveau pi.
+        hadWindow = await tmux(['list-clients', '-t', target, '-F', '#{client_termname}']).then((r) => r.stdout.split('\n').some((term) => term && !/^(tmux|screen)/.test(term)), () => false);
         await closePiSession(session);
         resumed = false;
         restarted = true;
@@ -349,10 +373,10 @@ export async function openPiTerminal({ title, cwd, piDir, prompt = null, session
     }
     if (!resumed) {
       // Un serveur tmux déjà lancé ne reprend pas notre environnement : la variable passe par env.
-      await tmux([...TMUX_SETUP, 'new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, ...capped, process.execPath, cli, ...(restarted ? ['--continue'] : [])]);
+      await tmux([...TMUX_SETUP, 'new-session', '-d', '-s', session, '-c', cwd, 'env', `PI_CODING_AGENT_DIR=${piDir}`, ...capped, process.execPath, cli, ...(restarted ? ['--continue'] : []), ...(model ? ['--model', `harn/${model}`] : [])]);
       if (stamp) await tmux(['set-option', '-t', `${target}:`, STAMP, stamp]).catch(() => {});
     }
-    if (window && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
+    if ((window || hadWindow) && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) spawn('x-terminal-emulator', ['-e', 'tmux', '-L', TMUX_SERVER, 'attach', '-t', target], { detached: true, stdio: 'ignore' }).unref();
     return { resumed, restarted, session };
   }
   // Dossier et variable passent par la commande elle-même : un terminal déjà ouvert qui reprend la

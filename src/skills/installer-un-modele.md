@@ -60,6 +60,9 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
   Il s'installe quand même si son fichier est déjà sur la machine (`alreadyOnDisk` dans
   `inspect_model_repo`) : même procédure, `install_model` reprend le fichier sans rien télécharger.
   Sinon, dis à l'utilisateur de placer le fichier dans le dossier `models/` de Harn.
+- Un Flash-Next (`engine: strata` dans `inspect_model_repo`) est servi par Strata : bien plus
+  rapide que llama.cpp sur ces modèles, mais sans vision par cette voie. Dis-le si l'utilisateur
+  comptait sur les images.
 - Un outil de Harn qui échoue : rends son message à l'utilisateur et arrête-toi là. N'écris pas de
   script pour lire ou analyser toi-même un fichier de modèle : ils font des dizaines de
   gigaoctets, et un script maladroit remplit la mémoire de la machine.

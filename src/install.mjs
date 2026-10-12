@@ -9,6 +9,7 @@ import { displayName, modelById, MODELS } from './catalog.mjs';
 import { buildEntry, inspectRepo, registerModel, unregisterModel } from './custom-models.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
+import { strataTakes } from './runtimes.mjs';
 import { addEngine, archMissing, canBuild, dropUnusedEngines, enginesFor, engineSheet, ensureEngine, findEngine } from './engines.mjs';
 import { busyWith, withGpu } from './gpu-queue.mjs';
 import { runtimeKind } from './loading.mjs';
@@ -79,8 +80,11 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
 export async function inspectForMachine(url) {
   const report = await inspectRepo(url);
   const hardware = getState().hardware;
+  // Le moteur qui le servira ici : Strata pour un Flash-Next quand il est installé, sinon llama.cpp.
+  const strata = await strataTakes(report.profile);
+  report.engine = strata ? 'strata' : 'llama.cpp';
   report.quants = report.quants.map((quant) => {
-    const entry = buildEntry({ repo: report.repo, quant, profile: report.profile });
+    const entry = buildEntry({ repo: report.repo, quant, profile: report.profile, strata });
     const verdict = assess(entry, hardware);
     return { quant: quant.quant, gigabytes: +(quant.bytes / 1e9).toFixed(1), files: quant.files.length, alreadyOnDisk: quant.files.every((file) => report.local[file.name]), verdict: { fit: verdict.fit, context: verdict.context ?? null, kv: verdict.kv ?? null, tpsAt100k: verdict.tps ?? null, meetsObjective: Boolean(verdict.meetsContext && verdict.meetsSpeed), reasons: verdict.reasons } };
   });
@@ -101,14 +105,17 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     const report = await inspectRepo(url);
     const chosen = report.quants.find((q) => q.quant.toUpperCase() === String(quant).toUpperCase());
     if (!chosen) throw new Error(`Quantification « ${quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}`);
-    const engines = await enginesFor(report.profile?.arch);
-    if (engines && !engines.length) throw new Error(archMissing(report.profile.arch));
-    const projector = mmproj ? report.mmproj.find((m) => m.name === mmproj) : null;
-    if (mmproj && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
+    // Un Flash-Next va sur Strata dès qu'il y est installé : deux à trois fois plus vite que
+    // llama.cpp, qui laisse les experts au processeur.
+    const strata = await strataTakes(report.profile);
+    const projector = mmproj && !strata ? report.mmproj.find((m) => m.name === mmproj) : null;
+    if (mmproj && !strata && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
     // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.
+    const engines = strata ? null : await enginesFor(report.profile?.arch);
+    if (engines && !engines.length) throw new Error(archMissing(report.profile.arch));
     const { id } = buildEntry({ repo: report.repo, quant: chosen, profile: report.profile });
     if (getState().models[id]?.installedAt) throw new Error(`Ce modèle est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
-    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, sampling });
+    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, sampling, strata });
     const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
     await refreshHardware();
     const onDisk = chosen.files.every((file) => report.local[file.name]);
@@ -179,6 +186,8 @@ export async function deleteModel(modelId) {
       await remove(path.join(dataDir, 'mtp'));
     }
     if (configPath) { await rm(configPath, { force: true }); await rm(configPath.replace(/\.json$/, '.log'), { force: true }); }
+    // Un Flash-Next ajouté garde ses fichiers dans son propre dossier, comme les modèles de llama.cpp.
+    if (model.strataPack) await remove(path.join(DIRS.models, modelId));
   } else {
     await remove(path.join(DIRS.models, modelId));
   }

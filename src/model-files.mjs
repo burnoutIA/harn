@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installStrata } from './runtimes.mjs';
+import { installStrata, installStrataPack } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -22,11 +22,12 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   update((s) => { s.models[model.id] = { ...(s.models[model.id] ?? {}), installing: true, error: null, detail: 'Recherche de fichiers déjà présents' }; });
   const files = model.files.map((file) => ({ repo: model.repo, ...file }));
   if (model.mmproj) files.push(model.mmproj);
+  if (model.mtpDraft) files.push(model.mtpDraft);
   const paths = {};
   try {
     // Avant de télécharger : le fichier est peut-être déjà sur la machine (même nom, même taille).
-    const local = await findLocalCopies(model.engine === 'strata' ? model.files : files);
-    if (model.engine === 'strata') {
+    const local = await findLocalCopies(model.engine === 'strata' && !model.strataPack ? model.files : files);
+    if (model.engine === 'strata' && !model.strataPack) {
       const context = assess(model, getState().hardware).context;
       const shards = model.files.map((file) => local[file.name]).filter(Boolean);
       const ggufDir = forcedDir ?? (shards.length === model.files.length && new Set(shards.map((p) => path.dirname(p))).size === 1 ? path.dirname(shards[0]) : null);
@@ -44,6 +45,12 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
           note(`Téléchargement de ${file.name}`);
           await downloadFile(model, file);
         }
+      }
+      // Un Flash-Next ajouté depuis Hugging Face : Strata le prépare à partir de ces fichiers.
+      if (model.strataPack) {
+        note('Préparation du modèle pour Strata');
+        const first = paths[model.files[0].name] ?? path.join(dir, model.files[0].name);
+        await installStrataPack(model, first, assess(model, getState().hardware).context, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
       }
     }
   } catch (error) {

@@ -103,7 +103,8 @@ function strataTps(model, profile, hardware) {
   // Experts relus depuis le SSD : pénalité estimée, pas encore mesurée (les 50 tok/s d'une 5060 Ti
   // 16 Go + 32 Go, pris d'abord pour de l'IQ2_XS, étaient le Coder IQ1_M, qui tient en RAM).
   const ssd = strataMemory(model, hardware.ramGiB, hardware.vramGiB) === 'ssd' ? 0.88 : 1;
-  return STRATA_REF[model.strataModel] * bandwidth * cache * ssd;
+  // Un Flash-Next ajouté (pack) : pas de référence publiée, on part du plus lourd des trois.
+  return (STRATA_REF[model.strataModel] ?? 34) * bandwidth * cache * ssd;
 }
 
 // Où vivent les experts Strata, avec les règles de son installeur (setup.py, mode faible RAM) :

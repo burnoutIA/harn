@@ -41,6 +41,11 @@ function fakeTelegram(updates, harn = []) {
       return { ok: !String(url).includes('perdu'), status: 404, arrayBuffer: async () => Buffer.from('contenu du fichier') };
     }
     const method = String(url).split('/').pop();
+    // Un fichier envoyé : un formulaire, pas du JSON.
+    if (body instanceof FormData) {
+      calls.push([method, { chat_id: Number(body.get('chat_id')), file: (body.get('photo') ?? body.get('document')).name }]);
+      return { json: async () => ({ ok: true, result: true }) };
+    }
     const params = JSON.parse(body);
     calls.push([method, params]);
     let result = true;
@@ -174,4 +179,21 @@ test('un modèle qui ne voit pas reçoit le chemin de l’image, pas l’image',
   pi.emit('session_shutdown');
   assert.equal(typeof pi.sent[0][0], 'string');
   assert.match(pi.sent[0][0], /photo(-\d+)?\.jpg .*ne sait pas voir/);
+});
+
+test('une image produite par l’agent part dans le chat de la personne', async () => {
+  const calls = fakeTelegram([message(40, 'dessine un chat')]);
+  const pi = fakePi();
+  (await load())(pi);
+  pi.emit('session_start');
+  await settle();
+  const made = path.join(process.env.HARN_HOME, 'chat.png');
+  writeFileSync(made, 'image');
+  writeFileSync(path.join(process.env.HARN_HOME, 'notes.pdf'), 'document');
+  // L'extension image-gen passe par l'objet partagé, sans connaître le bot.
+  globalThis.__harnTelegram.sendFile(made);
+  globalThis.__harnTelegram.sendFile(path.join(process.env.HARN_HOME, 'notes.pdf'));
+  await settle();
+  pi.emit('session_shutdown');
+  assert.deepEqual(calls.filter(([method]) => /^send(Photo|Document)$/.test(method)), [['sendPhoto', { chat_id: OWNER, file: 'chat.png' }], ['sendDocument', { chat_id: OWNER, file: 'notes.pdf' }]]);
 });

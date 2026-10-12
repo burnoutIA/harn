@@ -6,5 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.HARN_HOME = mkdtempSync(path.join(os.tmpdir(), 'harn-test-'));
+process.env.HARN_TMUX = `harn-test-${process.pid}`;
 process.env.HARN_ENGINE_PORT = String(20_000 + Math.floor(Math.random() * 20_000));
 process.env.HARN_STRATA_PORT = String(Number(process.env.HARN_ENGINE_PORT) + 1);

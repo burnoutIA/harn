@@ -53,6 +53,10 @@ Avec lui, un agent tourne sans fenêtre, survit à la fermeture de son terminal,
 rouvre le même au lieu d'en lancer un second. Sans lui, chaque « Ouvrir » lance un nouveau pi dans
 une nouvelle fenêtre, et Harn ne sait pas dire si un agent est en marche.
 
+Pour copier du texte depuis pi (sélection à la souris, commande `/copy`), il lui faut l'outil de
+presse-papiers du bureau : `sudo apt install wl-clipboard` sous Wayland, `xclip` sous X11. Sans
+lui rien n'est copié ; l'application le signale dans ses vérifications.
+
 Harn interroge GitHub (versions des moteurs, recherche d'un moteur pour une architecture
 nouvelle, mises à jour). Sans compte, GitHub limite à 60 requêtes par heure ; un jeton sans
 aucune permission (github.com → Settings → Developer settings → Fine-grained token, accès
@@ -88,6 +92,13 @@ Hugging Face, Documents, Téléchargements) est repris tel quel, sans téléchar
 la façon d'installer un dépôt à accès restreint (`gated`), que Harn ne peut pas télécharger faute
 de jeton Hugging Face : copier le fichier dans `models/`, puis donner l'adresse du dépôt. Harn
 lit alors l'architecture dans le fichier local.
+
+Un Flash-Next (architecture `qwen4exp`) ajouté ainsi va sur Strata et non sur llama.cpp, dès que
+Strata est déjà sur la machine (un Flash-Next du catalogue l'apporte, avec sa tête MTP). Strata
+prépare un « pack » à côté des fichiers, sans les réécrire. Mesuré sur une RTX 3090 avec
+l'Uncensored d'OrcaRouter en IQ4_XS (97 Go) : 69 tok/s à 131k sous Strata, contre 34 sous
+llama.cpp, qui laisse les experts au processeur. Pas de vision par cette voie pour l'instant.
+Sans Strata, le modèle s'installe sous llama.cpp, avec sa tête MTP à part si le dépôt en livre une.
 
 ## Les réglages : des a priori par carte, puis la mesure
 
@@ -152,7 +163,7 @@ data/agents/<id>/pi-agent/sessions/           ses conversations
 ```
 
 - **Créer** : le champ « Prénom de la personne » en haut de la vue, puis « Créer un agent ».
-- **Cases** : shell, outils de Harn, recherche web, mémoire, lancer avec Harn. Un nouvel agent n'a
+- **Cases** : shell, outils de Harn, recherche web, mémoire, images, lancer avec Harn. Un nouvel agent n'a
   ni shell ni outils de Harn : on coche ce dont il a besoin.
 - **Mémoire** : l'agent note lui-même ce qu'il juge durable et le relit au début de chaque
   conversation (6 000 caractères au plus, modifiables dans la fiche).
@@ -176,6 +187,29 @@ Sous Linux avec tmux :
   chacun. La souris choisit le panneau ; un agent qui démarre la rejoint ; la fermer n'arrête
   personne.
 - Supprimer un agent arrête son pi et efface tout son dossier.
+
+## Images
+
+Un agent dont la case « Images » est cochée a un outil `generate_image` : il génère une image à
+partir d'une description, ou retouche une image de son dossier de travail. Aucune interface à
+part : Harn fait tourner [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+en coulisses, comme llama.cpp pour le texte, et l'installe avec le premier modèle d'images.
+
+Vue Modèles, section Images :
+
+| Modèle | À télécharger | Sur une RTX 3090 (1024 × 1024) |
+|---|---|---|
+| FLUX.2 klein 4B (Apache-2.0) | 8,9 Go | ~15 s |
+| Qwen-Image 2.1 Uncensored (licence Qwen Research, non commercial) | 18,2 Go | ~85 s |
+
+- La carte graphique ne tient pas les deux : le temps d'une image, le modèle de texte est
+  déchargé, puis rechargé. Une requête qui arrive entre-temps attend, elle n'est pas refusée.
+- L'image est rangée dans `images/` du dossier de travail de l'agent, montrée au modèle quand il
+  sait voir, et envoyée dans le chat Telegram de la personne si l'agent a un bot.
+- Les images à retoucher ne sont lues que dans le dossier de travail de l'agent (les fichiers
+  reçus par Telegram sont dans `files/`).
+- Moteur : build CUDA 12 sous Windows avec une NVIDIA, Vulkan ailleurs (aucun build CUDA n'est
+  publié pour Linux), CPU sans carte graphique.
 
 ## Sécurité de l'inférence
 
@@ -254,7 +288,8 @@ src/gateway.mjs    endpoint /v1, bascule de modèle, mesure des requêtes
 src/metrics.mjs    direct : GPU, débit, historique
 src/pi.mjs         installation, configuration et lancement de pi (terminal, tmux, vue d'ensemble)
 src/agents.mjs     les agents : fiche, dossier, lancement, demande de la carte
-src/pi-extensions/ extensions pi fournies par Harn : ctx-optimizer, telegram-follow, agent-memory
+src/images.mjs     génération d'images : moteur, modèles, partage de la carte avec le texte
+src/pi-extensions/ extensions pi fournies par Harn : ctx-optimizer, telegram-follow, agent-memory, image-gen
 src/harn-mcp.mjs   les outils de Harn donnés à pi (analyser, installer, mesurer, tester)
 src/skills/        les marches à suivre de pi : installer un modèle, dépanner une installation
 public/            interface

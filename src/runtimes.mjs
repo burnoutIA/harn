@@ -297,3 +297,45 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
   update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
   return info;
 }
+
+// ── Strata pour un Flash-Next ajouté depuis Hugging Face ────────
+// L'installeur de Strata ne connaît que ses propres familles. Pour un autre GGUF de la même
+// architecture, son outil iq_pack prépare un « pack » à côté des fichiers d'origine (qui ne sont
+// pas réécrits), et le moteur se lance avec une config calquée sur celle d'un modèle déjà installé.
+// Il faut donc qu'un Strata tourne déjà ici : moteur, Python, tête MTP (docs/ORCA.md de Strata).
+const STRATA_ARCH = 'qwen4exp';
+const ggufPy = (dir) => path.join(dir, 'third_party', 'llama.cpp', 'gguf-py');
+
+export async function strataBase() {
+  for (const runtime of Object.values(getState().runtimes ?? {})) {
+    if (runtime?.kind !== 'strata' || runtime.pack) continue;
+    const ready = await Promise.all([runtime.python, path.join(runtime.dir, runtime.config), path.join(runtime.dir, 'tools', 'iq_pack.py'), ggufPy(runtime.dir), path.join(DIRS.models, 'strata-data', 'mtp', 'rt')].map((file) => stat(file).then(() => true, () => false)));
+    if (ready.every(Boolean)) return runtime;
+  }
+  return null;
+}
+export const strataTakes = async (profile) => profile?.arch === STRATA_ARCH && Boolean(await strataBase());
+
+const setFlag = (args, flag, value) => { const copy = [...args]; const at = copy.indexOf(flag); if (at >= 0) copy[at + 1] = value; else copy.push(flag, value); return copy; };
+
+// firstShard : le premier fichier du modèle, là où il est vraiment (les autres sont trouvés par leur nom).
+export async function installStrataPack(model, firstShard, contextSize, onLog = () => {}) {
+  const base = await strataBase();
+  if (!base) throw new Error('Strata n’est pas installé sur cette machine : installez d’abord un Flash-Next du catalogue (il apporte le moteur et sa tête MTP)');
+  const pack = path.join(DIRS.models, 'strata-data', 'packs', model.id);
+  onLog(`iq_pack.py --gguf ${firstShard} --out ${pack} --compat-bf16`);
+  await runLogged(base.python, [path.join('tools', 'iq_pack.py'), '--gguf', firstShard, '--out', pack, '--compat-bf16'], { cwd: base.dir, env: { ...process.env, STRATA_GGUF_PY: ggufPy(base.dir) }, timeout: 60 * 60_000 }, onLog);
+  if (!(await stat(path.join(pack, 'tokenizer', 'vocab.json')).catch(() => null))) throw new Error('Strata a préparé le modèle sans son tokenizer : ce fichier n’est pas pris en charge');
+
+  const template = JSON.parse((await readFile(path.join(base.dir, base.config), 'utf8')).replace(/^\uFEFF/, ''));
+  let args = template.args.filter((arg) => arg !== '--vision');
+  // Le fichier porte aussi la table PLE (premier fragment), et son propre profil d'experts n'existe
+  // pas : celui du modèle d'origine sert de point de départ au cache de la carte.
+  for (const [flag, value] of [['--pack', pack], ['--native', firstShard], ['--ple-gguf', firstShard], ['--expert-profile', path.join(base.dir, 'data', 'expert-profile.bin')], ['--max-context', String(contextSize)]]) args = setFlag(args, flag, value);
+  const name = `strata-pack-${model.id}.json`;
+  const { vision, ...rest } = template;
+  await writeFile(path.join(base.dir, name), JSON.stringify({ ...rest, args, tokenizer: path.join(pack, 'tokenizer'), model_name: model.id, log: path.join(base.dir, name.replace(/\.json$/, '.log')) }, null, 2));
+  const info = { kind: 'strata', pack: true, commit: base.commit, dir: base.dir, config: name, python: base.python, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
+  return info;
+}

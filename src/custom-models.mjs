@@ -30,6 +30,7 @@ export function parseRepo(input) {
 }
 
 const QUANT = /(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_K(?:_[A-Z]+)?|Q\d_\d|MXFP4(?:_MOE)?|NVFP4|BF16|F16|F32|TQ\d_\d|PQ\d_\d|PTQ\d_\d))/i;
+const MTP_DRAFT = /mtp[-_]?draft/i;
 const SHARD = /-(\d{5})-of-(\d{5})\.gguf$/i;
 
 // Tout ce qu'il faut pour choisir : fichiers regroupés par quantification (fragments réunis),
@@ -43,9 +44,12 @@ export async function inspectRepo(input) {
   ]);
   const files = tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path));
   const mmproj = files.filter((f) => /mmproj/i.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
+  // La tête MTP livrée dans un fichier à part (« …-MTP-draft.gguf ») : les poids ne la contiennent
+  // pas, le moteur la charge comme brouillon de spéculation, quelle que soit la quantification.
+  const drafts = files.filter((f) => MTP_DRAFT.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
   const groups = new Map();
   // Les têtes MTP et brouillons de spéculation sont des fichiers annexes, pas des quantifications.
-  for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path) && !/(^|\/)(mtp|draft|dflash)[-_]/i.test(f.path))) {
+  for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path) && !MTP_DRAFT.test(f.path) && !/(^|\/)(mtp|draft|dflash)[-_]/i.test(f.path))) {
     const base = file.path.replace(SHARD, '.gguf');
     const quant = (path.basename(base).match(QUANT)?.[1] ?? path.basename(base, '.gguf')).toUpperCase();
     const group = groups.get(base) ?? { quant, files: [], bytes: 0 };
@@ -62,8 +66,10 @@ export async function inspectRepo(input) {
   const sample = quants[0].files[0];
   let local = {};
   const metadata = await readGgufMetadata(`${HF}/${repo}/resolve/main/${encodeURIComponent(sample.name).replace(/%2F/g, '/')}`).catch(async (error) => {
-    local = await findLocalCopies(quants.flatMap((q) => q.files));
-    if (local[sample.name]) return readGgufFile(local[sample.name]);
+    local = await findLocalCopies([...quants.flatMap((q) => q.files), ...drafts, ...mmproj], { timeBudgetMs: 6000 });
+    // N'importe quelle quantification déjà là fait l'affaire : son premier fichier porte l'en-tête.
+    const onDisk = quants.map((q) => q.files[0]).find((file) => local[file.name]);
+    if (onDisk) return readGgufFile(local[onDisk.name]);
     if (!info.gated) throw error;
     throw new Error(`Dépôt à accès restreint : Hugging Face refuse de donner ses fichiers sans compte autorisé. Harn sait l’installer si le fichier est déjà sur cette machine : placez ${sample.name} (${(sample.bytes / 1e9).toFixed(1)} Go) dans le dossier models/ de Harn, puis relancez.`);
   });
@@ -79,6 +85,7 @@ export async function inspectRepo(input) {
     profile,
     quants,
     mmproj,
+    mtpDraft: drafts[0] ?? null,
     readmeHints: sampling,
   };
 }
@@ -92,7 +99,8 @@ function normalizeSampling(sampling) {
   return out;
 }
 
-export function buildEntry({ repo, quant, profile, mmproj = null, sampling = null, name = null, tagline = null }) {
+// strata : un Flash-Next que Strata sait servir (voir installStrataPack) plutôt que llama.cpp.
+export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, sampling = null, name = null, tagline = null, strata = false }) {
   const id = `${repo.split('/')[1]}-${quant.quant}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const bytes = quant.bytes;
   const weightsGiB = bytes / 1024 ** 3;
@@ -101,12 +109,13 @@ export function buildEntry({ repo, quant, profile, mmproj = null, sampling = nul
     custom: true,
     addedAt: new Date().toISOString(),
     name: name ?? profile.name ?? repo.split('/')[1],
-    variant: `${quant.quant}${profile.mtp ? ' · MTP' : ''}${profile.experts ? ' · MoE' : ''}`,
+    variant: `${quant.quant}${profile.mtp || mtpDraft ? ' · MTP' : ''}${profile.experts ? ' · MoE' : ''}`,
     tagline: tagline ?? `Ajouté depuis huggingface.co/${repo}.`,
     engine: 'llama',
     repo,
     files: quant.files,
     mmproj: mmproj ? { repo, ...mmproj } : undefined,
+    mtpDraft: mtpDraft ? { repo, ...mtpDraft } : undefined,
     kvBytesPerToken: profile.kvBytesPerToken,
     needs: { vramGiB: 0, ramGiB: Math.ceil(weightsGiB / 2) + 8 },
     fullGpuVramGiB: +(weightsGiB + 3.8).toFixed(1),
@@ -114,14 +123,32 @@ export function buildEntry({ repo, quant, profile, mmproj = null, sampling = nul
     quality: null,
     reasoning: true,
     vision: Boolean(mmproj),
-    mtp: profile.mtp,
+    mtp: profile.mtp || Boolean(mtpDraft),
     moe: profile.experts ? { experts: profile.experts, used: profile.expertsUsed } : null,
     sampling: normalizeSampling({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, ...(sampling ?? {}) }),
     reasoningLevels: ['low', 'medium', 'xhigh'],
     evidence: null,
     profile,
   };
-  return entry;
+  if (!strata) return entry;
+  // Sous Strata : sa propre tête MTP et pas de vision pour l'instant ; les experts (les deux tiers
+  // du fichier environ) vivent en RAM, la carte garde les plus demandés.
+  return {
+    ...entry,
+    variant: `${quant.quant} · Strata`,
+    engine: 'strata',
+    strataModel: `pack-${id}`,
+    strataPack: true,
+    arenaGB: +(bytes / 1e9 * 0.66).toFixed(1),
+    mmproj: undefined,
+    mtpDraft: undefined,
+    vision: false,
+    mtp: true,
+    sparse: true,
+    needs: { vramGiB: 11.5, ramGiB: 48, nvidiaCc: 7.5 },
+    contextByVram: [[11.5, 65536], [20, 131072]],
+    reasoningLevels: ['low', 'medium', 'high'],
+  };
 }
 
 export function registerModel(options) {
