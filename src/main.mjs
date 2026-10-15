@@ -21,6 +21,7 @@ import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
 import { gpuFree, isImageJob } from './gpu-queue.mjs';
+import { watchIdle } from './idle.mjs';
 import { deleteImageModel, generateImage, imagesReport, installImageModel } from './images.mjs';
 import { agentForImages, claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
@@ -476,6 +477,7 @@ async function main() {
     await reapOrphans();
     watchForUpdates();
     watchHub();
+    watchIdle();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
     if (state.lan) {

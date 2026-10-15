@@ -50,7 +50,9 @@ export const IMAGE_MODELS = [
       { role: 'llm', repo: 'Qwen/Qwen3-VL-8B-Instruct-GGUF', name: 'Qwen3VL-8B-Instruct-Q8_0.gguf' },
       { role: 'vision', repo: 'Qwen/Qwen3-VL-8B-Instruct-GGUF', name: 'mmproj-Qwen3VL-8B-Instruct-F16.gguf' },
     ],
-    args: ['--cfg-scale', '6.0', '--sampling-method', 'euler', '--steps', '20'],
+    // CFG 4 / 30 étapes : à 6 / 20, les couleurs saturent et la peau tourne au plastique (surtout
+    // avec un LoRA de visage), pour 50 % de temps en plus.
+    args: ['--cfg-scale', '4.0', '--sampling-method', 'euler', '--steps', '30'],
   },
 ];
 
@@ -200,10 +202,18 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
   const output = path.join(outDir, `${stamp}-${model.id}.png`);
   const chosenSeed = Number.isInteger(seed) && seed >= 0 ? seed : Math.floor(Math.random() * 2 ** 31);
+  // Un dossier lora/ dans le workspace de l'agent est passé au moteur : chaque .safetensors/.gguf/.ckpt
+  // s'applique alors via le prompt, syntaxe <lora:nom:echelle> (comme stable-diffusion-webui). Sans
+  // les chevrons, sd.cpp ignore la mention sans rien dire : on les remet quand le nom existe.
+  const loraDir = path.join(workspace, 'lora');
+  const loraFiles = (await readdir(loraDir).catch(() => [])).filter((name) => /\.(safetensors|gguf|ckpt)$/i.test(name));
+  const loraNames = new Set(loraFiles.map((name) => name.replace(/\.[^.]+$/, '')));
+  const withLoras = text.replace(/(?<![<\w])lora:([\w.-]+):(\d+(?:\.\d+)?)(?!>)/g, (all, name, scale) => (loraNames.has(name) ? `<lora:${name}:${scale}>` : all));
   const args = [
     ...model.files.filter((file) => file.role !== 'vision' || refs.length).flatMap((file) => [FLAGS[file.role], fileOf(model, file.role)]),
     ...model.args,
-    '-p', text, ...(negative ? ['-n', String(negative).slice(0, MAX_PROMPT)] : []),
+    ...(loraFiles.length ? ['--lora-model-dir', loraDir] : []),
+    '-p', withLoras, ...(negative ? ['-n', String(negative).slice(0, MAX_PROMPT)] : []),
     '-W', String(side(width, 1024)), '-H', String(side(height, 1024)),
     '--seed', String(chosenSeed),
     ...refs.flatMap((ref) => ['-r', ref]),

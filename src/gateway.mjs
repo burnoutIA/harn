@@ -1,6 +1,7 @@
 import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders } from './engine.mjs';
+import { engineInUse } from './idle.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { getState } from './state.mjs';
 
@@ -110,6 +111,8 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (busy && busy !== modelId) {
     return sendJson(res, 503, { error: { message: `Harn mesure le modèle « ${busy} » : la carte graphique est occupée. Réessayez dans quelques minutes.` } }, { ...cors, 'Retry-After': '60' });
   }
+  // Le moteur sert jusqu'à la fin de la réponse : pas de déchargement pour inactivité d'ici là.
+  res.once('close', engineInUse());
   if (state.active?.modelId !== modelId || state.active?.status !== 'ready') {
     try { await activate(modelId); } catch (error) { return sendJson(res, 503, { error: { message: error.message } }, cors); }
   }

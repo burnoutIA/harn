@@ -268,7 +268,15 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   return getState().active;
 }
 
-export async function stopEngine() {
+// Deux arrêts demandés ensemble (inactivité, puis une requête qui recharge) n'en font qu'un :
+// le second ne doit pas reprendre comme orphelin le moteur que le premier vient de laisser lancer.
+let stopInFlight = null;
+export function stopEngine() {
+  stopInFlight ??= stopNow().finally(() => { stopInFlight = null; });
+  return stopInFlight;
+}
+
+async function stopNow() {
   if (!child) return stopRelay();
   stopping = true;
   const pid = child.pid;

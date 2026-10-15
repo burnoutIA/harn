@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { MODELS, modelById } from '../src/catalog.mjs';
 import { defaultTuning, startEngine, stopEngine } from '../src/engine.mjs';
 import { setGpuSampler } from '../src/hardware.mjs';
+import { IDLE_MS, engineInUse, unloadIfIdle } from '../src/idle.mjs';
 import { DIRS, PORTS } from '../src/paths.mjs';
 import { makePlan } from '../src/planner.mjs';
 import { loadWithHeadroom, tuneModel } from '../src/setup.mjs';
@@ -115,4 +116,17 @@ test('banc : deux bancs lancés ensemble passent l’un après l’autre, profon
   assert.ok(ra.bench.depth?.tokens > 20_000);
   assert.equal(ra.tuning.kv, 'f16');
   assert.ok(ra.bench.arms.some((arm) => arm.stage === 'KV en profondeur'));
+});
+
+test('inactivité : le modèle est déchargé après dix minutes sans requête, pas pendant une réponse', LIMIT, async () => {
+  const model = addModel('t-idle', { tps: 80 });
+  await loadWithHeadroom(model, defaultTuning(model, 32768, HARDWARE));
+  assert.equal(await unloadIfIdle(Date.now() + IDLE_MS - 60_000), false, 'déchargé trop tôt');
+  const release = engineInUse();
+  assert.equal(await unloadIfIdle(Date.now() + 2 * IDLE_MS), false, 'déchargé pendant une réponse');
+  release();
+  assert.equal(await unloadIfIdle(Date.now() + IDLE_MS - 60_000), false, 'le délai repart de la fin de la réponse');
+  assert.equal(await unloadIfIdle(Date.now() + IDLE_MS + 60_000), true);
+  assert.equal(getState().active.status, 'stopped');
+  assert.ok(!getState().active.unloadedByUser, 'un déchargement automatique ne vaut pas un choix de l’utilisateur');
 });

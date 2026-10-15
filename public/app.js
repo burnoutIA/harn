@@ -1141,7 +1141,7 @@ function agentCard(agent) {
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
       <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
       <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
-      <label class="field"><span>Mémoire (${fr(agent.memory.length)} / ${fr(agent.memoryMax)} caractères)</span><textarea class="memory" name="memory" maxlength="${agent.memoryMax}" spellcheck="false" placeholder="Vide : l’agent n’a encore rien noté.">${esc(agent.memory)}</textarea></label>
+      <label class="field"><span>Mémoire (${fr(agent.memory.length)} / ${fr(agent.memoryMax)} caractères)</span><textarea class="memory" name="memoryNotes" maxlength="${agent.memoryMax}" spellcheck="false" placeholder="Vide : l’agent n’a encore rien noté.">${esc(agent.memory)}</textarea></label>
       <div class="telegram"><h4>Telegram</h4>
         <label class="field"><span>Identifiant Telegram de la personne</span><input type="text" name="tgOwner" inputmode="numeric" value="${esc(agent.telegram?.ownerId ?? '')}" placeholder="Le nombre donné par @userinfobot" autocomplete="off"></label>
         <label class="field"><span>Jeton du bot</span><input type="password" name="tgToken" placeholder="${agent.telegram ? 'Enregistré · laisser vide pour le garder' : '123456:ABC…, donné par @BotFather'}" autocomplete="new-password"></label>
@@ -1183,7 +1183,7 @@ async function saveAgent(form) {
   // La mémoire n'est renvoyée que si elle a été retouchée ici : l'agent a pu y écrire depuis
   // l'affichage, et l'ancienne copie de l'écran ne doit pas écraser ses notes.
   const shown = agents.find((a) => a.id === form.dataset.id)?.memory ?? '';
-  const memory = data.get('memory').replace(/\r\n/g, '\n');
+  const memory = data.get('memoryNotes').replace(/\r\n/g, '\n');
   const saved = await post(`/api/agents/${form.dataset.id}`, {
     name: data.get('name'),
     model: data.get('model') || null,

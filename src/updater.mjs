@@ -17,7 +17,7 @@ import { extract } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 const run = promisify(execFile);
-const REPO = 'xavier-egoneau/harn';
+const REPO = 'burnoutIA/harn';
 // main : la version publiée. develop porte le travail en cours et n'est jamais proposé.
 const BRANCH = 'main';
 const VERSION_FILE = path.join(DIRS.data, 'app-version.json');
