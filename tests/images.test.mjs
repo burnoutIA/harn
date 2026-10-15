@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { agentForImages, createAgent, updateAgent } from '../src/agents.mjs';
-import { IMAGE_MODELS, generateImage, imagesReport } from '../src/images.mjs';
+import { IMAGE_MODELS, chooseImageModel, generateImage, imagesReport } from '../src/images.mjs';
 import { loadState, update } from '../src/state.mjs';
 
 await loadState();
@@ -38,8 +38,29 @@ test('seul un agent dont la case Images est cochée peut en demander', async () 
   const agent = await createAgent({ name: 'Peintre' });
   await assert.rejects(agentForImages(agent.id), { status: 403 });
   await updateAgent(agent.id, { options: { images: true } });
-  assert.deepEqual(await agentForImages(agent.id), { who: 'Peintre', workspace: agent.workspace });
+  assert.deepEqual(await agentForImages(agent.id), { who: 'Peintre', workspace: agent.workspace, preferred: null, loraNotes: {} });
   await assert.rejects(agentForImages('inconnu'), { status: 404 });
+  // Son modèle d'images : un modèle connu de Harn, ou rien (le premier installé).
+  await updateAgent(agent.id, { imageModel: 'qwen-image-2-1-uc' });
+  assert.equal((await agentForImages(agent.id)).preferred, 'qwen-image-2-1-uc');
+  await assert.rejects(updateAgent(agent.id, { imageModel: 'pas-un-modele' }), { status: 400 });
+  await updateAgent(agent.id, { imageModel: null });
+  assert.equal((await agentForImages(agent.id)).preferred, null);
+});
+
+test('le modèle de l’agent sert quand il n’en demande pas un précis ; une retouche va à un modèle qui sait', () => {
+  const fast = { id: 'fast', edit: false };
+  const editor = { id: 'editor', edit: true };
+  const ready = [editor, fast];
+  assert.equal(chooseImageModel(ready).id, 'editor');
+  assert.equal(chooseImageModel(ready, { preferred: 'fast' }).id, 'fast');
+  assert.equal(chooseImageModel(ready, { preferred: 'fast', editing: true }).id, 'editor');
+  assert.equal(chooseImageModel(ready, { preferred: 'fast', wanted: 'editor' }).id, 'editor');
+  // Demandé explicitement, il est pris tel quel : le refus de retoucher vient ensuite.
+  assert.equal(chooseImageModel(ready, { wanted: 'fast', editing: true }).id, 'fast');
+  assert.equal(chooseImageModel(ready, { wanted: 'absent' }), null);
+  // Le modèle de l'agent a été désinstallé : le premier installé.
+  assert.equal(chooseImageModel([fast], { preferred: 'editor' }).id, 'fast');
 });
 
 test('un modèle ajouté depuis Hugging Face rejoint la liste ; le supprimer garde les fichiers partagés encore utilisés', async () => {
@@ -69,4 +90,50 @@ test('un modèle ajouté depuis Hugging Face rejoint la liste ; le supprimer gar
   assert.ok(!imagesReport().models.some((m) => m.id === 'za'));
   await deleteImageModel('zb');
   assert.ok(!existsSync(shared));
+});
+
+// Un faux LoRA : un en-tête safetensors avec ses métadonnées, sans poids.
+function fakeLora(file, metadata) {
+  const header = Buffer.from(JSON.stringify({ __metadata__: metadata }));
+  const size = Buffer.alloc(8);
+  size.writeBigUInt64LE(BigInt(header.length));
+  writeFileSync(file, Buffer.concat([size, header]));
+}
+
+test('les LoRA de l’agent : famille lue dans le fichier, modèle compatible choisi, refus clairs sinon', async () => {
+  const { listLoras } = await import('../src/loras.mjs');
+  const ws = path.join(process.env.HARN_HOME, 'workspace-loras');
+  mkdirSync(path.join(ws, 'lora'), { recursive: true });
+  fakeLora(path.join(ws, 'lora', 'visage.safetensors'), { ss_base_model_version: 'qwen_image_2', name: 'visage' });
+  fakeLora(path.join(ws, 'lora', 'style.safetensors'), { 'modelspec.architecture': 'flux-2-klein-4b/lora' });
+  writeFileSync(path.join(ws, 'lora', 'notes.txt'), 'pas un LoRA');
+  const loras = await listLoras(ws);
+  assert.deepEqual(loras.map((l) => [l.name, l.arch]), [['style', 'flux2-klein-4b'], ['visage', 'qwen-image-2.1']]);
+
+  update((s) => { s.images = { models: { 'flux2-klein-4b': { installedAt: 'x' } } }; });
+  await assert.rejects(generateImage({ workspace: ws, prompt: 'un chat <lora:absent:1>' }), { status: 400, message: /LoRA introuvable : absent.*style, visage/ });
+  // Seul FLUX.2 klein est installé : le LoRA Qwen-Image n'a pas de modèle compatible.
+  await assert.rejects(generateImage({ workspace: ws, prompt: 'a photo of me lora:visage:1' }), { status: 409, message: /fait pour Qwen-Image 2.1/ });
+  await assert.rejects(generateImage({ workspace: ws, prompt: 'x <lora:visage:1> <lora:style:1>' }), { status: 400, message: /un seul réseau/ });
+  update((s) => { s.images = { models: { 'flux2-klein-4b': { installedAt: 'x' }, 'qwen-image-2-1-uc': { installedAt: 'x' } } }; });
+  await assert.rejects(generateImage({ workspace: ws, prompt: 'x <lora:visage:1>', model: 'flux2-klein-4b' }), { status: 400, message: /pas pour FLUX.2 klein 4B.*qwen-image-2-1-uc/ });
+  // Sans modèle demandé, celui de la bonne famille est pris, même si l'agent préfère l'autre.
+  const ready = IMAGE_MODELS;
+  assert.equal(chooseImageModel(ready, { preferred: 'flux2-klein-4b', arch: 'qwen-image-2.1' }).id, 'qwen-image-2-1-uc');
+  assert.equal(chooseImageModel(ready, { arch: 'z-image' }), null);
+});
+
+test('la fiche dit ce que représente chaque LoRA ; la note suit le LoRA et part avec lui', async () => {
+  const { deleteAgentLora } = await import('../src/agents.mjs');
+  const agent = await createAgent({ name: 'Modèle' });
+  mkdirSync(path.join(agent.workspace, 'lora'), { recursive: true });
+  fakeLora(path.join(agent.workspace, 'lora', 'moi.safetensors'), { ss_base_model_version: 'qwen_image_2', 'modelspec.trigger_phrase': 'ohwx man' });
+  const saved = await updateAgent(agent.id, { options: { images: true }, loraNotes: { moi: '  Mon visage.  ' } });
+  assert.deepEqual(saved.loras.map((l) => [l.name, l.trigger, l.note]), [['moi', 'ohwx man', 'Mon visage.']]);
+  assert.deepEqual((await agentForImages(agent.id)).loraNotes, { moi: 'Mon visage.' });
+  await assert.rejects(updateAgent(agent.id, { loraNotes: { moi: 'x'.repeat(401) } }), { status: 400 });
+  await assert.rejects(deleteAgentLora(agent.id, '../agent.json'), { status: 400 });
+  const after = await deleteAgentLora(agent.id, 'moi.safetensors');
+  assert.deepEqual(after.loras, []);
+  assert.deepEqual((await agentForImages(agent.id)).loraNotes, {});
 });

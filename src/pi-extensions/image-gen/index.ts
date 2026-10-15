@@ -16,6 +16,7 @@ import { Type } from "typebox";
 interface Config {
   harn: string;
   agent: string | null;
+  imageModel?: string | null;
 }
 
 function readConfig(): Config | null {
@@ -34,7 +35,10 @@ export default function (pi: ExtensionAPI) {
   if (!config) return;
 
   // Les modèles installés, lus à chaque conversation : la description de l'outil les nomme.
-  let models: { id: string; name: string; tagline: string; edit?: boolean }[] = [];
+  let models: { id: string; name: string; tagline: string; edit?: boolean; arch?: string | null }[] = [];
+  // Ses LoRA (dossier lora/ de son workspace) : relus avant chaque tour, un LoRA peut être
+  // entraîné ou ajouté en cours de conversation.
+  let loras: { name: string; arch: string | null; archName: string | null; trigger?: string | null; note?: string | null }[] = [];
   let vision = false;
   async function refresh() {
     try {
@@ -43,7 +47,22 @@ export default function (pi: ExtensionAPI) {
     } catch {
       models = [];
     }
+    await refreshLoras();
   }
+  async function refreshLoras() {
+    if (!config!.agent) return;
+    try {
+      const res = await fetch(`${config!.harn}/api/images/loras?agent=${encodeURIComponent(config!.agent)}`);
+      loras = res.ok ? ((await res.json()).loras ?? []) : [];
+    } catch {
+      loras = [];
+    }
+  }
+  const lorasText = () => {
+    if (!loras.length) return "";
+    const fit = (arch: string | null) => models.filter((m: any) => m.arch === arch).map((m) => m.id);
+    return ` LoRAs in your lora/ folder, applied by writing <lora:NAME:SCALE> (with the angle brackets) in the prompt, scale 0.8 to 1.2: ${loras.map((l) => `${l.name} (${l.archName ? `made for ${l.archName}${fit(l.arch).length ? `, use with ${fit(l.arch).join(" or ")}` : ", no compatible model installed"}` : "model family unknown"}${l.trigger ? `; trigger words: "${l.trigger}"` : ""}${l.note ? `; what it is and how to use it, from the person: ${l.note}` : ""})`).join("; ")}. A LoRA only works with the model family it was trained on: omit \`model\` and Harn picks a compatible one.`;
+  };
   pi.on("session_start", async (_event, ctx: any) => {
     vision = sees(ctx?.model);
     await refresh();
@@ -51,11 +70,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("model_select", (event: any) => {
     vision = sees(event?.model);
   });
-  pi.on("before_agent_start", (event: any) => {
+  pi.on("before_agent_start", async (event: any) => {
+    await refreshLoras();
+    const preferred = models.find((m) => m.id === config!.imageModel);
     event.systemPromptOptions.sections = {
       ...(event.systemPromptOptions.sections ?? {}),
       image_generation: models.length
-        ? `You can create images with \`generate_image\`. Image models installed on this machine: ${models.map((m) => `${m.id} (${m.name}: ${m.tagline}${m.edit === false ? " Cannot edit a given image." : ""})`).join("; ")}.`
+        ? `You can create images with \`generate_image\`. Image models installed on this machine: ${models.map((m) => `${m.id} (${m.name}: ${m.tagline}${m.edit === false ? " Cannot edit a given image." : ""})`).join("; ")}.${preferred ? ` Your default image model is ${preferred.id} (${preferred.name}): omit \`model\` to use it; pass another id only when the person asks for that model or the task needs what it cannot do.` : ""}${lorasText()}`
         : "`generate_image` is available, but no image model is installed yet: the user installs one in Harn (Modèles view), or you do it with the Harn tool `install_image_model` if you have it (see `list_image_models`).",
     };
   });
@@ -91,7 +112,8 @@ export default function (pi: ExtensionAPI) {
         const where = shown.startsWith("..") ? made.file : shown;
         // Le chat Telegram de la personne, quand l'agent en a un.
         (globalThis as any).__harnTelegram?.sendFile?.(made.file);
-        const text = `Image saved to ${where} (${made.width}x${made.height}, model ${made.model}, seed ${made.seed}, ${made.seconds} s). The person can see it.`;
+        const warnings = (made.warnings ?? []).length ? ` Warning from the image engine: ${made.warnings.join(" ")}` : "";
+        const text = `Image saved to ${where} (${made.width}x${made.height}, model ${made.model}${made.loras?.length ? `, LoRA ${made.loras.join(", ")}` : ""}, seed ${made.seed}, ${made.seconds} s). The person can see it.${warnings}`;
         const image = vision ? [{ type: "image" as const, data: readFileSync(made.file).toString("base64"), mimeType: "image/png" }] : [];
         return { content: [{ type: "text" as const, text }, ...image], details: undefined, isError: false };
       } catch (error: any) {

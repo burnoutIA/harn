@@ -24,7 +24,8 @@ import { gpuFree, isImageJob } from './gpu-queue.mjs';
 import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
 import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel } from './images.mjs';
-import { agentForImages, claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
+import { listLoras } from './loras.mjs';
+import { agentForImages, claimCard, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
@@ -246,10 +247,15 @@ async function api(req, res, url) {
     const gb = (value) => `${Number(value).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go`;
     try {
       if (parts[2] === 'generate') {
-        const from = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
+        const { loraNotes, ...from } = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
         return json(res, 200, await generateImage({ ...from, model: body.model, prompt: body.prompt, negative: body.negative, width: body.width, height: body.height, seed: body.seed, references: body.references }));
       }
       if (parts[2] === 'inspect') return json(res, 200, await inspectImageRepo(body.url));
+      // Les LoRA d'un agent (son extension image-gen les lit avant chaque tour).
+      if (parts[2] === 'loras' && req.method === 'GET') {
+        const from = await agentForImages(String(url.searchParams.get('agent') ?? ''));
+        return json(res, 200, { loras: await listLoras(from.workspace, from.loraNotes) });
+      }
       // Ajouter un dépôt (fichier de poids choisi, sinon celui conseillé) puis l'installer.
       if (parts[2] === 'add') {
         if (fromOurPage(req)) {
@@ -311,6 +317,7 @@ async function api(req, res, url) {
       if (!parts[3]) return json(res, 200, await updateAgent(parts[2], body));
       if (parts[3] === 'launch') return json(res, 200, await launchAgent(parts[2]));
       if (parts[3] === 'delete') return json(res, 200, await deleteAgent(parts[2]));
+      if (parts[3] === 'loras' && parts[4] && parts[5] === 'delete') return json(res, 200, await deleteAgentLora(parts[2], decodeURIComponent(parts[4])));
     } catch (error) {
       return json(res, error.status ?? 500, { error: error.message });
     }

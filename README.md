@@ -213,6 +213,9 @@ data/agents/<id>/pi-agent/sessions/           ses conversations
 - **Créer** : le champ « Prénom de la personne » en haut de la vue, puis « Créer un agent ».
 - **Cases** : shell, outils de Harn, recherche web, mémoire, images, lancer avec Harn. Un nouvel agent n'a
   ni shell ni outils de Harn : on coche ce dont il a besoin.
+- **Modèle d'images** : celui que l'agent prend quand il ne demande pas un modèle précis (sinon le
+  premier installé). Pour une retouche, si ce modèle ne sait pas retoucher, Harn en prend un qui
+  sait. L'agent peut toujours en demander un autre, à la demande de la personne.
 - **Mémoire** : l'agent note lui-même ce qu'il juge durable et le relit au début de chaque
   conversation (6 000 caractères au plus, modifiables dans la fiche).
 - **Telegram** : un bot par agent. Le jeton vient de @BotFather, l'identifiant de la personne de
@@ -257,7 +260,17 @@ Vue Modèles, section Images :
 - Les images à retoucher ne sont lues que dans le dossier de travail de l'agent (les fichiers
   reçus par Telegram sont dans `files/`).
 - **LoRA** : les `.safetensors`, `.gguf` ou `.ckpt` posés dans `lora/` du dossier de travail de
-  l'agent s'appliquent depuis la description, avec la syntaxe `<lora:nom:echelle>`.
+  l'agent s'appliquent depuis la description, avec la syntaxe `<lora:nom:echelle>`. Ils sont à
+  cet agent seul (un visage, souvent). Harn lit dans chaque fichier la famille pour laquelle il a
+  été entraîné (métadonnées d'ai-toolkit ou de kohya) : sans `model` précisé, il prend un modèle
+  installé de cette famille ; un modèle incompatible, un LoRA absent ou deux LoRA de familles
+  différentes sont refusés avec la raison. L'agent reçoit la liste de ses LoRA à chaque tour, et
+  la fiche de l'agent les montre (supprimer un LoRA s'y fait). Sur la fiche, une note par LoRA
+  dit ce qu'il représente et comment s'en servir (« le visage de Xavier ; commencer par… ») :
+  l'agent la reçoit avec la liste, et le mot déclencheur quand le fichier en porte un
+  (`modelspec.trigger_phrase`). Quand le moteur n'en applique
+  qu'une partie (« Only 320 / 384 LoRA tensors », typique d'un LoRA d'ai-toolkit non converti),
+  l'agent en est averti dans la réponse de `generate_image`.
 - Moteur : build CUDA 12 sous Windows avec une NVIDIA, Vulkan ailleurs (aucun build CUDA n'est
   publié pour Linux), CPU sans carte graphique.
 

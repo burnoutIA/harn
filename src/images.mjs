@@ -7,7 +7,9 @@ import { hfSha256 } from './catalog.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { github } from './github.mjs';
+import { ARCH_NAMES, familyById } from './image-families.mjs';
 import { addedImageModels, forgetImageModel, imageSuggestions } from './image-hub.mjs';
+import { listLoras, loraDirOf, lorasIn } from './loras.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { getLive } from './metrics.mjs';
 import { DIRS } from './paths.mjs';
@@ -86,7 +88,7 @@ export function imagesReport() {
     job: images().job ?? null,
     models: models.map((model) => ({
       id: model.id, name: model.name, tagline: model.tagline, license: model.license, gigabytes: model.gigabytes,
-      family: model.family ?? null, edit: model.edit !== false, custom: Boolean(model.custom), repo: model.repo ?? model.files[0].repo,
+      family: model.family ?? null, arch: archOfModel(model), edit: model.edit !== false, custom: Boolean(model.custom), repo: model.repo ?? model.files[0].repo,
       fits: vram >= model.vramGiB && ram >= (model.ramGiB ?? 0),
       needs: `${model.vramGiB} Go de mémoire graphique`,
       ...(images().models?.[model.id] ?? {}),
@@ -229,15 +231,48 @@ const inside = (dir, file) => { const rel = path.relative(dir, file); return Boo
 
 // workspace : le dossier de travail de qui demande. L'image y est rangée (images/), et les
 // références à retoucher ne sont lues que là.
-export async function generateImage({ workspace, who = 'pi', model: wanted = null, prompt, negative = null, width = 1024, height = 1024, seed = null, references = [] }) {
+// Le réseau de diffusion d'un modèle : un LoRA ne s'applique qu'au sien.
+export const archOfModel = (model) => familyById(model.family)?.arch ?? null;
+
+// Le modèle demandé ; sans demande précise, celui de l'agent (preferred), sinon le premier
+// installé ; pour une retouche, le premier qui sait retoucher si celui-là ne sait pas. arch : le
+// réseau des LoRA cités, seuls les modèles de ce réseau conviennent (null : aucun).
+export function chooseImageModel(ready, { wanted = null, preferred = null, editing = false, arch = null } = {}) {
+  if (wanted) return ready.find((m) => m.id === wanted) ?? null;
+  const pool = arch ? ready.filter((m) => archOfModel(m) === arch) : ready;
+  const fallback = pool.find((m) => m.id === preferred) ?? pool[0] ?? null;
+  if (editing && fallback?.edit === false) return pool.find((m) => m.edit !== false) ?? fallback;
+  return fallback;
+}
+
+// preferred : le modèle d'images de l'agent, pris quand il n'en demande pas un précis.
+export async function generateImage({ workspace, who = 'pi', model: wanted = null, preferred = null, prompt, negative = null, width = 1024, height = 1024, seed = null, references = [] }) {
   const text = String(prompt ?? '').trim();
   if (!text) throw failure(400, 'Il manque la description de l’image (prompt)');
   if (text.length > MAX_PROMPT) throw failure(400, `Description limitée à ${MAX_PROMPT} caractères`);
   const ready = installedModels();
   if (!ready.length) throw failure(409, 'Aucun modèle d’images n’est installé : l’utilisateur en installe un dans Harn, vue Modèles');
-  const model = wanted ? ready.find((m) => m.id === wanted) : ready[0];
-  if (!model) throw failure(404, `Modèle d’images « ${wanted} » non installé. Installés : ${ready.map((m) => m.id).join(', ')}`);
   const refs = [].concat(references ?? []).filter(Boolean).slice(0, 4).map((ref) => path.resolve(workspace, String(ref)));
+  // Les LoRA du dossier lora/ de l'agent s'appliquent depuis la description, syntaxe
+  // <lora:nom:echelle> (comme stable-diffusion-webui). Sans les chevrons, sd.cpp ignore la mention
+  // sans rien dire : on les remet quand le nom existe.
+  const loras = await listLoras(workspace);
+  const byName = new Map(loras.map((lora) => [lora.name, lora]));
+  const withLoras = text.replace(/(?<![<\w])lora:([\w.-]+):(\d+(?:\.\d+)?)(?!>)/g, (all, name, scale) => (byName.has(name) ? `<lora:${name}:${scale}>` : all));
+  const used = [...new Set(lorasIn(withLoras))];
+  const missing = used.filter((name) => !byName.has(name));
+  if (missing.length) throw failure(400, `LoRA introuvable : ${missing.join(', ')}. ${loras.length ? `Dans lora/ : ${loras.map((l) => l.name).join(', ')}` : 'Le dossier lora/ est vide.'}`);
+  const archs = [...new Set(used.map((name) => byName.get(name).arch).filter(Boolean))];
+  if (archs.length > 1) throw failure(400, `Ces LoRA visent des modèles différents (${used.map((name) => `${name} : ${byName.get(name).archName ?? '?'}`).join(', ')}) : un seul réseau par image.`);
+  const arch = archs[0] ?? null;
+  const archName = arch ? ARCH_NAMES[arch] ?? arch : null;
+  const model = chooseImageModel(ready, { wanted, preferred, editing: refs.length > 0, arch });
+  if (!model && arch && !wanted) throw failure(409, `Le LoRA ${used.join(', ')} est fait pour ${archName}, et aucun modèle de cette famille n’est installé : l’utilisateur en installe un dans Harn, vue Modèles.`);
+  if (!model) throw failure(404, `Modèle d’images « ${wanted} » non installé. Installés : ${ready.map((m) => m.id).join(', ')}`);
+  if (arch && archOfModel(model) !== arch) {
+    const fits = ready.filter((m) => archOfModel(m) === arch).map((m) => m.id);
+    throw failure(400, `Le LoRA ${used.join(', ')} est fait pour ${archName}, pas pour ${model.name}.${fits.length ? ` Modèles installés compatibles : ${fits.join(', ')} (ou omets model).` : ' Aucun modèle compatible installé.'}`);
+  }
   if (refs.length && model.edit === false) {
     const editors = ready.filter((m) => m.edit !== false).map((m) => m.id);
     throw failure(400, `${model.name} ne sait pas retoucher une image donnée.${editors.length ? ` Modèles installés qui savent : ${editors.join(', ')}` : ''}`);
@@ -252,19 +287,12 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
   const output = path.join(outDir, `${stamp}-${model.id}.png`);
   const chosenSeed = Number.isInteger(seed) && seed >= 0 ? seed : Math.floor(Math.random() * 2 ** 31);
-  // Un dossier lora/ dans le workspace de l'agent est passé au moteur : chaque .safetensors/.gguf/.ckpt
-  // s'applique alors via le prompt, syntaxe <lora:nom:echelle> (comme stable-diffusion-webui). Sans
-  // les chevrons, sd.cpp ignore la mention sans rien dire : on les remet quand le nom existe.
-  const loraDir = path.join(workspace, 'lora');
-  const loraFiles = (await readdir(loraDir).catch(() => [])).filter((name) => /\.(safetensors|gguf|ckpt)$/i.test(name));
-  const loraNames = new Set(loraFiles.map((name) => name.replace(/\.[^.]+$/, '')));
-  const withLoras = text.replace(/(?<![<\w])lora:([\w.-]+):(\d+(?:\.\d+)?)(?!>)/g, (all, name, scale) => (loraNames.has(name) ? `<lora:${name}:${scale}>` : all));
   const args = [
     ...model.files.filter((file) => file.role !== 'vision' || refs.length).flatMap((file) => [FLAGS[file.role], fileOf(model, file.role)]),
     ...model.args,
     // Le lecteur T5 (9,8 Go) reste sur le processeur quand la carte est petite.
     ...(model.files.some((file) => file.role === 't5xxl') && (getState().hardware?.primary?.vramMiB ?? 0) < 12 * 1024 ? ['--clip-on-cpu'] : []),
-    ...(loraFiles.length ? ['--lora-model-dir', loraDir] : []),
+    ...(used.length ? ['--lora-model-dir', loraDirOf(workspace)] : []),
     '-p', withLoras, ...(negative ? ['-n', String(negative).slice(0, MAX_PROMPT)] : []),
     '-W', String(side(width, 1024)), '-H', String(side(height, 1024)),
     '--seed', String(chosenSeed),
@@ -276,6 +304,7 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
 
   const started = Date.now();
   let before = null;
+  let report = {};
   try {
     await withGpu(`image:${model.id}`, async () => {
       update((s) => { (s.images ??= {}).job = { model: model.id, who, prompt: text.slice(0, 200), startedAt: started }; });
@@ -286,7 +315,7 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
       const active = getState().active;
       before = active?.status === 'ready' || active?.status === 'loading' ? active.modelId : null;
       await stopEngine();
-      await runCli(engine, args);
+      report = await runCli(engine, args);
       if (!(await stat(output).catch(() => null))) throw new Error('Le moteur d’images s’est terminé sans écrire d’image');
     });
   } finally {
@@ -296,21 +325,34 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   }
   const seconds = +((Date.now() - started) / 1000).toFixed(1);
   patch(model.id, { lastSeconds: seconds });
-  return { file: output, model: model.id, width: side(width, 1024), height: side(height, 1024), seed: chosenSeed, seconds };
+  return { file: output, model: model.id, width: side(width, 1024), height: side(height, 1024), seed: chosenSeed, seconds, loras: used, warnings: report.warnings ?? [] };
 }
 
 function runCli(engine, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(engine.cli, args, { env: engineEnv(engine.dir), cwd: engine.dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let tail = '';
-    const keep = (chunk) => { tail = (tail + String(chunk)).slice(-4000); };
+    // Un LoRA appliqué en partie (noms de tenseurs que sd.cpp ne reconnaît pas) ne fait pas
+    // échouer l'image : le moteur le dit seulement dans son journal. On le relève.
+    // Ligne du moteur : « [W] Only (320 / 384) LoRA tensors have been applied, lora_file_path = … ».
+    const warnings = new Set();
+    let pending = '';
+    const keep = (chunk) => {
+      tail = (tail + String(chunk)).slice(-4000);
+      const lines = (pending + String(chunk)).split(/\r?\n/);
+      pending = lines.pop();
+      for (const line of lines) {
+        const m = line.match(/Only \(?(\d+) \/ (\d+)\)? LoRA tensors have been applied(?:, lora_file_path = (\S+))?/);
+        if (m) warnings.add(`LoRA ${m[3] ? path.basename(m[3]).replace(/\.[^.]+$/, '') : ''} appliqué en partie : ${m[1]} tenseurs sur ${m[2]} reconnus par le moteur. Le fichier est sans doute au format d’ai-toolkit et doit être converti pour stable-diffusion.cpp ; la ressemblance sera moindre.`.replace('LoRA  ', 'LoRA '));
+      }
+    };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
     const timer = setTimeout(() => child.kill('SIGKILL'), TIMEOUT_MS);
     child.on('error', (error) => { clearTimeout(timer); reject(error); });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      if (code === 0) return resolve();
+      if (code === 0) return resolve({ warnings: [...warnings] });
       const reason = tail.split(/\r?\n/).filter((line) => /\[E\]|error|failed|out of memory/i.test(line)).pop() ?? tail.trim().split(/\r?\n/).pop() ?? '';
       reject(new Error(`Le moteur d’images s’est arrêté (code ${code}) : ${reason.replace(/\s+---.*$/, '').slice(0, 300)}`));
     });

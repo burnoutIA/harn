@@ -4,6 +4,8 @@ import path from 'node:path';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { getLive } from './metrics.mjs';
+import { imageModelById } from './images.mjs';
+import { deleteLora, listLoras } from './loras.mjs';
 import { closePiSession, configurePiDir, extensionsDigest, joinPiOverview, openPiOverview, openPiTerminal, piSessions } from './pi.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { bus, getState } from './state.mjs';
@@ -18,6 +20,8 @@ const MAX_NAME = 60;
 const MAX_PROMPT = 20_000;
 // La mémoire est jointe au prompt de chaque conversation : ~1 500 tokens au plus.
 const MAX_MEMORY = 6000;
+// Ce que la fiche dit d'un LoRA (ce qu'il représente, comment s'en servir) : envoyé à chaque tour.
+const MAX_LORA_NOTE = 400;
 // Ce qu'un nouvel agent peut faire : le moins possible, on coche ce dont il a besoin.
 // autostart : lancé avec Harn, pour que son bot Telegram réponde sans qu'on y pense.
 // memory : il note lui-même ce qu'il juge durable, et le relit à chaque conversation.
@@ -40,6 +44,13 @@ const telegramLockOf = (id) => path.join(piDirOf(id), 'telegram.lock');
 const memoryFileOf = (id) => path.join(dirOf(id), 'MEMORY.md');
 const memoryConfigOf = (id) => path.join(piDirOf(id), 'memory.json');
 const sessionOf = (id) => `harn-${id}`;
+// Le modèle d'images de l'agent : un modèle connu de Harn (vue Modèles, section Images), ou null
+// pour le premier installé.
+function checkImageModel(id) {
+  if (id === null || id === undefined || id === '') return null;
+  if (!imageModelById(String(id))) throw failure(400, 'Modèle d’images inconnu');
+  return String(id);
+}
 const installed = (modelId) => Boolean(getState().models[modelId]?.installedAt && modelById(modelId));
 
 const defaultPrompt = (name) => `# Consignes de ${name}
@@ -75,6 +86,7 @@ async function describe(agent) {
     memory: await readFile(memoryFileOf(agent.id), 'utf8').catch(() => ''),
     memoryMax: MAX_MEMORY,
     workspace: workspaceOf(agent.id),
+    loras: await listLoras(workspaceOf(agent.id), agent.loraNotes ?? {}),
     modelInstalled: agent.model ? installed(agent.model) : true,
     // Son pi tourne (session tmux vivante). Sans tmux, Harn ne le sait pas : toujours faux.
     running: (await piSessions()).includes(sessionOf(agent.id)),
@@ -137,8 +149,19 @@ export async function updateAgent(id, patch = {}) {
   const agent = await readAgent(id);
   if ('name' in patch) agent.name = checkName(patch.name);
   if ('model' in patch) agent.model = checkModel(patch.model);
+  if ('imageModel' in patch) agent.imageModel = checkImageModel(patch.imageModel);
   for (const key of Object.keys(DEFAULT_OPTIONS)) {
     if (typeof patch.options?.[key] === 'boolean') agent.options[key] = patch.options[key];
+  }
+  // Les notes des LoRA : par nom ; une note vide est retirée.
+  if (patch.loraNotes && typeof patch.loraNotes === 'object') {
+    const notes = { ...(agent.loraNotes ?? {}) };
+    for (const [name, text] of Object.entries(patch.loraNotes)) {
+      const clean = String(text ?? '').trim();
+      if (clean.length > MAX_LORA_NOTE) throw failure(400, `Note du LoRA ${name} limitée à ${MAX_LORA_NOTE} caractères`);
+      if (clean) notes[name] = clean; else delete notes[name];
+    }
+    agent.loraNotes = notes;
   }
   if (patch.telegram) {
     const telegram = checkTelegram(patch.telegram, agent.telegram);
@@ -176,7 +199,7 @@ export async function launchAgent(id, { window = true } = {}) {
   const agent = await readAgent(id);
   if (!getState().pi.installed) throw failure(409, 'pi agent n’est pas encore installé');
   if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
-  const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options, agent: id });
+  const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options, agent: id, imageModel: agent.imageModel ?? null });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
   // Les agents d'avant ce dossier le reçoivent à leur prochain lancement.
   await mkdir(filesOf(id), { recursive: true });
@@ -191,7 +214,7 @@ export async function launchAgent(id, { window = true } = {}) {
   // Changé, son pi est relancé.
   const prompt = await readFile(promptFileOf(id), 'utf8').catch(() => '');
   const { autostart, ...tools } = agent.options;
-  const stamp = createHash('sha256').update(JSON.stringify([LAUNCH_VERSION, agent.model, tools, prompt, agent.telegram ?? null, await extensionsDigest()])).digest('hex').slice(0, 16);
+  const stamp = createHash('sha256').update(JSON.stringify([LAUNCH_VERSION, agent.model, agent.imageModel ?? null, tools, prompt, agent.telegram ?? null, await extensionsDigest()])).digest('hex').slice(0, 16);
   const opened = await openPiTerminal({ title: `${agent.name.replace(/["&|<>^%;]/g, ' ')} · Harn`, cwd: workspaceOf(id), piDir: piDirOf(id), session: sessionOf(id), stamp, window, model: defaultModel });
   if (opened.session && !opened.resumed) await joinPiOverview(overviewPane(agent));
   return { ...opened, model: defaultModel, workspace: workspaceOf(id) };
@@ -201,7 +224,16 @@ export async function launchAgent(id, { window = true } = {}) {
 export async function agentForImages(id) {
   const agent = await readAgent(id);
   if (!agent.options.images) throw failure(403, 'La génération d’images n’est pas cochée pour cet agent');
-  return { who: agent.name, workspace: workspaceOf(id) };
+  return { who: agent.name, workspace: workspaceOf(id), preferred: agent.imageModel ?? null, loraNotes: agent.loraNotes ?? {} };
+}
+
+// Retirer un LoRA de son dossier lora/ (depuis la fenêtre de Harn).
+export async function deleteAgentLora(id, file) {
+  await readAgent(id);
+  await deleteLora(workspaceOf(id), file);
+  const agent = await readAgent(id);
+  if (agent.loraNotes) { delete agent.loraNotes[file.replace(/\.[^.]+$/, '')]; await writeAgent(agent); }
+  return describe(agent);
 }
 
 // Le panneau d'un agent dans la vue d'ensemble : sa session, et son nom en titre.

@@ -837,6 +837,7 @@ async function loadImageCatalog() {
   if (!report?.models) return;
   imageCatalog = report;
   if (view === 'models') renderImageModels();
+  if (view === 'agents') renderAgents();
 }
 const gbFr = (value) => `${fr(value, value < 10 ? 1 : 0)} Go`;
 function imageModelRow(model) {
@@ -1188,6 +1189,22 @@ const AGENT_OPTIONS = [
   ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
 ];
 
+// Ses LoRA : le dossier lora/ de son workspace, à lui seul. Chacun avec la famille de modèles pour
+// laquelle il a été entraîné, et si un modèle de cette famille est installé.
+function loraBlock(agent) {
+  const loras = agent.loras ?? [];
+  const installed = (imageCatalog?.models ?? []).filter((m) => m.installed);
+  const rows = loras.map((l) => {
+    const fit = installed.filter((m) => m.arch === l.arch);
+    const target = l.archName ? `pour ${esc(l.archName)}${fit.length ? '' : ' · aucun modèle de cette famille installé'}` : 'famille inconnue';
+    return `<li><div class="lora-head"><code>&lt;lora:${esc(l.name)}:1&gt;</code><span class="hint">${target} · ${gbFr(l.bytes / 1e9)}${l.trigger ? ` · mot déclencheur « ${esc(l.trigger)} »` : ''}</span>
+      <button class="btn ghost small" type="button" data-action="lora-delete" data-id="${esc(agent.id)}" data-file="${esc(l.file)}" title="Supprimer ce LoRA" aria-label="Supprimer ${esc(l.name)}">${icon.trash}</button></div>
+      <input type="text" name="loraNote:${esc(l.name)}" maxlength="400" value="${esc(l.note ?? '')}" placeholder="Ce qu’il représente et comment s’en servir (ex. le visage de Xavier ; commencer par « a photo of xavier, a man »)" autocomplete="off" spellcheck="false" aria-label="Note du LoRA ${esc(l.name)}"></li>`;
+  }).join('');
+  return `<div class="loras"><span class="field-label">LoRA (dossier <code>lora/</code> de l’agent)</span>
+    ${loras.length ? `<ul>${rows}</ul><p class="hint">À écrire dans la description de l’image. Harn prend un modèle de la bonne famille. L’agent reçoit la liste et vos notes à chaque tour : dites-y ce que chaque LoRA représente.</p>` : '<p class="hint">Aucun. Un fichier .safetensors posé dans <code>lora/</code> s’applique avec &lt;lora:nom:1&gt;.</p>'}</div>`;
+}
+
 function agentCard(agent) {
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelOf(id));
   const models = [
@@ -1195,12 +1212,22 @@ function agentCard(agent) {
     ...(agent.modelInstalled ? [] : [`<option value="${esc(agent.model)}" selected>${esc(agent.model)} (désinstallé)</option>`]),
     ...installed.map((id) => `<option value="${esc(id)}" ${id === agent.model ? 'selected' : ''}>${esc(nameOf(id))} · ${esc(modelOf(id).variant)}</option>`),
   ].join('');
+  // Les modèles d'images installés (lus avec la vue Modèles) ; celui choisi reste affiché s'il a
+  // été désinstallé depuis.
+  const imageModels = (imageCatalog?.models ?? []).filter((m) => m.installed || m.id === agent.imageModel);
+  const imageOptions = [
+    '<option value="">Le premier installé</option>',
+    ...imageModels.map((m) => `<option value="${esc(m.id)}" ${m.id === agent.imageModel ? 'selected' : ''}>${esc(m.name)}${m.installed ? '' : ' (désinstallé)'}</option>`),
+  ].join('');
   return `<section class="card agent"><form data-form="agent-edit" data-id="${esc(agent.id)}">
       <div class="head"><h3>${esc(agent.name)}${agent.running ? ' <span class="live" title="Son pi tourne : il répond sur Telegram, et « Ouvrir » rouvre son terminal">en marche</span>' : ''}</h3>
         <div class="acts"><button class="btn small ghost" type="button" data-action="agent-delete" data-id="${esc(agent.id)}" title="Supprimer cet agent" aria-label="Supprimer cet agent">${icon.trash}</button><button class="btn small primary" type="button" data-action="agent-launch" data-id="${esc(agent.id)}">${icon.terminal} Ouvrir</button></div></div>
       <label class="field"><span>Nom</span><input type="text" name="name" maxlength="60" value="${esc(agent.name)}" autocomplete="off" spellcheck="false"></label>
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
       <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
+      <label class="field"><span>Modèle d’images (case « Images »)</span><select name="imageModel">${imageOptions}</select></label>
+      <p class="hint">Pris quand l’agent ne demande pas un modèle précis. ${imageModels.length ? 'Pour une retouche, s’il ne sait pas retoucher, Harn prend un modèle qui sait.' : 'Aucun modèle d’images installé : la vue Modèles en propose.'}</p>
+      ${loraBlock(agent)}
       <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
       <label class="field"><span>Mémoire (${fr(agent.memory.length)} / ${fr(agent.memoryMax)} caractères)</span><textarea class="memory" name="memoryNotes" maxlength="${agent.memoryMax}" spellcheck="false" placeholder="Vide : l’agent n’a encore rien noté.">${esc(agent.memory)}</textarea></label>
       <div class="telegram"><h4>Telegram</h4>
@@ -1248,10 +1275,12 @@ async function saveAgent(form) {
   const saved = await post(`/api/agents/${form.dataset.id}`, {
     name: data.get('name'),
     model: data.get('model') || null,
+    imageModel: data.get('imageModel') || null,
     prompt: data.get('prompt'),
     telegram: { ownerId: data.get('tgOwner'), token: data.get('tgToken') },
     ...(memory !== shown.replace(/\r\n/g, '\n') ? { memory } : {}),
     options: Object.fromEntries(AGENT_OPTIONS.map(([key]) => [key, data.has(key)])),
+    loraNotes: Object.fromEntries([...data.entries()].filter(([key]) => key.startsWith('loraNote:')).map(([key, value]) => [key.slice(9), value])),
   });
   agents = agents.map((a) => (a.id === saved.id ? saved : a));
   renderAgents();
@@ -1366,7 +1395,7 @@ function render() {
   else if (view === 'models') renderModels();
   else if (view === 'tuning') renderTuning();
   else if (view === 'machine') { renderMachine(); loadDoc(); if (!access) loadAccess(); }
-  else if (view === 'agents') { renderAgents(); loadSystem(); if (!agents) loadAgents(); }
+  else if (view === 'agents') { renderAgents(); loadSystem(); if (!agents) loadAgents(); if (!imageCatalog || imageCatalogKey !== imageKey()) loadImageCatalog(); }
   else renderHome();
 }
 
@@ -1485,6 +1514,13 @@ app.addEventListener('click', async (event) => {
         renderImageModels();
       }
       toast(`${r.name} : installation lancée`);
+    }
+    if (action === 'lora-delete') {
+      if (!confirm(`Supprimer le LoRA ${button.dataset.file} ?\n\nLe fichier est effacé du dossier de l’agent.`)) return;
+      const saved = await post(`/api/agents/${id}/loras/${encodeURIComponent(button.dataset.file)}/delete`);
+      agents = agents.map((a) => (a.id === saved.id ? saved : a));
+      renderAgents();
+      toast('LoRA supprimé');
     }
     if (action === 'image-hub-check') { await post('/api/images/hub/check'); toast('Recherche de modèles d’images sur Hugging Face'); }
     if (action === 'image-hub-dismiss') { await post('/api/images/hub/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }

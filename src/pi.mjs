@@ -56,7 +56,7 @@ const EVERYTHING = { shell: true, harnTools: true, web: true, images: true };
 const NO_SHELL = ['-bash', '-powershell'];
 
 // agent : l'identifiant de l'agent à qui est ce dossier (null pour le pi de test).
-export async function configurePiDir(dir, { preferredModel = null, options = EVERYTHING, agent = null } = {}) {
+export async function configurePiDir(dir, { preferredModel = null, options = EVERYTHING, agent = null, imageModel = null } = {}) {
   const state = getState();
   await mkdir(dir, { recursive: true });
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelById(id));
@@ -106,7 +106,7 @@ export async function configurePiDir(dir, { preferredModel = null, options = EVE
   await configureMcp(dir, options);
   // Lu par l'extension image-gen : sans ce fichier, pas d'outil de génération d'images.
   const imageFile = path.join(dir, 'image.json');
-  if (options.images) await writeFile(imageFile, JSON.stringify({ harn: `http://127.0.0.1:${PORTS.app}`, agent }));
+  if (options.images) await writeFile(imageFile, JSON.stringify({ harn: `http://127.0.0.1:${PORTS.app}`, agent, imageModel }));
   else await rm(imageFile, { force: true });
   return { modelsFile, settingsFile, defaultModel };
 }
