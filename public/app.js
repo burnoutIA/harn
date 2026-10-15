@@ -825,32 +825,80 @@ function hubSection() {
 }
 
 // ── Modèles d'images ───────────────────────────────────────
-// Leur description vient de /api/images (lue une fois) ; l'avancement, de l'état diffusé.
+// Leur description vient de /api/images, relue quand la liste ou les propositions changent ;
+// l'avancement, de l'état diffusé.
 let imageCatalog = null;
+let imageCatalogKey = null;
+let imageInspect = null; // { url, loading, report, error }
+const imageKey = () => `${state.images?.listChangedAt ?? ''}|${state.imageWatch?.checkedAt ?? ''}|${state.imageWatch?.checking ?? ''}|${(state.imageWatch?.dismissed ?? []).length}|${Object.keys(state.images?.models ?? {}).length}`;
 async function loadImageCatalog() {
+  imageCatalogKey = imageKey();
   const report = await fetch('/api/images').then((r) => r.json()).catch(() => null);
   if (!report?.models) return;
-  imageCatalog = report.models;
+  imageCatalog = report;
   if (view === 'models') renderImageModels();
 }
+const gbFr = (value) => `${fr(value, value < 10 ? 1 : 0)} Go`;
 function imageModelRow(model) {
   const entry = state.images?.models?.[model.id] ?? {};
   const parts = downloadsFor(`image:${model.id}:`).filter((d) => !d.done);
   const percent = parts.length && parts[0].total ? Math.round((parts[0].received / parts[0].total) * 100) : null;
   const working = state.images?.job?.model === model.id;
   const status = entry.installing ? `<span class="hint">${esc(entry.detail ?? 'Installation')}${percent !== null ? ` · ${percent} %` : ''}</span>`
-    : entry.installedAt ? `<span class="live">${working ? 'génère une image' : 'installé'}</span><button class="btn ghost small" data-action="image-delete" data-id="${model.id}" title="Supprimer ses fichiers" ${working ? 'disabled' : ''}>${icon.trash}</button>`
-    : `<button class="btn small" data-action="image-install" data-id="${model.id}">${entry.error ? 'Réessayer' : 'Installer'}</button>`;
+    : entry.installedAt ? `<span class="live">${working ? 'génère une image' : 'installé'}</span><button class="btn ghost small" data-action="image-delete" data-id="${model.id}" title="Supprimer ses fichiers${model.custom ? ' et le retirer de la liste' : ''}" ${working ? 'disabled' : ''}>${icon.trash}</button>`
+    : `<button class="btn small" data-action="image-install" data-id="${model.id}">${entry.error ? 'Réessayer' : 'Installer'}</button>${model.custom ? `<button class="btn ghost small" data-action="image-delete" data-id="${model.id}" title="Retirer de la liste">${icon.trash}</button>` : ''}`;
+  const facts = [
+    `${gbFr(model.gigabytes)} à télécharger`,
+    `demande ${esc(model.needs)}${model.fits ? '' : ' (votre machine en a moins : ce sera lent, ou impossible)'}`,
+    model.edit ? 'sait retoucher une image' : null,
+    entry.lastSeconds ? `dernière image en ${fr(Math.round(entry.lastSeconds))} s` : null,
+    `licence ${esc(model.license)}`,
+  ].filter(Boolean).join(' · ');
   return `<div class="image-model"><div><h3>${esc(model.name)}</h3><p>${esc(model.tagline)}</p>
-      <p class="hint">${String(model.gigabytes).replace('.', ',')} Go à télécharger · demande ${esc(model.needs)}${model.fits ? '' : ' (votre carte en a moins : ce sera lent, ou impossible)'} · licence ${esc(model.license)}</p>
+      <p class="hint">${facts}${model.custom ? ` · <a href="https://huggingface.co/${esc(model.repo)}" target="_blank" rel="noopener">dépôt</a>` : ''}</p>
       ${entry.error && !entry.installing ? `<p class="hint bad">${esc(entry.error)}</p>` : ''}</div>
     <div class="acts">${status}</div></div>`;
 }
+function variantLabel(v) {
+  return `${v.stem.split('/').pop()} · ${v.familyName} · ${v.quant} · ${gbFr(v.gigabytes)}${v.fits ? '' : ' · trop gros pour cette machine'}`;
+}
+function imageInspectBlock() {
+  if (!imageInspect) return '';
+  if (imageInspect.loading) return '<p class="hint">Analyse du dépôt…</p>';
+  if (imageInspect.error) return `<p class="hint bad">${esc(imageInspect.error)}</p>`;
+  const r = imageInspect.report;
+  if (r.problem) return `<p class="hint bad">${esc(r.problem)}</p>`;
+  const v = r.variants[0];
+  const pick = r.variants.length > 1
+    ? `<select id="image-variant" class="image-variant">${r.variants.map((x) => `<option value="${esc(x.file)}">${esc(variantLabel(x))}</option>`).join('')}</select>`
+    : `<p class="hint">${esc(variantLabel(v))}</p>`;
+  return `<div class="image-inspect">
+      <div><h3>${esc(r.name)}</h3>
+      <p>${esc(v.familyName)}${v.edit ? ' · sait retoucher une image' : ''} · demande ${fr(Math.ceil(v.needs.vramGiB))} Go de mémoire graphique${r.license ? ` · licence ${esc(r.license)}` : ''}</p>
+      ${pick}
+      <p class="hint">Harn prend la version qui tient sur votre carte et ajoute le décodeur et le lecteur de consigne de la famille ${esc(v.familyName)}.</p></div>
+      <div class="acts"><button class="btn primary small" data-action="image-add" data-repo="${esc(r.repo)}" data-file="${esc(v.file)}">Installer</button></div>
+    </div>`;
+}
+function imageSuggestionRow(i) {
+  return `<div class="image-model suggestion"><div><h3>${esc(i.name)}</h3><p>${esc(i.familyName)}${i.edit ? ' · sait retoucher une image' : ''}</p>
+      <p class="hint">${esc(i.quant)} · ${gbFr(i.gigabytes)} à télécharger · demande ${fr(Math.ceil(i.needs.vramGiB))} Go de mémoire graphique · ♥ ${fr(i.likes)}${i.license ? ` · licence ${esc(i.license)}` : ''}</p></div>
+    <div class="acts"><button class="btn small" data-action="image-add" data-repo="${esc(i.repo)}" data-file="${esc(i.file)}">Installer</button>
+      <a class="btn ghost small" href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">Voir</a>
+      <button class="btn ghost small" data-action="image-hub-dismiss" data-repo="${esc(i.repo)}" title="Ne plus proposer ce modèle">Écarter</button></div></div>`;
+}
+// Trois zones : la liste (redessinée avec l'avancement), le dépôt analysé et les propositions.
+// Le formulaire reste hors de ces zones : ce qui est en train d'être tapé ne s'efface pas.
 function renderImageModels() {
-  if (!imageCatalog) { loadImageCatalog(); return paint('image-models', '<div class="label">Images</div><p class="empty">Lecture…</p>'); }
-  paint('image-models', `<div class="label">Images</div>
-    <p class="intro">Un agent dont la case « Images » est cochée peut générer et retoucher des images. La carte graphique passe au modèle d’images le temps de l’image, puis revient au modèle de texte.</p>
-    ${imageCatalog.map(imageModelRow).join('')}`);
+  if (!imageCatalog || imageCatalogKey !== imageKey()) loadImageCatalog();
+  if (!imageCatalog) return paint('image-models', '<p class="empty">Lecture…</p>');
+  const w = imageCatalog.watch ?? {};
+  const suggestions = imageCatalog.suggestions ?? [];
+  paint('image-models', imageCatalog.models.map(imageModelRow).join(''));
+  paint('image-inspect', imageInspectBlock());
+  paint('image-hub', `<div class="group-title hub-head"><h2>Proposés pour votre carte</h2><span>${w.checking ? 'recherche en cours…' : w.checkedAt ? `vérifié ${daysAgo(w.checkedAt)} à ${clock(w.checkedAt)}` : 'pas encore vérifié'}</span>
+      <button class="btn small ghost" data-action="image-hub-check" ${w.checking ? 'disabled' : ''}>Vérifier maintenant</button></div>
+    ${suggestions.length ? suggestions.map(imageSuggestionRow).join('') : `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de plus à proposer pour cette machine : les familles qui tiennent sur votre carte sont déjà dans la liste.' : 'Harn regarde une fois par jour les modèles d’images les plus appréciés sur Hugging Face, et ne garde que ceux qui tournent sur cette machine.'}</p>`}`);
 }
 
 function renderModels() {
@@ -863,7 +911,20 @@ function renderModels() {
         <button class="btn primary" type="submit">${icon.terminal} Installer avec pi</button>
       </form>
     </section>
-    <section class="card image-models" id="image-models"></section>
+    <section class="card image-models">
+      <div class="label">Images</div>
+      <p class="intro">Un agent dont la case « Images » est cochée peut générer et retoucher des images. La carte graphique passe au modèle d’images le temps de l’image, puis revient au modèle de texte.</p>
+      <div id="image-models" class="image-list"></div>
+      <div class="image-add">
+        <div><h3>Ajouter un modèle d’images depuis Hugging Face</h3><p>Collez l’adresse d’un dépôt GGUF (FLUX, Qwen-Image, Z-Image, Chroma, Krea 2, ERNIE-Image…). Harn reconnaît la famille, prend la version qui tient sur votre carte et ajoute ce qui va avec.</p></div>
+        <form class="add-form" data-form="add-image">
+          <input id="image-url" type="url" placeholder="https://huggingface.co/auteur/modele-image-GGUF" autocomplete="off" spellcheck="false" required>
+          <button class="btn" type="submit">Analyser</button>
+        </form>
+        <div id="image-inspect"></div>
+      </div>
+      <div id="image-hub" class="image-list"></div>
+    </section>
     <div id="models-body"></div>
   </div>`);
   renderImageModels();
@@ -1350,6 +1411,17 @@ app.addEventListener('submit', async (event) => {
     } catch (error) { toast(error.message); } finally { button.disabled = false; }
     return;
   }
+  const imageForm = event.target.closest('[data-form="add-image"]');
+  if (imageForm) {
+    event.preventDefault();
+    const url = imageForm.querySelector('#image-url').value.trim();
+    if (!/huggingface\.co\/[\w.-]+\/[\w.-]+/.test(url)) return toast('Collez une adresse de dépôt huggingface.co/auteur/modele');
+    imageInspect = { url, loading: true };
+    renderImageModels();
+    try { imageInspect = { url, report: await post('/api/images/inspect', { url }) }; } catch (error) { imageInspect = { url, error: error.message }; }
+    renderImageModels();
+    return;
+  }
   const form = event.target.closest('[data-form="add-model"]');
   if (!form) return;
   event.preventDefault();
@@ -1403,6 +1475,19 @@ app.addEventListener('click', async (event) => {
       await post(`/api/images/${id}/delete`);
       toast('Modèle d’images supprimé');
     }
+    if (action === 'image-add') {
+      // Le choix de variante du dépôt analysé l'emporte sur la version conseillée.
+      const select = button.closest('.image-inspect')?.querySelector('#image-variant');
+      const r = await post('/api/images/add', { repo: button.dataset.repo, file: select?.value || button.dataset.file });
+      if (select || button.closest('.image-inspect')) {
+        imageInspect = null;
+        document.getElementById('image-url').value = '';
+        renderImageModels();
+      }
+      toast(`${r.name} : installation lancée`);
+    }
+    if (action === 'image-hub-check') { await post('/api/images/hub/check'); toast('Recherche de modèles d’images sur Hugging Face'); }
+    if (action === 'image-hub-dismiss') { await post('/api/images/hub/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }
     if (action === 'delete-model') {
       const m = modelOf(id);
       const warn = state.active?.modelId === id ? '\n\nC’est le modèle chargé : il sera déchargé.' : '';

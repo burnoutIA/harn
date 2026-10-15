@@ -261,6 +261,35 @@ Vue Modèles, section Images :
 - Moteur : build CUDA 12 sous Windows avec une NVIDIA, Vulkan ailleurs (aucun build CUDA n'est
   publié pour Linux), CPU sans carte graphique.
 
+### Ajouter un modèle d'images depuis Hugging Face
+
+Sous la liste, collez l'adresse d'un dépôt GGUF puis « Analyser ». Harn reconnaît la famille du
+modèle (par le nom du fichier, du dépôt ou son tag `base_model`), prend la plus grosse version qui
+tient sur la carte (Q8 au plus) et ajoute ce que le dépôt ne livre pas : le décodeur et le lecteur
+de consigne de la famille, en Q8 sur une carte de 12 Go et plus, en Q4 en dessous. Ces fichiers
+sont partagés entre les modèles d'une même famille (`models/image/shared/`) et ne sont effacés
+qu'avec le dernier modèle qui s'en sert.
+
+Familles reconnues : FLUX.1 (dev, schnell, Krea, Kontext), FLUX.2 klein 4B/9B et base, FLUX.2 dev,
+FLUX.3 klein, Chroma, Qwen-Image (2512, Edit, Edit 2511, 2.1, 2.1 Turbo), Z-Image et Z-Image Turbo,
+Krea 2 et Krea 2 Turbo, ERNIE-Image et ERNIE-Image Turbo. Les réglages (étapes, CFG) sont ceux
+de la documentation de stable-diffusion.cpp. Un dépôt d'une autre famille, sans GGUF ou à accès
+restreint est refusé avec la raison.
+
+**Proposés pour votre carte** : une fois par jour, Harn parcourt les modèles d'images GGUF les plus
+aimés et les plus en vogue sur Hugging Face, garde ceux d'une famille reconnue qui tiennent sur la
+machine (carte et mémoire vive), deux par famille au plus, et masque les familles déjà dans la
+liste. « Écarter » retire une proposition pour de bon.
+
+Un modèle qui ne sait pas retoucher (FLUX.1 dev, Z-Image…) refuse les images de référence et
+indique ceux qui savent ; pi le sait d'avance.
+
+**Depuis un agent** (case « Outils de Harn ») : `list_image_models` (la liste et les propositions
+du jour), `inspect_image_repo` et `install_image_model`, guidés par le skill
+`installer-un-modele-images`. L'installation s'affiche d'abord dans la fenêtre de Harn (modèle,
+taille, licence) et ne démarre qu'au clic sur Accepter. Supprimer un modèle reste réservé à la
+fenêtre.
+
 ## Sécurité de l'inférence
 
 - **Clés API** (Machine → Brancher une application, ou `npm run keys -- create "Portable — Copilot"`,
@@ -410,10 +439,12 @@ pi, agents, images
   src/pi.mjs             installation, configuration et lancement de pi (terminal, tmux, vue d'ensemble)
   src/agents.mjs         les agents : fiche, dossier, lancement, demande de la carte
   src/approvals.mjs      ce que pi demande et que seul l'utilisateur accorde
-  src/harn-mcp.mjs       les outils de Harn donnés à pi (analyser, installer, mesurer, tester)
+  src/harn-mcp.mjs       les outils de Harn donnés à pi (analyser, installer, mesurer, tester ; modèles d’images)
   src/pi-extensions/     extensions pi : ctx-optimizer, telegram-follow, agent-memory, image-gen
   src/skills/            marches à suivre de pi : installer un modèle, dépanner une installation
   src/images.mjs         génération d'images : moteur, modèles, partage de la carte avec le texte
+  src/image-families.mjs familles d'images : fichiers d'accompagnement, réglages, choix de la version
+  src/image-hub.mjs      modèles d'images ajoutés depuis Hugging Face, propositions du jour
 
 public/                  interface
 tests/                   tests (node --test)

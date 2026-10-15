@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI) {
   if (!config) return;
 
   // Les modèles installés, lus à chaque conversation : la description de l'outil les nomme.
-  let models: { id: string; name: string; tagline: string }[] = [];
+  let models: { id: string; name: string; tagline: string; edit?: boolean }[] = [];
   let vision = false;
   async function refresh() {
     try {
@@ -55,8 +55,8 @@ export default function (pi: ExtensionAPI) {
     event.systemPromptOptions.sections = {
       ...(event.systemPromptOptions.sections ?? {}),
       image_generation: models.length
-        ? `You can create images with \`generate_image\`. Image models installed on this machine: ${models.map((m) => `${m.id} (${m.name}: ${m.tagline})`).join("; ")}.`
-        : "`generate_image` is available, but no image model is installed yet: the user installs one in Harn (Modèles view).",
+        ? `You can create images with \`generate_image\`. Image models installed on this machine: ${models.map((m) => `${m.id} (${m.name}: ${m.tagline}${m.edit === false ? " Cannot edit a given image." : ""})`).join("; ")}.`
+        : "`generate_image` is available, but no image model is installed yet: the user installs one in Harn (Modèles view), or you do it with the Harn tool `install_image_model` if you have it (see `list_image_models`).",
     };
   });
 

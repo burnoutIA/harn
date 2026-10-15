@@ -41,3 +41,32 @@ test('seul un agent dont la case Images est cochée peut en demander', async () 
   assert.deepEqual(await agentForImages(agent.id), { who: 'Peintre', workspace: agent.workspace });
   await assert.rejects(agentForImages('inconnu'), { status: 404 });
 });
+
+test('un modèle ajouté depuis Hugging Face rejoint la liste ; le supprimer garde les fichiers partagés encore utilisés', async () => {
+  const { DIRS } = await import('../src/paths.mjs');
+  const { loadImageModels } = await import('../src/image-hub.mjs');
+  const { deleteImageModel } = await import('../src/images.mjs');
+  const { existsSync } = await import('node:fs');
+  const vae = { role: 'vae', repo: 'Comfy-Org/z_image_turbo', name: 'split_files/vae/ae.safetensors', shared: true };
+  const entry = (id) => ({ id, custom: true, name: id, family: 'z-image-turbo', tagline: 'test', license: 'apache-2.0', repo: `x/${id}`, gigabytes: 1, vramGiB: 4, ramGiB: 8, edit: false,
+    files: [{ role: 'diffusion', repo: `x/${id}`, name: `${id}-Q8_0.gguf` }, vae], args: [] });
+  mkdirSync(DIRS.data, { recursive: true });
+  writeFileSync(path.join(DIRS.data, 'image-models.json'), JSON.stringify([entry('za'), entry('zb')]));
+  await loadImageModels();
+  const shared = path.join(DIRS.models, 'image', 'shared', 'Comfy-Org--z_image_turbo', 'ae.safetensors');
+  mkdirSync(path.dirname(shared), { recursive: true });
+  writeFileSync(shared, 'vae');
+  update((s) => { s.images = { models: { za: { installedAt: 'x' }, zb: { installedAt: 'x' } } }; });
+  const report = imagesReport();
+  assert.ok(report.models.some((m) => m.id === 'za' && m.custom && m.edit === false && m.installed));
+
+  // Il ne sait pas retoucher : la demande est refusée avant de toucher à la carte.
+  writeFileSync(path.join(workspace, 'ref.png'), 'x');
+  await assert.rejects(generateImage({ workspace, prompt: 'un chat', model: 'za', references: ['ref.png'] }), { status: 400, message: /ne sait pas retoucher/ });
+
+  await deleteImageModel('za');
+  assert.ok(existsSync(shared), 'zb se sert encore du décodeur');
+  assert.ok(!imagesReport().models.some((m) => m.id === 'za'));
+  await deleteImageModel('zb');
+  assert.ok(!existsSync(shared));
+});

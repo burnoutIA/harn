@@ -55,6 +55,9 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
 
 ## Limites à dire franchement
 
+- Un modèle d'images (FLUX, Qwen-Image, Z-Image…) ne passe pas par ici : skill
+  `installer-un-modele-images`, outils `inspect_image_repo` et `install_image_model`.
+
 - Harn ne sert que des fichiers GGUF. Un dépôt sans GGUF ne s'installe pas ici.
 - Un dépôt à accès restreint (`gated`) ne se télécharge pas : Harn n'a pas de jeton Hugging Face.
   Il s'installe quand même si son fichier est déjà sur la machine (`alreadyOnDisk` dans

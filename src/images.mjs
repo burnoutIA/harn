@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { chmod, mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { chmod, link, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { activate } from './activation.mjs';
@@ -7,6 +7,7 @@ import { hfSha256 } from './catalog.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { github } from './github.mjs';
+import { addedImageModels, forgetImageModel, imageSuggestions } from './image-hub.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { getLive } from './metrics.mjs';
 import { DIRS } from './paths.mjs';
@@ -21,11 +22,14 @@ const run = promisify(execFile);
 const SD_REPO = 'leejet/stable-diffusion.cpp';
 
 // Chaque modèle : ses poids, son décodeur (vae) et le modèle de langue qui lit la consigne (llm).
-// vision : ce qu'il faut en plus pour retoucher une image donnée en référence.
+// vision : ce qu'il faut en plus pour retoucher une image donnée en référence. family : sa famille
+// (image-families.mjs). Les modèles ajoutés depuis Hugging Face ont la même forme (image-hub.mjs).
 export const IMAGE_MODELS = [
   {
     id: 'flux2-klein-4b',
     name: 'FLUX.2 klein 4B',
+    family: 'flux2-klein-4b',
+    edit: true,
     tagline: 'Le plus rapide : quatre étapes. Photos, illustrations, retouche d’une image.',
     license: 'Apache-2.0',
     gigabytes: 8.9,
@@ -40,6 +44,8 @@ export const IMAGE_MODELS = [
   {
     id: 'qwen-image-2-1-uc',
     name: 'Qwen-Image 2.1 Uncensored',
+    family: 'qwen-image-2.1',
+    edit: true,
     tagline: 'Plus lent, plus fidèle à la consigne ; écrit du texte lisible dans l’image. Sans filtre.',
     license: 'Qwen Research (usage non commercial)',
     gigabytes: 18.2,
@@ -56,28 +62,38 @@ export const IMAGE_MODELS = [
   },
 ];
 
-const FLAGS = { diffusion: '--diffusion-model', vae: '--vae', llm: '--llm', vision: '--llm_vision' };
-export const imageModelById = (id) => IMAGE_MODELS.find((model) => model.id === id);
+const FLAGS = { diffusion: '--diffusion-model', vae: '--vae', llm: '--llm', vision: '--llm_vision', clip_l: '--clip_l', t5xxl: '--t5xxl' };
+const allModels = () => [...IMAGE_MODELS, ...addedImageModels()];
+export const imageModelById = (id) => allModels().find((model) => model.id === id);
 const modelDir = (id) => path.join(DIRS.models, 'image', id);
-const fileOf = (model, role) => { const file = model.files.find((f) => f.role === role); return file && path.join(modelDir(model.id), path.basename(file.name)); };
+// Décodeurs et lecteurs de consigne (shared) : un seul exemplaire pour tous les modèles qui s'en servent.
+const SHARED = path.join(DIRS.models, 'image', 'shared');
+const pathOf = (model, file) => (file.shared ? path.join(SHARED, file.repo.replace('/', '--'), path.basename(file.name)) : path.join(modelDir(model.id), path.basename(file.name)));
+const fileOf = (model, role) => { const file = model.files.find((f) => f.role === role); return file && pathOf(model, file); };
 const images = () => getState().images ?? {};
-const installedModels = () => IMAGE_MODELS.filter((model) => images().models?.[model.id]?.installedAt);
+const installedModels = () => allModels().filter((model) => images().models?.[model.id]?.installedAt);
 const patch = (id, fields) => update((s) => { ((s.images ??= {}).models ??= {})[id] = { ...s.images.models[id], ...fields }; });
 
-// Ce que l'interface et pi voient : chaque modèle, installé ou non, et l'image en cours.
+// Ce que l'interface et pi voient : chaque modèle, installé ou non, l'image en cours, et les
+// propositions venues de Hugging Face.
 export function imagesReport() {
   const hardware = getState().hardware;
   const vram = (hardware?.primary?.vramMiB ?? 0) / 1024;
+  const ram = hardware?.ramGiB ?? Infinity;
+  const models = allModels();
   return {
     engine: images().engine ? { tag: images().engine.tag, backend: images().engine.backend } : null,
     job: images().job ?? null,
-    models: IMAGE_MODELS.map((model) => ({
+    models: models.map((model) => ({
       id: model.id, name: model.name, tagline: model.tagline, license: model.license, gigabytes: model.gigabytes,
-      fits: vram >= model.vramGiB,
+      family: model.family ?? null, edit: model.edit !== false, custom: Boolean(model.custom), repo: model.repo ?? model.files[0].repo,
+      fits: vram >= model.vramGiB && ram >= (model.ramGiB ?? 0),
       needs: `${model.vramGiB} Go de mémoire graphique`,
       ...(images().models?.[model.id] ?? {}),
       installed: Boolean(images().models?.[model.id]?.installedAt),
     })),
+    suggestions: imageSuggestions(new Set(models.map((model) => model.family).filter(Boolean))),
+    watch: { checking: Boolean(getState().imageWatch?.checking), checkedAt: getState().imageWatch?.checkedAt ?? null, error: getState().imageWatch?.error ?? null },
   };
 }
 
@@ -143,6 +159,24 @@ export function ensureImageEngine() {
 }
 
 // ── Les modèles ────────────────────────────────────────────────
+// Un fichier déjà sur la machine, même nom et même taille (un autre modèle d'images l'a téléchargé
+// avant le partage des fichiers) : lié plutôt que retéléchargé.
+async function reuseLocal(file, dest) {
+  if (await stat(dest).catch(() => null)) return;
+  const head = await fetch(`https://huggingface.co/${file.repo}/resolve/main/${file.name.split('/').map(encodeURIComponent).join('/')}`, { method: 'HEAD', redirect: 'manual', headers: { 'User-Agent': 'harn' } }).catch(() => null);
+  const size = Number(head?.headers.get('x-linked-size')) || 0;
+  if (!size) return;
+  const root = path.join(DIRS.models, 'image');
+  for (const dir of await readdir(root, { recursive: true, withFileTypes: true }).catch(() => [])) {
+    if (!dir.isFile() || dir.name !== path.basename(file.name)) continue;
+    const found = path.join(dir.parentPath ?? dir.path, dir.name);
+    if ((await stat(found)).size !== size) continue;
+    await mkdir(path.dirname(dest), { recursive: true });
+    await link(found, dest).catch(() => {});
+    return;
+  }
+}
+
 const installs = new Map();
 export function installImageModel(id) {
   const model = imageModelById(id);
@@ -152,10 +186,12 @@ export function installImageModel(id) {
     installs.set(id, (async () => {
       await ensureImageEngine();
       for (const file of model.files) {
+        const dest = pathOf(model, file);
+        await reuseLocal(file, dest);
         patch(id, { detail: `Téléchargement de ${path.basename(file.name)}` });
-        const sha256 = await hfSha256(file.repo, file.name);
+        const sha256 = file.sha256 ?? await hfSha256(file.repo, file.name);
         if (!sha256) throw new Error(`Hugging Face ne publie pas d’empreinte SHA-256 pour ${file.name} (${file.repo}) : téléchargement refusé.`);
-        await download({ id: `image:${id}:${path.basename(file.name)}`, label: path.basename(file.name), url: `https://huggingface.co/${file.repo}/resolve/main/${file.name.split('/').map(encodeURIComponent).join('/')}?download=true`, dest: path.join(modelDir(id), path.basename(file.name)), sha256 });
+        await download({ id: `image:${id}:${path.basename(file.name)}`, label: path.basename(file.name), url: `https://huggingface.co/${file.repo}/resolve/main/${file.name.split('/').map(encodeURIComponent).join('/')}?download=true`, dest, sha256 });
       }
       patch(id, { installing: false, detail: null, installedAt: new Date().toISOString() });
     })().catch((error) => {
@@ -166,11 +202,21 @@ export function installImageModel(id) {
   return installs.get(id);
 }
 
+// Un modèle ajouté depuis Hugging Face disparaît aussi de la liste ; un fichier partagé n'est
+// effacé que si plus aucun modèle installé ne s'en sert.
 export async function deleteImageModel(id) {
-  if (!imageModelById(id)) throw Object.assign(new Error('Modèle d’images inconnu'), { status: 404 });
+  const model = imageModelById(id);
+  if (!model) throw Object.assign(new Error('Modèle d’images inconnu'), { status: 404 });
   if (installs.has(id) || images().job?.model === id) throw Object.assign(new Error('Ce modèle est en cours d’installation ou d’utilisation : attendez la fin'), { status: 409 });
   await rm(modelDir(id), { recursive: true, force: true });
   update((s) => { if (s.images?.models) delete s.images.models[id]; });
+  const inUse = allModels().filter((other) => other.id !== id && (images().models?.[other.id]?.installedAt || installs.has(other.id)));
+  const stillUsed = new Set(inUse.flatMap((other) => other.files.filter((f) => f.shared).map((f) => pathOf(other, f))));
+  for (const file of model.files.filter((f) => f.shared)) {
+    const where = pathOf(model, file);
+    if (!stillUsed.has(where)) await rm(where, { force: true });
+  }
+  if (model.custom) await forgetImageModel(id);
 }
 
 // ── Générer ────────────────────────────────────────────────────
@@ -192,6 +238,10 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   const model = wanted ? ready.find((m) => m.id === wanted) : ready[0];
   if (!model) throw failure(404, `Modèle d’images « ${wanted} » non installé. Installés : ${ready.map((m) => m.id).join(', ')}`);
   const refs = [].concat(references ?? []).filter(Boolean).slice(0, 4).map((ref) => path.resolve(workspace, String(ref)));
+  if (refs.length && model.edit === false) {
+    const editors = ready.filter((m) => m.edit !== false).map((m) => m.id);
+    throw failure(400, `${model.name} ne sait pas retoucher une image donnée.${editors.length ? ` Modèles installés qui savent : ${editors.join(', ')}` : ''}`);
+  }
   for (const ref of refs) {
     if (!inside(workspace, ref)) throw failure(400, `Image de référence hors du dossier de travail : ${ref}`);
     if (!(await stat(ref).catch(() => null))?.isFile()) throw failure(400, `Image de référence introuvable : ${path.relative(workspace, ref)}`);
@@ -212,6 +262,8 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   const args = [
     ...model.files.filter((file) => file.role !== 'vision' || refs.length).flatMap((file) => [FLAGS[file.role], fileOf(model, file.role)]),
     ...model.args,
+    // Le lecteur T5 (9,8 Go) reste sur le processeur quand la carte est petite.
+    ...(model.files.some((file) => file.role === 't5xxl') && (getState().hardware?.primary?.vramMiB ?? 0) < 12 * 1024 ? ['--clip-on-cpu'] : []),
     ...(loraFiles.length ? ['--lora-model-dir', loraDir] : []),
     '-p', withLoras, ...(negative ? ['-n', String(negative).slice(0, MAX_PROMPT)] : []),
     '-W', String(side(width, 1024)), '-H', String(side(height, 1024)),
@@ -242,7 +294,9 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
     // La carte est rendue : le modèle de texte revient, sans faire attendre la réponse.
     if (before) activate(before).catch(() => {});
   }
-  return { file: output, model: model.id, width: side(width, 1024), height: side(height, 1024), seed: chosenSeed, seconds: +((Date.now() - started) / 1000).toFixed(1) };
+  const seconds = +((Date.now() - started) / 1000).toFixed(1);
+  patch(model.id, { lastSeconds: seconds });
+  return { file: output, model: model.id, width: side(width, 1024), height: side(height, 1024), seed: chosenSeed, seconds };
 }
 
 function runCli(engine, args) {

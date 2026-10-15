@@ -22,7 +22,8 @@ import { applyCheck } from './system-checks.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
 import { gpuFree, isImageJob } from './gpu-queue.mjs';
 import { watchIdle } from './idle.mjs';
-import { deleteImageModel, generateImage, imagesReport, installImageModel } from './images.mjs';
+import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
+import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel } from './images.mjs';
 import { agentForImages, claimCard, createAgent, deleteAgent, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
@@ -236,16 +237,56 @@ async function api(req, res, url) {
     return json(res, 404, { error: 'inconnu' });
   }
 
-  // Images : un agent en demande une (outil generate_image de son pi) ; installer ou supprimer un
-  // modèle d'images se fait depuis la fenêtre de Harn seulement.
+  // Images : un agent en demande une (outil generate_image de son pi). Installer un modèle
+  // d'images, depuis la liste ou un dépôt Hugging Face : immédiat depuis la fenêtre de Harn ;
+  // depuis pi (outil install_image_model), une demande que l'utilisateur accepte ou refuse.
+  // Supprimer, relancer la veille, écarter une proposition : depuis la fenêtre seulement.
   if (parts[1] === 'images') {
     const body = await new Response(req).json().catch(() => ({}));
+    const gb = (value) => `${Number(value).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go`;
     try {
       if (parts[2] === 'generate') {
         const from = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
         return json(res, 200, await generateImage({ ...from, model: body.model, prompt: body.prompt, negative: body.negative, width: body.width, height: body.height, seed: body.seed, references: body.references }));
       }
+      if (parts[2] === 'inspect') return json(res, 200, await inspectImageRepo(body.url));
+      // Ajouter un dépôt (fichier de poids choisi, sinon celui conseillé) puis l'installer.
+      if (parts[2] === 'add') {
+        if (fromOurPage(req)) {
+          const entry = await addImageModel({ repo: body.repo, file: body.file ?? null });
+          background(installImageModel(entry.id));
+          return json(res, 202, { id: entry.id, name: entry.name });
+        }
+        // La taille et la licence annoncées viennent du dépôt, pas de ce que pi en dit.
+        const report = await inspectImageRepo(body.repo);
+        if (report.problem) return json(res, 400, { error: report.problem });
+        const variant = body.file ? report.variants.find((v) => v.file === body.file) : report.variants[0];
+        if (!variant) return json(res, 400, { error: `« ${body.file} » n’est pas un fichier de poids reconnu. Conseillés : ${report.variants.map((v) => v.file).join(', ')}` });
+        const id = imageIdOf(report.repo, variant.file);
+        if (getState().images?.models?.[id]?.installedAt) return json(res, 200, { id, installed: true });
+        const approval = requestApproval({
+          kind: 'install',
+          title: `Installer le modèle d’images ${report.name} · ${variant.quant}`,
+          detail: `${variant.familyName}, ${gb(variant.gigabytes)} à télécharger depuis huggingface.co (lecteur de consigne et décodeur compris)${variant.fits ? '' : ', plus que ce que cette machine tient bien'}. Licence : ${report.license ?? 'non précisée'}.`,
+          run: () => background(addImageModel({ repo: report.repo, file: variant.file }).then((entry) => installImageModel(entry.id))),
+        });
+        return json(res, 202, { approval, status: 'pending', id });
+      }
+      if (parts[2] && parts[3] === 'install' && !fromOurPage(req)) {
+        const model = imageModelById(parts[2]);
+        if (!model) return json(res, 404, { error: 'Modèle d’images inconnu' });
+        if (getState().images?.models?.[model.id]?.installedAt) return json(res, 200, { id: model.id, installed: true });
+        const approval = requestApproval({
+          kind: 'install',
+          title: `Installer le modèle d’images ${model.name}`,
+          detail: `${gb(model.gigabytes)} à télécharger depuis huggingface.co. Licence : ${model.license}.`,
+          run: () => background(installImageModel(model.id)),
+        });
+        return json(res, 202, { approval, status: 'pending', id: model.id });
+      }
       if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+      if (parts[2] === 'hub' && parts[3] === 'check') { background(checkImageHub()); return json(res, 202, { ok: true }); }
+      if (parts[2] === 'hub' && parts[3] === 'dismiss') { dismissImageSuggestion(String(body.repo ?? '')); return json(res, 200, { ok: true }); }
       if (parts[2] && parts[3] === 'install') { background(installImageModel(parts[2])); return json(res, 202, { ok: true }); }
       if (parts[2] && parts[3] === 'delete') { await deleteImageModel(parts[2]); return json(res, 200, imagesReport()); }
     } catch (error) {
@@ -453,6 +494,7 @@ function openWindow() {
 async function main() {
   await loadState();
   await loadCustomModels();
+  await loadImageModels();
   // Moteurs ajoutés dont plus aucun modèle n'a besoin (modèle supprimé avant ce nettoyage).
   await dropUnusedEngines().catch(() => {});
   // La bulle des moteurs non relus : vérifiée une fois, lue ensuite sans attendre.
@@ -477,6 +519,7 @@ async function main() {
     await reapOrphans();
     watchForUpdates();
     watchHub();
+    watchImageHub();
     watchIdle();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.

@@ -39,6 +39,28 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { model_id: { type: 'string' }, gguf_dir: { type: 'string' } }, required: ['model_id'] },
   },
   {
+    name: 'list_image_models',
+    description: 'Les modèles d’images de Harn (génération et retouche, via stable-diffusion.cpp) : ceux de la liste, installés ou non, avec ce qu’ils demandent à la carte, s’ils savent retoucher une image, et les propositions du jour venues de Hugging Face (modèles appréciés qui tiennent sur cette machine).',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'inspect_image_repo',
+    description: 'Analyse un dépôt Hugging Face de modèle d’images en GGUF pour CETTE machine : famille reconnue (FLUX, Qwen-Image, Z-Image, Chroma, Krea 2, ERNIE-Image…), chaque variante avec la version qui tient sur la carte (file), taille totale à télécharger (lecteur de consigne et décodeur compris), mémoire demandée, licence. problem dit pourquoi un dépôt ne peut pas être installé.',
+    inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Adresse du dépôt, ex. https://huggingface.co/leejet/Z-Image-Turbo-GGUF' } }, required: ['url'] },
+  },
+  {
+    name: 'install_image_model',
+    description: 'Installe un modèle d’images : soit un modèle de la liste (model_id, rendu par list_image_models), soit un dépôt Hugging Face (url, et file pour une autre variante que celle conseillée par inspect_image_repo). Harn affiche d’abord la demande (taille, licence) dans sa fenêtre : rien ne démarre avant que l’utilisateur clique sur Accepter. Préviens-le avant d’appeler l’outil. Bloque jusqu’à la fin du téléchargement et rend l’identifiant à passer à generate_image.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        model_id: { type: 'string', description: 'Identifiant d’un modèle de la liste' },
+        url: { type: 'string', description: 'Adresse du dépôt Hugging Face' },
+        file: { type: 'string', description: 'Fichier de poids choisi (champ file d’une variante d’inspect_image_repo) ; omis : la version conseillée' },
+      },
+    },
+  },
+  {
     name: 'harn_status',
     description: 'État de Harn : machine, objectif, modèle actif, téléchargements en cours, modèles installés avec leur vitesse mesurée et leur score au test d’intelligence.',
     inputSchema: { type: 'object', properties: {} },
@@ -137,6 +159,36 @@ async function call(name, args, token) {
       step += 1;
     }
   }
+  if (name === 'list_image_models') {
+    const report = await api('GET', '/api/images');
+    return text({
+      models: report.models.map((m) => ({ id: m.id, name: m.name, tagline: m.tagline, installed: m.installed, installing: Boolean(m.installing), error: m.error ?? null, can_edit: m.edit, download_gb: m.gigabytes, needs: m.needs, fits_this_machine: m.fits, license: m.license })),
+      suggestions: report.suggestions.map((i) => ({ url: `https://huggingface.co/${i.repo}`, file: i.file, family: i.familyName, can_edit: i.edit, quant: i.quant, download_gb: i.gigabytes, likes: i.likes, license: i.license })),
+    });
+  }
+  if (name === 'inspect_image_repo') return text(await api('POST', '/api/images/inspect', { url: args.url }));
+  if (name === 'install_image_model') {
+    if (!args.model_id && !args.url) return text('Donne model_id (un modèle de la liste) ou url (un dépôt Hugging Face).', true);
+    const asked = args.model_id
+      ? await api('POST', `/api/images/${encodeURIComponent(args.model_id)}/install`)
+      : await api('POST', '/api/images/add', { repo: args.url, file: args.file });
+    if (asked.installed) return text({ id: asked.id, installed: true, note: 'Déjà installé.' });
+    const refused = asked.approval ? await waitApproval(asked.approval, token) : null;
+    if (refused) return text(refused, true);
+    // L'installation tourne dans Harn : on suit l'état du modèle jusqu'à la fin.
+    let step = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      const report = await api('GET', '/api/images').catch(() => null);
+      const model = report?.models.find((m) => m.id === asked.id);
+      if (model?.installed) return text({ id: model.id, name: model.name, installed: true, can_edit: model.edit });
+      if (model?.error && !model.installing) return text(`Échec : ${model.error}`, true);
+      // Ajouté depuis Hugging Face : l'entrée apparaît après l'analyse ; au-delà d'une minute, c'est un échec.
+      if (!model && step > 12) return text('L’installation n’a pas démarré (voir la fenêtre de Harn).', true);
+      if (token !== undefined && step % 2 === 0) send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: token, progress: step, message: model?.detail ?? 'En cours…' } });
+      step += 1;
+    }
+  }
   if (name === 'test_intelligence') {
     await api('POST', `/api/models/${encodeURIComponent(args.model_id)}/iq`);
     return text(await withProgress(token, async () => {
@@ -164,7 +216,7 @@ lines.on('line', async (line) => {
         protocolVersion: params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'harn', version: VERSION },
-        instructions: 'Outils de Harn, le serveur d’IA locale de cette machine : analyser un modèle Hugging Face, l’installer, le mesurer et tester son intelligence.',
+        instructions: 'Outils de Harn, le serveur d’IA locale de cette machine : analyser un modèle Hugging Face, l’installer, le mesurer et tester son intelligence ; lister, analyser et installer des modèles d’images.',
       } });
     }
     if (method === 'ping') return send({ jsonrpc: '2.0', id, result: {} });
