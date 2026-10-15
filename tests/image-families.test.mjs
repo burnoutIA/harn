@@ -78,3 +78,12 @@ test('un dépôt de lecteur de consigne ou de LoRA n’est pas un modèle d’im
   assert.ok(!notImageModel('leejet/Z-Image-Turbo-GGUF'));
   assert.ok(!notImageModel('silveroxides/Chroma-GGUF'));
 });
+
+test('chaque famille a où chercher ses LoRA : Hugging Face (adaptateurs du modèle de base) et Civitai', async () => {
+  const { loraSources } = await import('../src/image-families.mjs');
+  for (const arch of new Set(IMAGE_FAMILIES.map((f) => f.arch))) {
+    const sources = loraSources(arch);
+    assert.match(sources[0].url, /^https:\/\/huggingface\.co\/models\?other=base_model%3Aadapter%3A/, arch);
+    assert.match(sources.at(-1).url, /^https:\/\/civitai\.com\/search\/models\?modelType=LORA&query=/, arch);
+  }
+});

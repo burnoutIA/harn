@@ -242,7 +242,10 @@ Sous Linux avec tmux :
 ## Images
 
 Un agent dont la case « Images » est cochée a un outil `generate_image` : il génère une image à
-partir d'une description, ou retouche une image de son dossier de travail. Aucune interface à
+partir d'une description, ou retouche une image de son dossier de travail. Il reçoit aussi le
+skill `ecrire-une-image` : traduire en anglais une demande courte (« un chat dans l'espace ») et
+la compléter (sujet, cadrage, lumière, style, format), retoucher sans tout redécrire, se servir
+d'un LoRA de visage, refaire avec la même graine. Aucune interface à
 part : Harn fait tourner [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 en coulisses, comme llama.cpp pour le texte, et l'installe avec le premier modèle d'images.
 
@@ -268,7 +271,10 @@ Vue Modèles, section Images :
   la fiche de l'agent les montre (supprimer un LoRA s'y fait). Sur la fiche, une note par LoRA
   dit ce qu'il représente et comment s'en servir (« le visage de Xavier ; commencer par… ») :
   l'agent la reçoit avec la liste, et le mot déclencheur quand le fichier en porte un
-  (`modelspec.trigger_phrase`). Quand le moteur n'en applique
+  (`modelspec.trigger_phrase`). Pour en trouver, la fiche et l'agent ont, pour chaque famille
+  installée, un lien vers ses LoRA sur Hugging Face (adaptateurs du modèle de base) et sur
+  Civitai. Avec la case Shell, l'agent télécharge lui-même le LoRA demandé dans son dossier
+  `lora/` puis l'essaie sur une petite image ; sans elle, il donne le lien et le dossier. Quand le moteur n'en applique
   qu'une partie (« Only 320 / 384 LoRA tensors », typique d'un LoRA d'ai-toolkit non converti),
   l'agent en est averti dans la réponse de `generate_image`.
 - Moteur : build CUDA 12 sous Windows avec une NVIDIA, Vulkan ailleurs (aucun build CUDA n'est

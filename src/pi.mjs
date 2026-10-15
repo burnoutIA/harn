@@ -101,7 +101,7 @@ export async function configurePiDir(dir, { preferredModel = null, options = EVE
   // les skills ne servent qu'à qui a les outils de Harn.
   if (!options.harnTools) await rm(path.join(dir, 'AGENTS.md'), { force: true });
   else if (state.hardware) await writeFile(path.join(dir, 'AGENTS.md'), agentInstructions(state.hardware));
-  await installSkills(dir, options.harnTools);
+  await installSkills(dir, options);
   await installExtensions(dir);
   await configureMcp(dir, options);
   // Lu par l'extension image-gen : sans ce fichier, pas d'outil de génération d'images.
@@ -207,12 +207,15 @@ export async function openInEditor(file) {
 }
 
 // Les skills fournis par Harn (réécrits à chaque configuration : ils appartiennent à Harn).
-async function installSkills(piDir, wanted) {
+// Chaque skill va avec une case : les outils de Harn par défaut, sauf ceux nommés ici.
+const SKILL_OPTION = { 'ecrire-une-image': 'images' };
+async function installSkills(piDir, options) {
   const source = fromRoot('src', 'skills');
   for (const name of await readdir(source).catch(() => [])) {
     if (!name.endsWith('.md')) continue;
-    const dir = path.join(piDir, 'skills', name.replace(/\.md$/, ''));
-    if (!wanted) { await rm(dir, { recursive: true, force: true }); continue; }
+    const skill = name.replace(/\.md$/, '');
+    const dir = path.join(piDir, 'skills', skill);
+    if (!options[SKILL_OPTION[skill] ?? 'harnTools']) { await rm(dir, { recursive: true, force: true }); continue; }
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, 'SKILL.md'), await readFile(path.join(source, name), 'utf8'));
   }

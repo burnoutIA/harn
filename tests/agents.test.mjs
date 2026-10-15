@@ -76,6 +76,7 @@ test('le dossier pi d’un agent ne reçoit que ce qui est coché', async () => 
   assert.deepEqual((await json(path.join(dir, 'settings.json'))).defaultTools, ['-bash', '-powershell']);
   assert.equal((await json(path.join(dir, 'mcp.json'))).mcpServers.harn, undefined);
   assert.ok(!existsSync(path.join(dir, 'skills', 'installer-un-modele')));
+  assert.ok(!existsSync(path.join(dir, 'skills', 'ecrire-une-image')));
   assert.ok(existsSync(path.join(dir, 'extensions', 'ctx-optimizer')));
   // L'extension Telegram est copiée partout, sans secret : inerte tant que telegram.json manque.
   assert.ok(!/\d{6,}:[\w-]{30,}/.test(await readFile(path.join(dir, 'extensions', 'telegram-follow', 'index.ts'), 'utf8')));
@@ -84,6 +85,11 @@ test('le dossier pi d’un agent ne reçoit que ce qui est coché', async () => 
   assert.equal((await json(path.join(dir, 'settings.json'))).defaultTools, undefined);
   assert.ok((await json(path.join(dir, 'mcp.json'))).mcpServers.harn);
   assert.ok(existsSync(path.join(dir, 'skills', 'installer-un-modele', 'SKILL.md')));
+  assert.ok(!existsSync(path.join(dir, 'skills', 'ecrire-une-image')));
+  // Le skill d'écriture d'images va avec la case Images, pas avec les outils de Harn.
+  await configurePiDir(dir, { options: { shell: false, harnTools: false, web: true, images: true } });
+  assert.ok(existsSync(path.join(dir, 'skills', 'ecrire-une-image', 'SKILL.md')));
+  assert.ok(!existsSync(path.join(dir, 'skills', 'installer-un-modele')));
   // Les consignes de l'agent ne sont jamais réécrites par la configuration.
   assert.equal(await readFile(path.join(dir, 'APPEND_SYSTEM.md'), 'utf8'), 'Sois brève.');
 });

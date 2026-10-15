@@ -23,8 +23,8 @@ import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, re
 import { gpuFree, isImageJob } from './gpu-queue.mjs';
 import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
-import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel } from './images.mjs';
-import { listLoras } from './loras.mjs';
+import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel, loraTargets } from './images.mjs';
+import { listLoras, loraDirOf } from './loras.mjs';
 import { agentForImages, claimCard, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
@@ -247,14 +247,14 @@ async function api(req, res, url) {
     const gb = (value) => `${Number(value).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Go`;
     try {
       if (parts[2] === 'generate') {
-        const { loraNotes, ...from } = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
+        const { loraNotes, shell, ...from } = body.agent ? await agentForImages(String(body.agent)) : { who: 'pi', workspace: DIRS.workspace };
         return json(res, 200, await generateImage({ ...from, model: body.model, prompt: body.prompt, negative: body.negative, width: body.width, height: body.height, seed: body.seed, references: body.references }));
       }
       if (parts[2] === 'inspect') return json(res, 200, await inspectImageRepo(body.url));
       // Les LoRA d'un agent (son extension image-gen les lit avant chaque tour).
       if (parts[2] === 'loras' && req.method === 'GET') {
         const from = await agentForImages(String(url.searchParams.get('agent') ?? ''));
-        return json(res, 200, { loras: await listLoras(from.workspace, from.loraNotes) });
+        return json(res, 200, { loras: await listLoras(from.workspace, from.loraNotes), folder: loraDirOf(from.workspace), canDownload: from.shell, targets: loraTargets() });
       }
       // Ajouter un dépôt (fichier de poids choisi, sinon celui conseillé) puis l'installer.
       if (parts[2] === 'add') {

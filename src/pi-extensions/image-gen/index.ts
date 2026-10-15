@@ -37,8 +37,11 @@ export default function (pi: ExtensionAPI) {
   // Les modèles installés, lus à chaque conversation : la description de l'outil les nomme.
   let models: { id: string; name: string; tagline: string; edit?: boolean; arch?: string | null }[] = [];
   // Ses LoRA (dossier lora/ de son workspace) : relus avant chaque tour, un LoRA peut être
-  // entraîné ou ajouté en cours de conversation.
-  let loras: { name: string; arch: string | null; archName: string | null; trigger?: string | null; note?: string | null }[] = [];
+  // entraîné ou ajouté en cours de conversation. Avec : le dossier, les familles utilisables ici et
+  // où chercher des LoRA pour elles, et s'il peut télécharger lui-même (case Shell).
+  type Lora = { name: string; arch: string | null; archName: string | null; trigger?: string | null; note?: string | null };
+  type Target = { arch: string; archName: string; models: string[]; sources: { label: string; url: string }[] };
+  let loraInfo: { loras: Lora[]; folder: string; canDownload: boolean; targets: Target[] } | null = null;
   let vision = false;
   async function refresh() {
     try {
@@ -53,16 +56,25 @@ export default function (pi: ExtensionAPI) {
     if (!config!.agent) return;
     try {
       const res = await fetch(`${config!.harn}/api/images/loras?agent=${encodeURIComponent(config!.agent)}`);
-      loras = res.ok ? ((await res.json()).loras ?? []) : [];
+      loraInfo = res.ok ? await res.json() : null;
     } catch {
-      loras = [];
+      loraInfo = null;
     }
   }
   const lorasText = () => {
-    if (!loras.length) return "";
-    const fit = (arch: string | null) => models.filter((m: any) => m.arch === arch).map((m) => m.id);
-    return ` LoRAs in your lora/ folder, applied by writing <lora:NAME:SCALE> (with the angle brackets) in the prompt, scale 0.8 to 1.2: ${loras.map((l) => `${l.name} (${l.archName ? `made for ${l.archName}${fit(l.arch).length ? `, use with ${fit(l.arch).join(" or ")}` : ", no compatible model installed"}` : "model family unknown"}${l.trigger ? `; trigger words: "${l.trigger}"` : ""}${l.note ? `; what it is and how to use it, from the person: ${l.note}` : ""})`).join("; ")}. A LoRA only works with the model family it was trained on: omit \`model\` and Harn picks a compatible one.`;
+    if (!loraInfo || !loraInfo.targets.length) return "";
+    const { loras, folder, canDownload, targets } = loraInfo;
+    const fit = (arch: string | null) => targets.find((t) => t.arch === arch)?.models ?? [];
+    const mine = loras.length
+      ? ` Your LoRAs: ${loras.map((l) => `${l.name} (${l.archName ? `made for ${l.archName}${fit(l.arch).length ? `, use with ${fit(l.arch).join(" or ")}` : ", no compatible model installed"}` : "model family unknown"}${l.trigger ? `; trigger words: "${l.trigger}"` : ""}${l.note ? `; what it is and how to use it, from the person: ${l.note}` : ""})`).join("; ")}.`
+      : " You have no LoRA yet.";
+    const where = targets.map((t) => `${t.archName} (${t.sources.map((s) => `${s.label}: ${s.url}`).join(" ; ")})`).join("; ");
+    const add = canDownload
+      ? `To add one the person asks for: download its .safetensors with your shell straight into ${folder} (Hugging Face file links: https://huggingface.co/<repo>/resolve/main/<file>; Civitai may need the person's API key), under a short file name, which becomes its NAME. Then make a small test image (width and height 256) with it: if generate_image warns the LoRA was applied partially, tell the person it needs converting for stable-diffusion.cpp.`
+      : `You cannot download files: give the person the link and ask them to put the .safetensors file in ${folder}.`;
+    return ` LoRAs live in ${folder}; apply one by writing <lora:NAME:SCALE> (with the angle brackets) in the prompt, scale 0.8 to 1.2; omit \`model\` and Harn picks a model of the LoRA's family.${mine} A LoRA only works with the model family it was trained on; families installed here, and where to find LoRAs for them: ${where}. ${add} Only add a LoRA of a real person's likeness if it is the person you work for, or they confirm that person agreed.`;
   };
+
   pi.on("session_start", async (_event, ctx: any) => {
     vision = sees(ctx?.model);
     await refresh();
@@ -90,7 +102,7 @@ export default function (pi: ExtensionAPI) {
       "Takes from a few seconds to a few minutes: the graphics card is lent to the image model, then given back to you.",
     promptSnippet: "generate_image: create or edit an image on this machine",
     promptGuidelines: [
-      "Write the `prompt` for `generate_image` in English, as one detailed description: subject, setting, style, light, framing. Text to render in the image goes between quotes.",
+      "Write the `prompt` for `generate_image` in English, as one detailed description: subject, setting, style, light, framing. Text to render in the image goes between quotes. Short or vague requests: follow the skill ecrire-une-image to complete them.",
       "To edit an image the person sent or you generated, pass its path in `references` and describe the change in `prompt`.",
       "After `generate_image`, say in one sentence what you made; do not describe the file path at length.",
     ],

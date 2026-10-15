@@ -183,6 +183,29 @@ export const ARCH_NAMES = {
   chroma: 'Chroma', 'z-image': 'Z-Image', krea2: 'Krea 2', 'ernie-image': 'ERNIE-Image', sdxl: 'SDXL', sd1: 'Stable Diffusion 1.5', sd3: 'Stable Diffusion 3',
 };
 
+// Où trouver des LoRA pour un réseau : Hugging Face les range comme adaptateurs de leur modèle
+// de base (tag base_model:adapter:…), Civitai par recherche.
+const LORA_BASES = {
+  'qwen-image-2.1': ['Qwen/Qwen-Image-2.1'],
+  'qwen-image': ['Qwen/Qwen-Image', 'Qwen/Qwen-Image-2512', 'Qwen/Qwen-Image-Edit-2509'],
+  'flux2-klein-4b': ['black-forest-labs/FLUX.2-klein-4B', 'black-forest-labs/FLUX.2-klein-base-4B'],
+  'flux2-klein-9b': ['black-forest-labs/FLUX.2-klein-9B', 'black-forest-labs/FLUX.2-klein-base-9B'],
+  'flux2-dev': ['black-forest-labs/FLUX.2-dev'],
+  'flux3-klein': ['black-forest-labs/flux-3-image-klein'],
+  flux1: ['black-forest-labs/FLUX.1-dev'],
+  chroma: ['lodestones/Chroma', 'lodestones/Chroma1-HD'],
+  'z-image': ['Tongyi-MAI/Z-Image-Turbo', 'Tongyi-MAI/Z-Image'],
+  krea2: ['krea/Krea-2-Raw', 'krea/Krea-2-Turbo'],
+  'ernie-image': ['baidu/ERNIE-Image', 'baidu/ERNIE-Image-Turbo'],
+};
+export function loraSources(arch) {
+  const name = ARCH_NAMES[arch] ?? arch;
+  return [
+    ...(LORA_BASES[arch] ?? []).map((base) => ({ label: `Hugging Face · ${base.split('/')[1]}`, url: `https://huggingface.co/models?other=${encodeURIComponent(`base_model:adapter:${base}`)}&sort=likes` })),
+    { label: 'Civitai', url: `https://civitai.com/search/models?modelType=LORA&query=${encodeURIComponent(name.replace(/\s*\(.*\)/, ''))}` },
+  ];
+}
+
 // Le réseau visé par un LoRA, d'après ce que l'outil d'entraînement a écrit dans le fichier
 // (ai-toolkit, kohya : ss_base_model_version, modelspec.architecture, base_model). null : inconnu.
 const LORA_ARCHS = [

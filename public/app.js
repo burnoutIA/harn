@@ -1201,7 +1201,11 @@ function loraBlock(agent) {
       <button class="btn ghost small" type="button" data-action="lora-delete" data-id="${esc(agent.id)}" data-file="${esc(l.file)}" title="Supprimer ce LoRA" aria-label="Supprimer ${esc(l.name)}">${icon.trash}</button></div>
       <input type="text" name="loraNote:${esc(l.name)}" maxlength="400" value="${esc(l.note ?? '')}" placeholder="Ce qu’il représente et comment s’en servir (ex. le visage de Xavier ; commencer par « a photo of xavier, a man »)" autocomplete="off" spellcheck="false" aria-label="Note du LoRA ${esc(l.name)}"></li>`;
   }).join('');
+  // Où en trouver : pour chaque famille de modèles installée, ses LoRA sur Hugging Face et Civitai.
+  const targets = imageCatalog?.loraTargets ?? [];
+  const find = targets.length ? `<p class="hint">Trouver des LoRA : ${targets.map((t) => `${esc(t.archName)} (${t.sources.filter((s, i) => i === 0 || !s.label.startsWith('Hugging Face')).map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.label.replace(/^Hugging Face · .*/, 'Hugging Face'))}</a>`).join(', ')})`).join(' · ')}. ${agent.options.shell ? 'Donnez le lien à l’agent : il le télécharge au bon endroit et l’essaie.' : 'Sans la case Shell, l’agent ne télécharge rien : posez le fichier .safetensors dans le dossier lora/ vous-même.'}</p>` : '';
   return `<div class="loras"><span class="field-label">LoRA (dossier <code>lora/</code> de l’agent)</span>
+    ${find}
     ${loras.length ? `<ul>${rows}</ul><p class="hint">À écrire dans la description de l’image. Harn prend un modèle de la bonne famille. L’agent reçoit la liste et vos notes à chaque tour : dites-y ce que chaque LoRA représente.</p>` : '<p class="hint">Aucun. Un fichier .safetensors posé dans <code>lora/</code> s’applique avec &lt;lora:nom:1&gt;.</p>'}</div>`;
 }
 

@@ -38,7 +38,7 @@ test('seul un agent dont la case Images est cochée peut en demander', async () 
   const agent = await createAgent({ name: 'Peintre' });
   await assert.rejects(agentForImages(agent.id), { status: 403 });
   await updateAgent(agent.id, { options: { images: true } });
-  assert.deepEqual(await agentForImages(agent.id), { who: 'Peintre', workspace: agent.workspace, preferred: null, loraNotes: {} });
+  assert.deepEqual(await agentForImages(agent.id), { who: 'Peintre', workspace: agent.workspace, preferred: null, loraNotes: {}, shell: false });
   await assert.rejects(agentForImages('inconnu'), { status: 404 });
   // Son modèle d'images : un modèle connu de Harn, ou rien (le premier installé).
   await updateAgent(agent.id, { imageModel: 'qwen-image-2-1-uc' });

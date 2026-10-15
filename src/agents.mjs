@@ -224,7 +224,7 @@ export async function launchAgent(id, { window = true } = {}) {
 export async function agentForImages(id) {
   const agent = await readAgent(id);
   if (!agent.options.images) throw failure(403, 'La génération d’images n’est pas cochée pour cet agent');
-  return { who: agent.name, workspace: workspaceOf(id), preferred: agent.imageModel ?? null, loraNotes: agent.loraNotes ?? {} };
+  return { who: agent.name, workspace: workspaceOf(id), preferred: agent.imageModel ?? null, loraNotes: agent.loraNotes ?? {}, shell: Boolean(agent.options.shell) };
 }
 
 // Retirer un LoRA de son dossier lora/ (depuis la fenêtre de Harn).

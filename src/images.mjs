@@ -7,7 +7,7 @@ import { hfSha256 } from './catalog.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { github } from './github.mjs';
-import { ARCH_NAMES, familyById } from './image-families.mjs';
+import { ARCH_NAMES, familyById, loraSources } from './image-families.mjs';
 import { addedImageModels, forgetImageModel, imageSuggestions } from './image-hub.mjs';
 import { listLoras, loraDirOf, lorasIn } from './loras.mjs';
 import { withGpu } from './gpu-queue.mjs';
@@ -94,6 +94,7 @@ export function imagesReport() {
       ...(images().models?.[model.id] ?? {}),
       installed: Boolean(images().models?.[model.id]?.installedAt),
     })),
+    loraTargets: loraTargets(),
     suggestions: imageSuggestions(new Set(models.map((model) => model.family).filter(Boolean))),
     watch: { checking: Boolean(getState().imageWatch?.checking), checkedAt: getState().imageWatch?.checkedAt ?? null, error: getState().imageWatch?.error ?? null },
   };
@@ -231,6 +232,19 @@ const inside = (dir, file) => { const rel = path.relative(dir, file); return Boo
 
 // workspace : le dossier de travail de qui demande. L'image y est rangée (images/), et les
 // références à retoucher ne sont lues que là.
+// Les familles de LoRA utilisables ici : une par réseau des modèles installés, avec ces modèles
+// et où chercher des LoRA pour elle.
+export function loraTargets() {
+  const byArch = new Map();
+  for (const model of installedModels()) {
+    const arch = archOfModel(model);
+    if (!arch) continue;
+    if (!byArch.has(arch)) byArch.set(arch, { arch, archName: ARCH_NAMES[arch] ?? arch, models: [], sources: loraSources(arch) });
+    byArch.get(arch).models.push(model.id);
+  }
+  return [...byArch.values()];
+}
+
 // Le réseau de diffusion d'un modèle : un LoRA ne s'applique qu'au sien.
 export const archOfModel = (model) => familyById(model.family)?.arch ?? null;
 
