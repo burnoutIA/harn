@@ -896,6 +896,8 @@ function renderImageModels() {
   const w = imageCatalog.watch ?? {};
   const suggestions = imageCatalog.suggestions ?? [];
   paint('image-models', imageCatalog.models.map(imageModelRow).join(''));
+  const installed = imageCatalog.models.filter((m) => m.installed).length;
+  paint('image-count', installed ? `${installed} installé${installed > 1 ? 's' : ''}` : 'aucun installé');
   paint('image-inspect', imageInspectBlock());
   paint('image-hub', `<div class="group-title hub-head"><h2>Proposés pour votre carte</h2><span>${w.checking ? 'recherche en cours…' : w.checkedAt ? `vérifié ${daysAgo(w.checkedAt)} à ${clock(w.checkedAt)}` : 'pas encore vérifié'}</span>
       <button class="btn small ghost" data-action="image-hub-check" ${w.checking ? 'disabled' : ''}>Vérifier maintenant</button></div>
@@ -912,8 +914,9 @@ function renderModels() {
         <button class="btn primary" type="submit">${icon.terminal} Installer avec pi</button>
       </form>
     </section>
-    <section class="card image-models">
-      <div class="label">Images</div>
+    <details class="card image-models">
+      <summary><span class="label">Images</span><span id="image-count" class="count"></span><span class="chevron" aria-hidden="true"></span></summary>
+      <div class="image-body">
       <p class="intro">Un agent dont la case « Images » est cochée peut générer et retoucher des images. La carte graphique passe au modèle d’images le temps de l’image, puis revient au modèle de texte.</p>
       <div id="image-models" class="image-list"></div>
       <div class="image-add">
@@ -925,7 +928,8 @@ function renderModels() {
         <div id="image-inspect"></div>
       </div>
       <div id="image-hub" class="image-list"></div>
-    </section>
+      </div>
+    </details>
     <div id="models-body"></div>
   </div>`);
   renderImageModels();
