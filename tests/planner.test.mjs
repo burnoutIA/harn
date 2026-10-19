@@ -170,6 +170,16 @@ test('migration v2 : `layers` déduit des anciens réglages, état plus récent 
   assert.equal(migrate({ version: SCHEMA_VERSION + 5 }).version, SCHEMA_VERSION + 5);
 });
 
+test('migration v3 : lots de 4096 pour les seuls modèles partagés avec la RAM', async () => {
+  const { migrate } = await import('../src/migrations.mjs');
+  const state = migrate({ version: 2, profiles: {
+    moe: { tuning: { layers: 'auto', batch: 1024, ubatch: 512 } },
+    carte: { tuning: { layers: 'all', batch: 1024, ubatch: 512 } },
+  } });
+  assert.deepEqual([state.profiles.moe.tuning.batch, state.profiles.moe.tuning.ubatch], [4096, 4096]);
+  assert.equal(state.profiles.carte.tuning.ubatch, 512);
+});
+
 test('llamAmpere : KV K/V distincts, cache de prompts aligné sur l’officiel', async () => {
   const { defaultTuning, describe, llamaArgs } = await import('../src/engine.mjs');
   const model = modelById('swift15-q27-iq3s-mtp');

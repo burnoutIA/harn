@@ -28,7 +28,7 @@ export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
 // - MTP sans seuil sur les cartes rapides, n-max 2 avec seuil p-min sur les cartes lentes ;
 // - KV q8_0 (K et V du même type, sinon l'attention repasse sur le CPU) ;
 // - vision sur CPU : ~0,9 Gio de VRAM rendus au contexte, débit de génération identique ;
-// - batch 1024 / ubatch 512 ;
+// - batch 1024 / ubatch 512 (4096 pour un modèle partagé avec la RAM, voir loading.mjs) ;
 // - toutes les couches sur la carte dès que le modèle y tient : --fit, prudent, en laissait 15 sur 66
 //   au processeur sur une 3090 à 150k (59 tok/s au lieu de 95). La marge se reprend sur le contexte
 //   (loadWithHeadroom) ; --fit ne sert qu'aux modèles qui débordent vraiment (layers « auto »).

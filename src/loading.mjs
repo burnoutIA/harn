@@ -13,7 +13,10 @@ import { HEADROOM_MIN_MIB } from './tuner.mjs';
 
 // Lancer un modèle : recette du moteur, réglage de départ, chargement avec la marge VRAM.
 export const runtimeKind = (model, tuning) => (tuning?.fork ?? (model.engine === 'prism' ? 'prism' : 'llama'));
-const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256 };
+// Partagé avec la RAM, le préfill copie les poids restés côté hôte vers la carte à chaque
+// micro-lot : des lots de 4096 les amortissent. Mistral Small 4 119B sur une 3090 : 190 tok/s
+// en ubatch 512, 470 en 4096, génération inchangée (--fit reprend la VRAM sur le cache d'experts).
+const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256, batch: 4096, ubatch: 4096 };
 // Le réglage de départ d'un modèle : contexte et type de KV viennent de l'objectif
 // (100k-150k), le reste des a priori de la carte.
 export function startingTuning(model, hardware) {
