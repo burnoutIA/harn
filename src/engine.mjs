@@ -76,7 +76,7 @@ export function llamaArgs(model, files, tuning, hardware) {
     '--api-key-file', ENGINE_KEY_FILE,
     '--jinja', '--metrics', '--slots', '--no-webui',
     '-c', String(tuning.context),
-    '--parallel', '1',
+    '--parallel', '2', '--kv-unified',
     '-t', String(threads),
     '-b', String(tuning.batch), '-ub', String(tuning.ubatch),
     // K et V du même type, sauf les paires prévues par un fork (llamAmpere : tq5_0/turbo4, noyau fusionné).

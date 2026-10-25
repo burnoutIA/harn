@@ -17,7 +17,8 @@ const SERIES_LENGTH = 120;
 
 const snapshot = {
   gpu: null,
-  request: null,       // la requête en cours
+  request: null,       // la dernière requête commencée parmi celles en cours (null : moteur libre)
+  running: 0,          // requêtes en cours (le moteur a deux slots)
   series: [],          // { t, tps } : un point par seconde, 0 quand rien ne tourne
   recent: [],          // les 30 dernières requêtes terminées
 };
@@ -25,6 +26,8 @@ const snapshot = {
 let viewers = 0;
 let gpuTimer = null;
 let slotTimer = null;
+// Les requêtes en cours, et pour chacune où en était son compteur au dernier relevé.
+const inflight = new Map();
 
 export const getLive = () => snapshot;
 
@@ -55,37 +58,39 @@ function decodedFromSlots(slots) {
   };
 }
 
+// Le compteur d'une requête llama, lu dans /slots. Seule, la requête est le slot qui travaille.
+// À deux, rien ne dit quel slot sert laquelle : le direct attend, les chiffres de fin
+// (timings du moteur) restent exacts. Au retour à une seule, on recale sans compter de débit.
+async function pollSlots(endpoint) {
+  const slots = await fetch(`${endpoint}/slots`, { headers: engineHeaders() }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (inflight.size !== 1) return;
+  const [[request, track]] = inflight;
+  const info = slots && decodedFromSlots(slots);
+  if (request.engine !== 'llama' || !info || info.decoded === null) return;
+  const now = Date.now();
+  if (info.decoded > 0 && request.phase === 'prefill') {
+    request.phase = 'decode';
+    request.ttft = (now - request.startedAt) / 1000;
+    request.decodeStartedAt = now;
+  } else if (!track.resync && info.decoded > track.decoded) {
+    // Lissage court : le débit instantané d'un cycle MTP est trop haché pour être lu.
+    const instant = (info.decoded - track.decoded) / ((now - track.at) / 1000);
+    request.tps = request.tps === null ? instant : request.tps * 0.6 + instant * 0.4;
+  }
+  Object.assign(track, { decoded: info.decoded, at: now, resync: false });
+  request.decoded = info.decoded;
+  live.emit('live', snapshot);
+}
+
 // Début d'une requête relayée par la passerelle.
 export function beginRequest({ model, client, key = null, endpoint, engine }) {
   const request = { id: Date.now().toString(36), model, client, key, engine, startedAt: Date.now(), phase: 'prefill', decoded: 0, tps: null, ttft: null, chunks: 0 };
+  for (const track of inflight.values()) track.resync = true;
+  inflight.set(request, { decoded: 0, at: Date.now(), resync: false });
   snapshot.request = request;
+  snapshot.running = inflight.size;
   if (!gpuTimer) gpuTimer = setInterval(tick, 1000);
-
-  let lastDecoded = 0;
-  let lastAt = Date.now();
-  if (engine === 'llama') {
-    slotTimer = setInterval(async () => {
-      const slots = await fetch(`${endpoint}/slots`, { headers: engineHeaders() }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      const info = slots && decodedFromSlots(slots);
-      if (!info || info.decoded === null || snapshot.request !== request) return;
-      const now = Date.now();
-      if (info.decoded > 0 && request.phase === 'prefill') {
-        request.phase = 'decode';
-        request.ttft = (now - request.startedAt) / 1000;
-        request.decodeStartedAt = now;
-        lastDecoded = info.decoded;
-        lastAt = now;
-      } else if (info.decoded > lastDecoded) {
-        // Lissage court : le débit instantané d'un cycle MTP est trop haché pour être lu.
-        const instant = (info.decoded - lastDecoded) / ((now - lastAt) / 1000);
-        request.tps = request.tps === null ? instant : request.tps * 0.6 + instant * 0.4;
-        lastDecoded = info.decoded;
-        lastAt = now;
-      }
-      request.decoded = info.decoded;
-      live.emit('live', snapshot);
-    }, 400);
-  }
+  if (engine === 'llama' && !slotTimer) slotTimer = setInterval(() => pollSlots(endpoint), 400);
   live.emit('live', snapshot);
   return request;
 }
@@ -107,8 +112,9 @@ export function onChunk(request, tokens = 1) {
 
 // Fin de requête : les compteurs du moteur font foi (timings llama.cpp, usage OpenAI).
 export async function endRequest(request, { timings, usage, error, finish = null }) {
-  clearInterval(slotTimer);
-  slotTimer = null;
+  inflight.delete(request);
+  for (const track of inflight.values()) track.resync = true;
+  if (!inflight.size) { clearInterval(slotTimer); slotTimer = null; }
   const now = Date.now();
   const generated = timings?.predicted_n ?? usage?.completion_tokens ?? request.decoded;
   const decodeSeconds = timings?.predicted_ms ? timings.predicted_ms / 1000 : request.decodeStartedAt ? (now - request.decodeStartedAt) / 1000 : null;
@@ -129,7 +135,9 @@ export async function endRequest(request, { timings, usage, error, finish = null
     finish,
     error: error ?? null,
   };
-  snapshot.request = null;
+  // Le moteur n'est libre qu'une fois la dernière requête finie.
+  snapshot.request = [...inflight.keys()].at(-1) ?? null;
+  snapshot.running = inflight.size;
   snapshot.recent.unshift(record);
   snapshot.recent.length = Math.min(snapshot.recent.length, 30);
   live.emit('live', snapshot);
