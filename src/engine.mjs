@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { modelById } from './catalog.mjs';
 import { engineSheet } from './engines.mjs';
+import { busyWith, isImageJob } from './gpu-queue.mjs';
 import { backendCandidates, gpuProfile, mtpPlan } from './levers.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -140,24 +141,30 @@ async function killTree(pid) {
 
 // Un seul moteur sur la carte : tout llama-server ou Strata lancé depuis nos dossiers et
 // resté orphelin (crash, arrêt brutal) est repris. On vérifie les PID, pas les ports.
+// Le moteur d'images (runtime/sdcpp) est épargné tant qu'une image tient la carte : un modèle de
+// texte rechargé à ce moment-là le tuait en plein travail.
 export async function reapOrphans() {
-  const pids = (process.platform === 'win32' ? await windowsRuntimePids() : await linuxRuntimePids()).filter((pid) => pid !== child?.pid);
+  const sparing = isImageJob(busyWith());
+  const pids = (process.platform === 'win32' ? await windowsRuntimePids(sparing) : await linuxRuntimePids(sparing)).filter((pid) => pid !== child?.pid);
   for (const pid of pids) await killTree(pid);
   return pids;
 }
 
-async function windowsRuntimePids() {
+async function windowsRuntimePids(sparingImages = false) {
   const root = DIRS.runtime.replaceAll("'", "''");
-  const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${root}', 'OrdinalIgnoreCase') } | Select-Object -ExpandProperty ProcessId`;
+  const images = path.join(DIRS.runtime, 'sdcpp').replaceAll("'", "''");
+  const spare = sparingImages ? ` -and -not $_.ExecutablePath.StartsWith('${images}', 'OrdinalIgnoreCase')` : '';
+  const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${root}', 'OrdinalIgnoreCase')${spare} } | Select-Object -ExpandProperty ProcessId`;
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true }).catch(() => ({ stdout: '' }));
   return stdout.split(/\s+/).filter(Boolean).map(Number);
 }
 
 // Linux : l'exécutable de chaque processus se lit dans /proc/<pid>/exe. ketch, lui aussi dans
 // runtime/, sert la recherche web des sessions pi ouvertes : on le laisse.
-async function linuxRuntimePids() {
+async function linuxRuntimePids(sparingImages = false) {
   if (process.platform !== 'linux') return [];
   const root = DIRS.runtime + path.sep;
+  const images = path.join(DIRS.runtime, 'sdcpp') + path.sep;
   const pids = [];
   for (const entry of await readdir('/proc').catch(() => [])) {
     if (!/^\d+$/.test(entry)) continue;
@@ -165,6 +172,7 @@ async function linuxRuntimePids() {
     // ligne de commande (lancée par son chemin complet) si.
     const exe = await readlink(`/proc/${entry}/exe`).catch(() => '');
     const argv0 = (await readFile(`/proc/${entry}/cmdline`, 'utf8').catch(() => '')).split('\0')[0];
+    if (sparingImages && (exe.startsWith(images) || argv0.startsWith(images))) continue;
     if ((exe.startsWith(root) || argv0.startsWith(root)) && path.basename(exe) !== 'ketch') pids.push(Number(entry));
   }
   return pids;

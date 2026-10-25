@@ -259,6 +259,24 @@ export function chooseImageModel(ready, { wanted = null, preferred = null, editi
   return fallback;
 }
 
+// Un nom de fichier libre pour l'image : deux demandes dans la même seconde, même graine
+// comprise, ne s'écrasent pas. Réservé tout de suite, avant que le moteur ne l'écrive.
+const reserved = new Set();
+async function reserveOutput(dir, base) {
+  for (let n = 1; ; n += 1) {
+    const file = path.join(dir, `${base}${n > 1 ? `-${n}` : ''}.png`);
+    if (reserved.has(file) || await stat(file).catch(() => null)) continue;
+    reserved.add(file);
+    setTimeout(() => reserved.delete(file), TIMEOUT_MS + 60_000).unref();
+    return file;
+  }
+}
+
+// Les images demandées et pas encore finies (en cours ou en file), et le modèle de texte à
+// recharger quand la dernière est faite.
+let imagesWaiting = 0;
+let textToRestore = null;
+
 // preferred : le modèle d'images de l'agent, pris quand il n'en demande pas un précis.
 export async function generateImage({ workspace, who = 'pi', model: wanted = null, preferred = null, prompt, negative = null, width = 1024, height = 1024, seed = null, references = [] }) {
   const text = String(prompt ?? '').trim();
@@ -299,8 +317,8 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   const outDir = path.join(workspace, 'images');
   await mkdir(outDir, { recursive: true });
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
-  const output = path.join(outDir, `${stamp}-${model.id}.png`);
   const chosenSeed = Number.isInteger(seed) && seed >= 0 ? seed : Math.floor(Math.random() * 2 ** 31);
+  const output = await reserveOutput(outDir, `${stamp}-${model.id}-${chosenSeed}`);
   const args = [
     ...model.files.filter((file) => file.role !== 'vision' || refs.length).flatMap((file) => [FLAGS[file.role], fileOf(model, file.role)]),
     ...model.args,
@@ -317,8 +335,8 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   ];
 
   const started = Date.now();
-  let before = null;
   let report = {};
+  imagesWaiting += 1;
   try {
     await withGpu(`image:${model.id}`, async () => {
       update((s) => { (s.images ??= {}).job = { model: model.id, who, prompt: text.slice(0, 200), startedAt: started }; });
@@ -327,15 +345,21 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
       // lui, attend déjà son outil).
       for (let waited = 0; getLive().request && waited < 120_000; waited += 500) await new Promise((resolve) => setTimeout(resolve, 500));
       const active = getState().active;
-      before = active?.status === 'ready' || active?.status === 'loading' ? active.modelId : null;
+      if (active?.status === 'ready' || active?.status === 'loading') textToRestore = active.modelId;
       await stopEngine();
       report = await runCli(engine, args);
       if (!(await stat(output).catch(() => null))) throw new Error('Le moteur d’images s’est terminé sans écrire d’image');
     });
   } finally {
     update((s) => { if (s.images) s.images.job = null; });
-    // La carte est rendue : le modèle de texte revient, sans faire attendre la réponse.
-    if (before) activate(before).catch(() => {});
+    // La carte est rendue : le modèle de texte revient, sans faire attendre la réponse. Pas tant
+    // qu'une autre image attend : il serait rechargé pour rien, et son chargement croiserait
+    // celui du moteur d'images.
+    imagesWaiting -= 1;
+    if (!imagesWaiting && textToRestore) {
+      activate(textToRestore).catch(() => {});
+      textToRestore = null;
+    }
   }
   const seconds = +((Date.now() - started) / 1000).toFixed(1);
   patch(model.id, { lastSeconds: seconds });
