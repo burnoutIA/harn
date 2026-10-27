@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { download } from './download.mjs';
 import { github } from './github.mjs';
@@ -337,5 +338,120 @@ export async function installStrataPack(model, firstShard, contextSize, onLog = 
   await writeFile(path.join(base.dir, name), JSON.stringify({ ...rest, args, tokenizer: path.join(pack, 'tokenizer'), model_name: model.id, log: path.join(base.dir, name.replace(/\.json$/, '.log')) }, null, 2));
   const info = { kind: 'strata', pack: true, commit: base.commit, dir: base.dir, config: name, python: base.python, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
+  return info;
+}
+
+// ── HyperQwen : vLLM patché par syv-ai pour Qwen3.8-27B sur une carte de 24 Go ────────
+// Même règle que Strata : un commit figé. On suit la voie sans Docker de son docs/install.md :
+// venv Python 3.12 créé par uv, vLLM 0.31.0 et ses épingles, patchs, pthfa (KV int8 en contexte
+// long), poids requantifiés, variante « fast ». Puis la variante française : le brouillon MTP ne
+// propose que 40 960 tokens, et la liste livrée (danois, anglais, code) laisse ~20 % des tokens
+// français hors de portée. Celle de src/assets, comptée sur Wikipédia FR/EN, du code et des
+// réponses du modèle en français, les couvre à 99 % : +24 % de génération en français, anglais
+// et code inchangés (RTX 3090). Le décodage spéculatif reste exact : les réponses ne changent pas.
+// Chaque étape longue pose un marqueur .harn-ready : une installation interrompue reprend au
+// début de l'étape, sur un dossier remis à zéro (les patchs ne s'appliquent qu'à un vLLM neuf).
+const HYPERQWEN_COMMIT = 'ce9615c4f2309be727407918a6c979bd67968069';
+const UV_VERSION = '0.13.0';
+const HYPERQWEN_PIP = ['vllm==0.31.0', 'huggingface_hub', 'hf_transfer', 'ninja', 'flashinfer-cubin==0.7.0.post1', 'pandas',
+  // Le compilateur CUDA tenu à la version du runtime (13.0) : sans ces épingles, pip prend un nvcc
+  // plus récent et la compilation à la volée de FlashInfer échoue au premier démarrage.
+  'nvidia-cuda-nvcc==13.0.88', 'nvidia-cuda-crt==13.0.88', 'nvidia-cuda-cccl==13.0.85', 'nvidia-nvvm==13.0.88'];
+const HYPERQWEN_WEIGHTS = { repo: 'dbirks/Qwen3.8-27B-W4A16-AutoRound', dir: 'Qwen3.8-27B-W4A16-AutoRound' };
+const DRAFT_VOCAB_FR = fileURLToPath(new URL('./assets/hyperqwen-draft-vocab-fr.json', import.meta.url));
+// Les fichiers que build_draft_vocab.py réécrit : de vraies copies dans la variante française,
+// le reste en liens physiques (pas 20 Go de plus sur le disque).
+const DRAFT_REWRITES = new Set(['model_extra_tensors.safetensors', 'model.safetensors.index.json', 'mtp_draft_vocab_ids.pt', 'config.json']);
+const ready = (dir) => stat(path.join(dir, '.harn-ready')).then(() => true, () => false);
+const markReady = (dir) => writeFile(path.join(dir, '.harn-ready'), `${new Date().toISOString()}\n`);
+
+// uv : celui de la machine s'il y en a un, sinon la version figée, vérifiée par son empreinte.
+async function uvCommand() {
+  for (const candidate of ['uv', path.join(os.homedir(), '.local', 'bin', 'uv')]) {
+    if (await run(candidate, ['--version']).then(() => true, () => false)) return candidate;
+  }
+  const name = 'uv-x86_64-unknown-linux-gnu';
+  const binary = path.join(DIRS.runtime, 'uv', name, 'uv');
+  if (await stat(binary).catch(() => null)) return binary;
+  const url = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${name}.tar.gz`;
+  const sha256 = (await fetch(`${url}.sha256`).then((r) => (r.ok ? r.text() : ''))).trim().split(/\s+/)[0];
+  if (!/^[0-9a-f]{64}$/i.test(sha256)) throw new Error(`Empreinte de uv ${UV_VERSION} introuvable : installation de HyperQwen arrêtée`);
+  const archive = await download({ id: 'runtime:uv', label: `uv ${UV_VERSION}`, url, dest: path.join(DIRS.downloads, `${name}-${UV_VERSION}.tar.gz`), sha256 });
+  await extract(archive, path.join(DIRS.runtime, 'uv'));
+  return binary;
+}
+
+// CUDA 13.0 déclare rsqrt et rsqrtf sans noexcept, la glibc 2.41+ avec : toute compilation par le
+// nvcc du venv échoue alors (pthfa, et FlashInfer au démarrage). On fait comme les CUDA suivants.
+async function fixCudaMath(venv) {
+  const file = path.join(venv, 'lib', 'python3.12', 'site-packages', 'nvidia', 'cu13', 'include', 'crt', 'math_functions.h');
+  const text = await readFile(file, 'utf8');
+  const fixed = text.replace(/\b(rsqrtf?)\((double|float) x\);/g, '$1($2 x) noexcept (true);');
+  if (fixed !== text) await writeFile(file, fixed);
+}
+
+export async function installHyperQwen(onLog = () => {}) {
+  if (!LINUX) throw new Error('HyperQwen n’est installé par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'hyperqwen');
+  const venv = path.join(dir, 'venv');
+  const python = path.join(venv, 'bin', 'python');
+  const step = (command, args, env = {}) => {
+    onLog(`${path.basename(command)} ${args.join(' ')}`);
+    return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000, env: { ...process.env, HF_XET_HIGH_PERFORMANCE: '1', ...env } }, onLog);
+  };
+
+  if (!(await stat(path.join(dir, 'single-user', 'start_qwen.sh')).catch(() => null))) {
+    const archive = await download({
+      id: 'runtime:hyperqwen',
+      label: `HyperQwen (vLLM pour Qwen3.8-27B, ${HYPERQWEN_COMMIT.slice(0, 7)})`,
+      url: `https://github.com/syv-ai/HyperQwen/archive/${HYPERQWEN_COMMIT}.tar.gz`,
+      dest: path.join(DIRS.downloads, `hyperqwen-${HYPERQWEN_COMMIT.slice(0, 7)}.tar.gz`),
+    });
+    const unpacked = path.join(DIRS.runtime, `HyperQwen-${HYPERQWEN_COMMIT}`);
+    await rm(unpacked, { recursive: true, force: true });
+    await extract(archive, DIRS.runtime);
+    await rm(dir, { recursive: true, force: true });
+    await rename(unpacked, dir);
+  }
+
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    await step(uv, ['venv', '--python', '3.12', '--seed', 'venv']);
+    await step(uv, ['pip', 'install', '--python', python, '--index-strategy', 'unsafe-best-match', '--extra-index-url', 'https://flashinfer.ai/whl/', ...HYPERQWEN_PIP]);
+    await fixCudaMath(venv);
+    await step('bash', ['patches/apply.sh', path.join(venv, 'lib', 'python3.12', 'site-packages', 'vllm')]);
+    await step('bash', ['pthfa/install.sh']);
+    await markReady(venv);
+  }
+
+  const weights = path.join(dir, 'models', HYPERQWEN_WEIGHTS.dir);
+  if (!(await ready(weights))) {
+    // La requantification réécrit les poids sur place : on repart toujours de fichiers neufs.
+    await rm(weights, { recursive: true, force: true });
+    await rm(`${weights}-fast`, { recursive: true, force: true });
+    await step(path.join(venv, 'bin', 'hf'), ['download', HYPERQWEN_WEIGHTS.repo, '--local-dir', weights]);
+    for (const script of ['quant_lm_head.py', 'quant_embed.py', 'quant_mtp.py']) await step(python, [path.join('prepare', script), weights]);
+    await step(python, [path.join('prepare', 'build_draft_vocab.py'), weights, '--ids', path.join('prepare', 'draft_vocab_ids.json')]);
+    await step(python, [path.join('prepare', 'fetch_fast_variant.py')]);
+    await markReady(weights);
+  }
+
+  const fast = `${weights}-fast`;
+  const french = `${fast}-fr`;
+  if (!(await ready(french))) {
+    await rm(french, { recursive: true, force: true });
+    await mkdir(french, { recursive: true });
+    for (const entry of await readdir(fast, { withFileTypes: true })) {
+      if (!entry.isFile() || entry.name === '.harn-ready') continue;
+      await (DRAFT_REWRITES.has(entry.name) ? copyFile : link)(path.join(fast, entry.name), path.join(french, entry.name));
+    }
+    await step(python, [path.join('prepare', 'build_draft_vocab.py'), french, '--ids', DRAFT_VOCAB_FR]);
+    await markReady(french);
+  }
+
+  await step('bash', ['verify.sh', '--no-server']);
+  const info = { kind: 'hyperqwen', commit: HYPERQWEN_COMMIT, dir, model: french, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes.hyperqwen = info; });
   return info;
 }

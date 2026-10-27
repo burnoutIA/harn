@@ -60,11 +60,17 @@ const server = http.createServer((req, res) => {
       // La génération ralentit avec la profondeur ; un KV f16 ralentit moins (le cas de Xing4/MLA).
       const slope = (config.depthSlope ?? 0.4) * (kv === 'f16' ? 1 - (config.f16DepthBonus ?? 0) : 1);
       const tps = (config.tps ?? 80) / (1 + slope * promptTokens / 32768);
-      json(200, {
-        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'length' }],
-        usage: { prompt_tokens: promptTokens, completion_tokens: predicted },
-        timings: { prompt_n: promptTokens, prompt_per_second: config.prefillTps ?? 1200, predicted_n: predicted, predicted_per_second: tps },
-      });
+      const usage = { prompt_tokens: promptTokens, completion_tokens: predicted };
+      const timings = { prompt_n: promptTokens, prompt_per_second: config.prefillTps ?? 1200, predicted_n: predicted, predicted_per_second: tps };
+      if (!request.stream) {
+        json(200, { choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'length' }], usage, timings });
+        return;
+      }
+      // Comme le vrai en flux : le contenu, puis un dernier événement avec timings et usage.
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }], usage, timings })}\n\n`);
+      res.end('data: [DONE]\n\n');
     });
     return undefined;
   }

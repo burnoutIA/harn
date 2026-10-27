@@ -22,6 +22,8 @@ const run = promisify(execFile);
 const ENGINE_KEY = randomBytes(32).toString('base64url');
 export const ENGINE_KEY_FILE = path.join(DIRS.data, 'engine.key');
 export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
+// Pour un moteur qui prend sa clé dans l'environnement plutôt que dans un fichier (vLLM).
+export const engineKey = () => ENGINE_KEY;
 
 // Le point de départ d'un modèle sur CETTE machine. Les a priori viennent de levers.mjs
 // (classe de bande passante, architecture) ; le banc les remet en cause un par un.
@@ -53,6 +55,7 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
 
 export function describe(tuning) {
   if (tuning.strataArm) return tuning.strataArm;
+  if (tuning.hyperqwenArm) return tuning.hyperqwenArm;
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);

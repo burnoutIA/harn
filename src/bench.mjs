@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
-import { modelById } from './catalog.mjs';
+import { modelById, ownLauncher } from './catalog.mjs';
 import { describe, startEngine } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
@@ -67,7 +67,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
       }
       const result = await measure(getState().active.endpoint, modelId, { workloads, weights, onProgress: say });
       const entry = { id: `arm${index}`, stage, label, tuning, headroomMiB: loadedHeadroom, ...result };
-      entry.ok = model.engine === 'strata' || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
+      entry.ok = ownLauncher(model) || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
       results.push(entry);
       return entry;
     } catch (error) {
@@ -82,6 +82,13 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   if (model.engine === 'strata') {
     let best = await trial('Réglages Strata', { ...initial.tuning, strataArm: 'Réglages de l’installeur' });
     for (const arm of await strataArms(model, initial.tuning)) best = better(await trial('Strata', arm), best);
+    return finish(model, results, best);
+  }
+  // HyperQwen : un seul réglage tient 128k sur une 24 Go (voir startingTuning) ; on le mesure,
+  // et la vitesse en profondeur suit dans finish.
+  if (model.engine === 'hyperqwen') {
+    const best = await trial('Réglages HyperQwen', initial.tuning);
+    if (best.error) throw new Error(best.error);
     return finish(model, results, best);
   }
 

@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installStrata, installStrataPack } from './runtimes.mjs';
+import { installHyperQwen, installStrata, installStrataPack } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -26,6 +26,14 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   const paths = {};
   try {
     // Avant de télécharger : le fichier est peut-être déjà sur la machine (même nom, même taille).
+    if (model.engine === 'hyperqwen') {
+      // Ni GGUF ni copie locale à reprendre : l'installeur télécharge et prépare lui-même.
+      note('Installation de HyperQwen (vLLM) et préparation du modèle');
+      await installHyperQwen((line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
+      await log('Fichiers prêts.');
+      update((s) => { s.models[model.id] = { installedAt: new Date().toISOString(), installing: false, files: [], paths: {} }; });
+      return;
+    }
     const local = await findLocalCopies(model.engine === 'strata' && !model.strataPack ? model.files : files);
     if (model.engine === 'strata' && !model.strataPack) {
       const context = assess(model, getState().hardware).context;

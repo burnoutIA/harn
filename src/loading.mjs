@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { displayName } from './catalog.mjs';
-import { ENGINE_KEY_FILE, defaultTuning, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
+import { displayName, ownLauncher } from './catalog.mjs';
+import { ENGINE_KEY_FILE, defaultTuning, engineKey, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
 import { engineSheet } from './engines.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -20,6 +20,9 @@ const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256, bat
 // Le réglage de départ d'un modèle : contexte et type de KV viennent de l'objectif
 // (100k-150k), le reste des a priori de la carte.
 export function startingTuning(model, hardware) {
+  // HyperQwen : MTP et KV int8 (pthfa) à 131k, le seul de ses modes qui tient 130k sur une 24 Go
+  // dont le bureau prend ~1 Go. KVarN tient aussi, mais génère trois fois moins vite à 130k.
+  if (model.engine === 'hyperqwen') return { context: 131072, spec: 'mtp', ctx: 'long', hyperqwenArm: 'MTP · KV int8 · 128k' };
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
   // Partagé avec la RAM : --fit remplit la carte jusqu'à sa cible ; on la met au-dessus de la marge
@@ -48,6 +51,34 @@ export function recipeFor(model, tuning) {
       cwd: runtime.dir,
       endpoint: `http://127.0.0.1:${PORTS.strata}`,
       health: `http://127.0.0.1:${PORTS.strata}/v1/models`,
+    };
+  }
+  if (model.engine === 'hyperqwen') {
+    const runtime = state.runtimes.hyperqwen;
+    if (!runtime) throw new Error('HyperQwen n’est pas installé');
+    const endpoint = `http://127.0.0.1:${PORTS.hyperqwen}`;
+    return {
+      modelId: model.id,
+      label: displayName(model),
+      command: 'bash',
+      args: ['single-user/start_qwen.sh'],
+      cwd: runtime.dir,
+      // Avec une clé, le lanceur écouterait sur toutes les interfaces : HOST le garde en local.
+      // Le nom servi est l'identifiant Harn, comme l'alias de llama-server ; la dernière
+      // occurrence de --served-model-name l'emporte sur celle du lanceur.
+      env: {
+        MODEL: runtime.model,
+        SPEC: tuning.spec ?? 'mtp',
+        CTX: tuning.ctx ?? 'long',
+        MAX_LEN: String(tuning.context ?? 131072),
+        PORT: String(PORTS.hyperqwen),
+        HOST: '127.0.0.1',
+        VLLM_API_KEY: engineKey(),
+        EXTRA_ARGS: `--served-model-name ${model.id}`,
+      },
+      endpoint,
+      // /health ne demande pas de clé, et ne répond qu'une fois le moteur prêt.
+      health: `${endpoint}/health`,
     };
   }
   const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
@@ -115,12 +146,12 @@ export async function loadWithHeadroom(model, tuning) {
       // Un fichier qui annonce une couche MTP qu'il ne contient pas (convertisseur d'une autre
       // version) : on recharge en ignorant cette annonce avant de conclure à l'échec.
       if (error.tensors && model.profile?.mtp && !current.noNextn) { current = { ...current, noNextn: true, spec: { type: 'none' } }; continue; }
-      if (error.fatal || exhausted(current) || model.engine === 'strata') throw error;
+      if (error.fatal || exhausted(current) || ownLauncher(model)) throw error;
       current = smaller(current);
       continue;
     }
     const headroomMiB = await freeVram();
-    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || exhausted(current) || model.engine === 'strata') {
+    if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || exhausted(current) || ownLauncher(model)) {
       return { active, tuning: current, headroomMiB };
     }
     current = smaller(current);

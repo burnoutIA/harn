@@ -218,6 +218,31 @@ export const MODELS = [
     evidence: { gpu: 'RTX 3090', tps128k: 70.7, note: 'banc Harn : 128k · KV q8_0 · MTP3, intelligence 100' },
   },
   {
+    // Le même 27B, servi par HyperQwen (vLLM 0.31 patché par syv-ai pour les cartes de 24 Go) :
+    // W4A16 AutoRound, KV int8 lu par pthfa, MTP avec un vocabulaire de brouillon recompté en
+    // français (src/assets/hyperqwen-draft-vocab-fr.json : +24 % sur des réponses françaises).
+    id: 'qwen3-8-27b-hyperqwen',
+    name: 'Qwen3.8-27B',
+    variant: 'W4A16 · MTP · HyperQwen',
+    tagline: 'Le 27B officiel servi par HyperQwen (vLLM patché pour la 3090) : 131k de contexte, une centaine de tok/s en français.',
+    engine: 'hyperqwen',
+    repo: 'dbirks/Qwen3.8-27B-W4A16-AutoRound',
+    // Pas de fichier unique : les poids (19,5 Go) et l'environnement Python de vLLM (~20 Go),
+    // installés par installHyperQwen. Ce total sert au contrôle de place sur le disque.
+    files: [{ name: 'Qwen3.8-27B-W4A16-AutoRound', bytes: 42_000_000_000 }],
+    needs: { vramGiB: 23, ramGiB: 32, nvidiaCc: 8.6 },
+    contextByVram: [[23, 131072]],
+    quality: 95,
+    paramsB: 27,
+    reasoning: true,
+    // La vision désactive pthfa, qui fait la vitesse en contexte long : servi sans.
+    vision: false,
+    moe: null,
+    sampling: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0 },
+    reasoningLevels: ['low', 'medium', 'xhigh'],
+    evidence: { gpu: 'RTX 3090', tps4k: 99.4, tps128k: 68.4, note: 'HyperQwen ce9615c, MTP CTX=long 131k, KV int8 pthfa, brouillon FR' },
+  },
+  {
     id: 'qwen3-6-35b-a3b-mtp-gguf-ud-iq4-nl',
     name: 'Qwen3.6-35B-A3B',
     variant: 'UD-IQ4_NL · MTP · MoE',
@@ -278,6 +303,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
+// Strata et HyperQwen se lancent par leurs propres scripts, avec leurs propres réglages : ni
+// recette llama-server, ni repli sur moins de contexte au chargement.
+export const ownLauncher = (model) => model.engine === 'strata' || model.engine === 'hyperqwen';
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

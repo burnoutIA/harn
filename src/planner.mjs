@@ -1,4 +1,4 @@
-import { MODELS, totalBytes } from './catalog.mjs';
+import { MODELS, ownLauncher, totalBytes } from './catalog.mjs';
 import { backendCandidates, gpuProfile } from './levers.mjs';
 import { RATING_WEIGHTS, globalRating, ratingFrom } from './rating.mjs';
 
@@ -154,6 +154,18 @@ export function assess(model, hardware) {
     const context = 131072;
     return finalize({ fit: 'full', reasons, context, kv: 'int8', tps: strataTps(model, profile, hardware) });
   }
+  if (model.engine === 'hyperqwen') {
+    // HyperQwen vise les cartes de 24 Go, Ampere (sm86) ou plus récentes : ses noyaux pthfa et
+    // Marlin sont compilés pour elles. Installé par Harn sous Linux seulement (venv, sans Docker).
+    if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['HyperQwen n’est installé par Harn que sous Linux'] };
+    if (gpu?.vendor !== 'nvidia') reasons.push('HyperQwen demande une carte NVIDIA');
+    else if (gpu.computeCapability < model.needs.nvidiaCc) reasons.push('HyperQwen demande une RTX série 30 ou plus récente');
+    if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
+    if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
+    if (reasons.length) return { fit: 'no', reasons };
+    // Mesuré sur la 3090 de référence à 128k (le bureau y prend ~1 Go) ; le banc remesure ici.
+    return finalize({ fit: 'full', reasons, context: 131072, kv: 'int8', tps: model.evidence.tps128k });
+  }
 
   if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
   if (reasons.length) return { fit: 'no', reasons };
@@ -178,7 +190,7 @@ export function assess(model, hardware) {
 // de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
 // peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
 // Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
-const familyOf = (model) => (model.engine === 'strata' || model.engine === 'prism' ? model.engine : model.moe ? 'moe' : 'dense');
+const familyOf = (model) => (['strata', 'prism', 'hyperqwen'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
 
 export function measuredAt100k(bench) {
   const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);
@@ -266,16 +278,17 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
 
   const targetWhy = target && both.includes(target) ? explainTarget(target, both, verdict, q, profiles) : null;
 
-  // Le premier modèle : la cible si elle s'installe vite (pas Strata, 70 Go) ; sinon le meilleur
-  // modèle llama.cpp qui tient sur la carte, pour avoir une IA qui marche pendant le reste.
+  // Le premier modèle : la cible si elle s'installe vite (pas Strata, 70 Go, ni HyperQwen, 40 Go
+  // et un vLLM) ; sinon le meilleur modèle llama.cpp qui tient sur la carte, pour avoir une IA qui
+  // marche pendant le reste.
   const quick = usable
-    .filter((m) => m.engine !== 'strata' && verdict(m.id).fit === 'full')
+    .filter((m) => !ownLauncher(m) && verdict(m.id).fit === 'full')
     .sort((a, b) => {
       const score = (m) => (verdict(m.id).meetsContext && verdict(m.id).meetsSpeed ? 2 : 0) + (verdict(m.id).meetsContext ? 1 : 0);
       return score(b) - score(a) || q(b) - q(a);
     });
   const fallback = usable.filter((m) => m.engine === 'prism');
-  const first = target && target.engine !== 'strata' ? target : quick[0] ?? fallback[0] ?? null;
+  const first = target && !ownLauncher(target) ? target : quick[0] ?? fallback[0] ?? null;
   const upgrade = target && target.id !== first?.id ? target : null;
 
   for (const entry of verdicts) {

@@ -60,7 +60,11 @@ export const WORKLOADS = {
   },
 };
 
+// En flux : llama-server donne ses timings dans le dernier événement ; les moteurs qui n'en ont pas
+// (vLLM, Strata) sont chronométrés au premier token, sinon la lecture d'un prompt de 32k compterait
+// dans la génération (4,6 tok/s affichés pour ~80 réels avec HyperQwen).
 async function complete(endpoint, model, messages, maxTokens) {
+  const startedAt = Date.now();
   const response = await fetch(`${endpoint}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...engineHeaders() },
@@ -71,11 +75,44 @@ async function complete(endpoint, model, messages, maxTokens) {
       temperature: 0,
       seed: 42,
       ignore_eos: true,
+      stream: true,
+      stream_options: { include_usage: true },
       chat_template_kwargs: { enable_thinking: false },
     }),
   });
   if (!response.ok) throw new Error(`Banc : HTTP ${response.status} ${await response.text().catch(() => '')}`.slice(0, 300));
-  return response.json();
+  let timings = null;
+  let usage = null;
+  let firstAt = null;
+  let buffer = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:') || line.includes('[DONE]')) continue;
+      try {
+        const event = JSON.parse(line.slice(5));
+        if (event.timings) timings = event.timings;
+        if (event.usage) usage = event.usage;
+        const delta = event.choices?.[0]?.delta;
+        if (firstAt === null && (delta?.content || delta?.reasoning_content || delta?.reasoning)) firstAt = Date.now();
+      } catch { /* ligne partielle : ignorée */ }
+    }
+  }
+  const endedAt = Date.now();
+  if (!timings && usage && firstAt !== null && endedAt > firstAt) {
+    timings = {
+      predicted_n: usage.completion_tokens,
+      predicted_per_second: (usage.completion_tokens - 1) / ((endedAt - firstAt) / 1000),
+      prompt_n: usage.prompt_tokens,
+      prompt_per_second: usage.prompt_tokens / ((firstAt - startedAt) / 1000),
+      // Chronométré ici, pas compté par le moteur : la mesure reste marquée « estimée ».
+      estimated: true,
+    };
+  }
+  return { timings, usage };
 }
 
 // Moyenne harmonique pondérée : le temps total pour produire chaque charge selon son poids.
@@ -126,7 +163,7 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
           prefillTps: t.prompt_per_second ?? null,
           promptTokens: t.prompt_n ?? answer.usage?.prompt_tokens ?? null,
           acceptance: t.draft_n ? t.draft_n_accepted / t.draft_n : null,
-          estimated: !answer.timings,
+          estimated: !answer.timings || Boolean(t.estimated),
         });
       }
     } finally { clearInterval(watcher); }

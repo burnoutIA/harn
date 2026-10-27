@@ -155,7 +155,8 @@ function settlePending() {
 // Ce que Harn télécharge lui-même pour un modèle. L'archive du moteur Strata n'y compte que tant
 // qu'elle arrive : une fois reçue, ses 14 Mo afficheraient « 100 % » pendant que Strata tire 70 Go.
 function downloadItems(id) {
-  const runtime = modelOf(id)?.engine === 'strata' ? downloadsFor('runtime:strata').filter((d) => !d.done) : [];
+  const engine = modelOf(id)?.engine;
+  const runtime = engine === 'strata' || engine === 'hyperqwen' ? downloadsFor(`runtime:${engine}`).filter((d) => !d.done) : [];
   return downloadsFor(`model:${id}`).concat(runtime).filter((d) => d.total);
 }
 // Dernière ligne lisible du journal d'un installeur (codes de terminal et retours chariot retirés).
@@ -296,7 +297,7 @@ function engineLabel() {
   return `${runtime?.label ?? known[kind] ?? kind} ${runtime?.tag ?? ''}`.trim();
 }
 
-const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ' };
+const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ', 'Réglages HyperQwen': 'Point de départ' };
 const stageOf = (arm) => STAGE[arm.stage] ?? (arm.stage?.startsWith('Moteur ') ? 'Moteur' : arm.stage) ?? '';
 
 // Les réglages en mots simples ; le libellé technique reste visible en second plan.
@@ -721,7 +722,7 @@ function renderHome() {
 function archWithoutEngine(model) {
   const arch = model.profile?.arch;
   const lists = Object.values(state.engineArchs ?? {});
-  if (!arch || model.engine === 'strata' || !lists.length) return null;
+  if (!arch || model.engine === 'strata' || model.engine === 'hyperqwen' || !lists.length) return null;
   return lists.some((archs) => archs.includes(arch)) ? null : arch;
 }
 
@@ -743,6 +744,7 @@ function modelCard(model) {
   if (isUpgrade) badges.push('<span class="badge upgrade">Recommandé pour vous</span>');
   else if (isTarget && !isActive) badges.push('<span class="badge upgrade" title="Meilleure note globale parmi les modèles qui tiennent 100k de contexte et 40 tok/s">Meilleur choix ici</span>');
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
+  if (model.engine === 'hyperqwen') badges.push('<span class="badge">vLLM · HyperQwen</span>');
   if (model.vision) badges.push(`<span class="badge icon" title="Vision : comprend les images" aria-label="Vision : comprend les images">${icon.eye}</span>`);
   if (verdict.fit === 'partial' && !entry.installedAt) badges.push('<span class="badge warn">En partie sur le processeur</span>');
   for (const label of domainLeaders()[model.id] ?? []) badges.push(`<span class="badge lead" title="Meilleure note du banc d’intelligence en ${label.toLowerCase()} parmi vos modèles testés">Meilleur en ${label.toLowerCase()}</span>`);

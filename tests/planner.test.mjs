@@ -28,6 +28,20 @@ test('sous Linux sans Python venv : Strata hors de portée, avec la commande à 
   assert.ok(strata.every((v) => v.fit === 'no' && v.reasons.some((r) => /python3-venv/.test(r))));
 });
 
+test('HyperQwen : 128k sur une 24 Go sous Linux, jamais en premier modèle', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
+  const verdict = plan.verdicts.find((v) => v.id === 'qwen3-8-27b-hyperqwen');
+  assert.equal(verdict.fit, 'full');
+  assert.equal(verdict.context, 131072);
+  assert.notEqual(plan.firstModel, 'qwen3-8-27b-hyperqwen');
+});
+
+test('HyperQwen hors de portée sous Windows et sur une 16 Go', () => {
+  const windows = makePlan({ ...machine(24, 128), os: { platform: 'win32' } });
+  const small = makePlan({ ...machine(16, 64), os: { platform: 'linux' } });
+  for (const plan of [windows, small]) assert.equal(plan.verdicts.find((v) => v.id === 'qwen3-8-27b-hyperqwen').fit, 'no');
+});
+
 test('sous macOS : pas de Strata', () => {
   const plan = makePlan({ ...machine(24, 128), os: { platform: 'darwin' } });
   assert.ok(plan.verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));

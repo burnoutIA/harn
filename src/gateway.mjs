@@ -118,7 +118,8 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   }
   const active = getState().active;
   const model = modelById(modelId);
-  const engine = model.engine === 'strata' ? 'strata' : 'llama';
+  // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
+  const engine = model.engine === 'strata' || model.engine === 'hyperqwen' ? model.engine : 'llama';
   const target = `${active.endpoint}${url.pathname}${url.search}`;
 
   const generative = body && /\/(chat\/)?completions$/.test(url.pathname);

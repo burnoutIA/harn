@@ -5,7 +5,7 @@ import { runAnalysis } from './analysis.mjs';
 import { requestApproval } from './approvals.mjs';
 import { SANDBOX_INSTALL, sandboxAvailable } from './sandbox.mjs';
 import { tuneModel } from './bench.mjs';
-import { displayName, modelById, MODELS } from './catalog.mjs';
+import { displayName, modelById, MODELS, ownLauncher } from './catalog.mjs';
 import { buildEntry, inspectRepo, registerModel, unregisterModel } from './custom-models.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
@@ -38,10 +38,10 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
       // Avant de télécharger : quel moteur sait charger cette architecture ? L'officiel d'abord
       // (mis à jour s'il le faut), sinon un moteur ajouté avec l'accord de l'utilisateur.
       const failed = getState().models[modelId]?.engineFailures ?? {};
-      const engines = model.engine === 'strata' ? null : (await enginesFor(model.profile?.arch))?.filter((e) => !failed[e.id]) ?? null;
+      const engines = ownLauncher(model) ? null : (await enginesFor(model.profile?.arch))?.filter((e) => !failed[e.id]) ?? null;
       if (engines && !engines.length) throw new Error(archMissing(model.profile.arch));
       let engine = null;
-      if (model.engine !== 'strata') {
+      if (!ownLauncher(model)) {
         const primary = engines?.find((e) => e.id === runtimeKind(model)) ?? engines?.[0] ?? { id: runtimeKind(model) };
         setPhase(modelId, 'download', `Préparation du moteur ${engineSheet(primary.id).label}`);
         const info = await ensureEngine(primary, { backend: plan.backend.id, onLog: (text) => {
@@ -188,6 +188,9 @@ export async function deleteModel(modelId) {
     if (configPath) { await rm(configPath, { force: true }); await rm(configPath.replace(/\.json$/, '.log'), { force: true }); }
     // Un Flash-Next ajouté garde ses fichiers dans son propre dossier, comme les modèles de llama.cpp.
     if (model.strataPack) await remove(path.join(DIRS.models, modelId));
+  } else if (model.engine === 'hyperqwen') {
+    // Moteur, environnement Python et poids vivent ensemble dans runtime/hyperqwen, pour ce seul modèle.
+    await remove(path.join(DIRS.runtime, 'hyperqwen'));
   } else {
     await remove(path.join(DIRS.models, modelId));
   }
@@ -196,6 +199,7 @@ export async function deleteModel(modelId) {
     delete s.models[modelId];
     delete s.profiles[modelId];
     if (model.engine === 'strata') delete s.runtimes[`strata-${model.strataModel}`];
+    if (model.engine === 'hyperqwen') delete s.runtimes.hyperqwen;
     if (s.favorite === modelId) s.favorite = null;
     for (const id of Object.keys(s.downloads ?? {})) if (id.startsWith(`model:${modelId}:`)) delete s.downloads[id];
   });

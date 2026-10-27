@@ -29,4 +29,5 @@ export const PORTS = {
   lan: Number(process.env.HARN_LAN_PORT ?? 4748),
   engine: Number(process.env.HARN_ENGINE_PORT ?? 4749),
   strata: Number(process.env.HARN_STRATA_PORT ?? 4750),
+  hyperqwen: Number(process.env.HARN_HYPERQWEN_PORT ?? 4751),
 };
