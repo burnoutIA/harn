@@ -27,8 +27,77 @@ export const HYPERQWEN_ARMS = {
   mtp: { context: 131072, spec: 'mtp', ctx: 'long', hyperqwenArm: 'MTP · KV int8 · 128k' },
   dflash2: { context: 131072, spec: 'dflash2', ctx: 'long', hyperqwenArm: 'DFlash2 · KV int8 · 128k' },
 };
+// Les fiches du moteur du Gemma Challenge : un seul réglage chacune.
+export const GEMMA_CHALLENGE_TUNING = {
+  submission: { context: 4096, challengeArm: 'Soumission gemma-slayer · 4k' },
+  qat: { context: 131072, challengeArm: 'QAT W4A16 · MTP K7 · 128k' },
+};
+// Sans perte : ni lm_head élagué, ni fenêtre réduite, ni bake amputé, ni glouton imposé. Le reste du
+// manifeste (boucle MTP en un graphe CUDA, split-KV, échauffement, chemins rapides) est gardé.
+const QAT_DROPPED = ['LM_HEAD_PRUNE', 'LM_HEAD_PRUNE_REQUIRE', 'LM_HEAD_PRUNE_DST', 'LM_HEAD_KEEPSET_BUCKET', 'PCK04_KEEPSET', 'HF_OVERRIDES', 'SLIDING_WINDOW',
+  'WEIGHTS_BUCKET', 'DRAFTER_BUCKET', 'DRAFTER_SHA256', 'OVERRIDE_GENERATION_CONFIG', 'PRECACHE_DATASET'];
+// serve.py n'a pas d'argument libre : ses arguments de vLLM reçoivent les parseurs au moment où il
+// les passe à execvpe, sans modifier son code.
+const withArgs = (extra) => `import os, serve; _exec = os.execvpe; os.execvpe = lambda f, a, e: _exec(f, a + ${JSON.stringify(extra)}, e); serve.main()`;
+function challengeRecipe(model, runtime) {
+  const stack = model.challengeStack === 'qat' ? runtime?.qat : (runtime?.submissionStack ?? (runtime?.model && { model: runtime.model, drafter: runtime.drafter }));
+  if (!stack) throw new Error('Ce modèle du Gemma Challenge n’est pas installé');
+  const endpoint = `http://127.0.0.1:${PORTS.gemmaChallenge}`;
+  const manifest = JSON.parse(readFileSync(path.join(runtime.submission, 'manifest.json'), 'utf8'));
+  let env;
+  let args = ['serve.py'];
+  if (model.challengeStack === 'qat') {
+    env = Object.fromEntries(Object.entries(manifest.env).filter(([key]) => !QAT_DROPPED.includes(key)));
+    Object.assign(env, {
+      SPECULATIVE_CONFIG: JSON.stringify({ method: 'mtp', model: stack.drafter, num_speculative_tokens: 7 }),
+      MAX_MODEL_LEN: String(GEMMA_CHALLENGE_TUNING.qat.context),
+      // 2048 plutôt que 512 : lecture des longs prompts +11 % (3 284 tok/s à 92k), génération égale.
+      MAX_NUM_BATCHED_TOKENS: '2048',
+      // L'échantillonnage du modèle (generation_config.json), pas le glouton du challenge.
+      GENERATION_CONFIG: 'auto',
+      // Le partage de KV commence à la couche 24 sur les 42 couches : ses sources sont 22 et 23.
+      FA_SLIDING_EXCLUDE: '22,23',
+    });
+    args = ['-c', withArgs(['--enable-auto-tool-choice', '--tool-call-parser', 'gemma4', '--reasoning-parser', 'gemma4'])];
+  } else {
+    // L'environnement du manifeste, ses chemins /tmp (ceux du job HF) ramenés dans runtime/.
+    const local = { '/tmp/qat-assistant': stack.drafter, '/tmp/osoi5-12k-baked': stack.model, '/tmp/osoi5-v0-baked': stack.model };
+    env = Object.fromEntries(Object.entries(manifest.env).map(([key, value]) => [key, Object.entries(local).reduce((text, [from, to]) => text.replaceAll(from, to), value)]));
+    Object.assign(env, { LM_HEAD_PRUNE_DST: stack.model, PCK04_KEEPSET: path.join(stack.model, 'pck04_keepset.json') });
+  }
+  // tcmalloc (allocateur côté processeur) n'est pas toujours installé : serve.py s'en passe.
+  if (!existsSync(env.LD_PRELOAD ?? '')) delete env.LD_PRELOAD;
+  return {
+    modelId: model.id,
+    label: displayName(model),
+    command: path.join(runtime.dir, 'venv', 'bin', 'python'),
+    args,
+    cwd: runtime.submission,
+    env: {
+      ...env,
+      LOCAL_MODEL_DIR: stack.model,
+      PLE_FOLD_TARGET_MODEL: stack.model,
+      LOCAL_DRAFTER_DIR: stack.drafter,
+      // Le venv du banc du job HF n'existe pas ici.
+      PATCH_BENCH_JINJA2: '0',
+      HOST: '127.0.0.1',
+      PORT: String(PORTS.gemmaChallenge),
+      SERVED_MODEL_NAME: model.id,
+      VLLM_API_KEY: engineKey(),
+      VLLM_NO_USAGE_STATS: '1',
+      DO_NOT_TRACK: '1',
+      HF_HUB_OFFLINE: '1',
+      // serve.py appelle sys.executable et hf, vLLM compile avec ninja : ceux du venv.
+      PATH: `${path.join(runtime.dir, 'venv', 'bin')}${path.delimiter}${process.env.PATH}`,
+    },
+    endpoint,
+    // /health répond dès le démarrage ; /v1/models attend la fin de l'échauffement de la soumission.
+    health: `${endpoint}/v1/models`,
+  };
+}
 export function startingTuning(model, hardware) {
   if (model.engine === 'hyperqwen') return HYPERQWEN_ARMS.mtp;
+  if (model.engine === 'gemma-challenge') return GEMMA_CHALLENGE_TUNING[model.challengeStack];
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
   // Partagé avec la RAM : --fit remplit la carte jusqu'à sa cible ; on la met au-dessus de la marge
@@ -89,6 +158,7 @@ export function recipeFor(model, tuning) {
       health: `${endpoint}/health`,
     };
   }
+  if (model.engine === 'gemma-challenge') return challengeRecipe(model, state.runtimes['gemma-challenge']);
   const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
   if (!runtime) throw new Error(`Moteur ${runtimeKind(model, tuning)} ${tuning.backend} non installé`);
   const files = modelFiles(model.id);

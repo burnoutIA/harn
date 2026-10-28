@@ -74,6 +74,12 @@ const pathOf = (model, file) => (file.shared ? path.join(SHARED, file.repo.repla
 const fileOf = (model, role) => { const file = model.files.find((f) => f.role === role); return file && pathOf(model, file); };
 const images = () => getState().images ?? {};
 const installedModels = () => allModels().filter((model) => images().models?.[model.id]?.installedAt);
+// Ce qu'un modèle d'images connu de l'état (installé ou en cours) occupe sous models/image : son
+// dossier et ses fichiers partagés. Le ménage du démarrage (cleanup.mjs) n'y touche pas.
+export function imagePathsInUse() {
+  const known = allModels().filter((model) => images().models?.[model.id]);
+  return [...known.map((model) => modelDir(model.id)), ...known.flatMap((model) => model.files.filter((file) => file.shared).map((file) => pathOf(model, file)))];
+}
 const patch = (id, fields) => update((s) => { ((s.images ??= {}).models ??= {})[id] = { ...s.images.models[id], ...fields }; });
 
 // Ce que l'interface et pi voient : chaque modèle, installé ou non, l'image en cours, et les

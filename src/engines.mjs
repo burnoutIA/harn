@@ -154,7 +154,7 @@ export function recordBuildFailure(id, error, hardware = getState().hardware) {
 
 // Les autres moteurs à mesurer au banc pour ce modèle, et les réglages à essayer sur chacun.
 export async function alternates(model, tuning, profile, hardware = getState().hardware) {
-  if (model.engine === 'prism' || model.engine === 'strata' || model.engine === 'hyperqwen') return [];
+  if (['prism', 'strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine)) return [];
   const current = tuning.fork ?? 'llama';
   const arch = model.profile?.arch;
   // Sans architecture connue (catalogue intégré) : les moteurs généraux utilisables ici.

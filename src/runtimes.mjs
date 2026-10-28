@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { download } from './download.mjs';
+import { download, hashFile } from './download.mjs';
 import { github } from './github.mjs';
 import { sandboxed } from './sandbox.mjs';
 import { linuxPython } from './hardware.mjs';
@@ -461,5 +461,134 @@ export async function installHyperQwen(onLog = () => {}) {
   await step('bash', ['verify.sh', '--no-server']);
   const info = { kind: 'hyperqwen', commit: HYPERQWEN_COMMIT, dir, model: french, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes.hyperqwen = info; });
+  return info;
+}
+
+// ── Gemma Challenge : le moteur des soumissions du Fast Gemma Challenge (Hugging Face, 2026) ──
+// La soumission gemma-slayer w188-ctk49-n64 (511 tok/s vérifiés sur A10G) : son serve.py, ses
+// patchs, son vLLM nightly. Deux fiches s'en servent (model.challengeStack) :
+// - 'submission' : la pile telle quelle, pour se comparer au challenge. Gemma 4 E4B int4 privé de
+//   5 couches (bake osoi5), lm_head réduit à 12 288 tokens, fenêtre 188, brouillon ré-entraîné, 4k ;
+// - 'qat' : ce qu'elle a de sans perte (boucle MTP K=7 en un seul graphe CUDA, split-KV en
+//   vérification, échauffement) sur le checkpoint QAT W4A16 officiel complet et le brouillon de
+//   Google, à 131k. Le brouillon ré-entraîné y perd 30 % en français, le budget de centroïdes
+//   (32/49/64) ne change rien : on garde ceux de la soumission.
+// Les fichiers des buckets du challenge ne sont pas versionnés : vérifiés par leur empreinte,
+// relevée le 28/10/2026 ; les dépôts Google sont figés à un commit.
+const CHALLENGE_BUCKET = 'hf://buckets/gemma-challenge';
+const CHALLENGE_SUBMISSION = {
+  path: 'gemma-gemma-slayer/submissions/gemma-slayer/w188-ctk49-n64-fork',
+  files: {
+    'detok_endonly.py': 'e24accb1b4a10b80a2409edfdce1b010268e82327c4abffe6274a668be20fcd1',
+    'fa_sliding_patch.py': '3effdca8c2da666ffcab8caaf7f9755a0a8d1f2352a9be2a49134989b378f84d',
+    'lsk_patch.py': 'a702b617bd9fab833ab407e2c7f5dd7a72ad16cb6a44dde1edba7c65c15f0f24',
+    'manifest.json': '050fdb6d27a7fc4c5b420624308303e6ec993c540b4e80e60d3d1a4d17efda24',
+    'serve_patch_pck04.py': '5491e358743a936f408d9c7d39732d106bb8d63813be59a2f6f9627dd474dc0b',
+    'serve_patch_precache.py': 'c0ff6dcf344196b32c907221dfd17eac342eb49dfee831fc93026662d101857a',
+    'serve_patch_warmup_bridge.py': '001009a88e524eb33bf803cd61dfad6dedb89420032244056ab2d2376c03600b',
+    'serve.py': '33e3618bc61c17ca112b3361da68b0dcd1ea9a36f1ffa94aa9b84c36a2bfe37f',
+    'sitecustomize.py': 'b8c48143449264cba97a7b865159dd956692c19ae07381c7f5b0a02118d85aec',
+    'splitkv_verify_patch.py': 'fa321f4761b746e2e6a56c87539b7268f5445fc41a0d91f57e2d4c43cc227e33',
+    'steptime_patch.py': '0558345ba60a533d8022e4d2b1e899e1246621bc2c6272e64851fc8c72bdf9aa',
+  },
+};
+const CHALLENGE_WEIGHTS = { path: 'gemma-chiku-inu/weights/osoi5-v0-baked', sha256: '96ddb126a1e7b90d700b01dab98c491ee50784bb55847eb39f8b67f91ea91d30' };
+const CHALLENGE_KEEPSET = { path: 'gemma-dixie-flatline/weights/int4-pck04c-12k/pck04_keepset.json', sha256: 'c0853633c1ad5a6b741a43524ee505f7d5994767d49d495d061a726822f3dc1d' };
+const CHALLENGE_DRAFTER = { path: 'gemma-kenyan-duma/weights/drafter-ft/ft-v1-epoch_001', sha256: 'ed159e334999fd6b5f2d0dbad026346d4efac89eb7c6f55c5cdb042eca5dd18e' };
+const QAT_TARGET = { repo: 'google/gemma-4-E4B-it-qat-w4a16-ct', revision: '6cd26aaa2357fb2bad8c51699a7558a4d1a965bb', sha256: '19d89d2a4b3e401a3eae75ec08ab112810421a036c91d8c8226b686be7fe0c5d', dir: 'qat-w4a16' };
+const QAT_DRAFTER = { repo: 'google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant', revision: '27f8d204f09f2be353d6ff0bf0d012792b13c79f', sha256: '9d0e2053067590cae9a8f4fcc57eefbe20dff90599360458ebd451e5cb5c947d', dir: 'qat-assistant' };
+// Les dépendances du manifeste, plus le client hf (buckets) que serve.py appelle.
+const CHALLENGE_PIP = ['https://wheels.vllm.ai/3e8afdf78598afc8be999a6a049be3a5fe182e48/vllm-0.22.1rc1.dev307%2Bg3e8afdf78.cu129-cp38-abi3-manylinux_2_28_x86_64.whl',
+  'transformers==5.9.0', 'jinja2==3.1.6', 'MarkupSafe==3.0.3', 'orjson==3.10.18', 'safetensors', 'torch', 'huggingface_hub', 'hf_transfer'];
+// L'échauffement (64 prompts synthétiques) interroge le serveur sans clé : avec VLLM_API_KEY, il
+// reçoit des 401 et le serveur finit par s'ouvrir à froid. Seul écart au code de la soumission.
+const WARMUP_AUTH = {
+  old: '        headers={"Content-Type": "application/json"},\n',
+  new: '        headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {os.environ[\'VLLM_API_KEY\']}"} if os.environ.get("VLLM_API_KEY") else {})},\n',
+};
+// Les dossiers de poids de chaque fiche, sous runtime/gemma-challenge/models.
+export const CHALLENGE_STACK_DIRS = { submission: ['osoi5-12k', 'drafter-ft-v1-epoch_001'], qat: [QAT_TARGET.dir, QAT_DRAFTER.dir] };
+
+async function checkSha(file, expected) {
+  const actual = (await hashFile(file)).digest('hex');
+  if (actual !== expected) throw new Error(`Empreinte différente pour ${path.basename(file)} : attendu ${expected.slice(0, 16)}…, reçu ${actual.slice(0, 16)}…`);
+}
+
+export async function installGemmaChallenge(model, onLog = () => {}) {
+  if (!LINUX) throw new Error('Le moteur du Gemma Challenge n’est installé par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'gemma-challenge');
+  const venv = path.join(dir, 'venv');
+  const python = path.join(venv, 'bin', 'python');
+  const hf = path.join(venv, 'bin', 'hf');
+  const submission = path.join(dir, 'submission');
+  const models = path.join(dir, 'models');
+  const step = (command, args, options = {}) => {
+    onLog(`${path.basename(command)} ${args.join(' ')}`);
+    return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000, ...options, env: { ...process.env, HF_XET_HIGH_PERFORMANCE: '1', ...options.env } }, onLog);
+  };
+  await mkdir(models, { recursive: true });
+
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    await step(uv, ['venv', '--python', '3.12', '--seed', 'venv']);
+    // En copie : serve.py réécrit des sources de vLLM sur place. En liens physiques (le défaut de
+    // uv), il réécrirait aussi le cache de uv, et tout venv suivant hériterait d'un vLLM patché.
+    await step(uv, ['pip', 'install', '--python', python, '--link-mode', 'copy', ...CHALLENGE_PIP]);
+    await markReady(venv);
+  }
+
+  if (!(await ready(submission))) {
+    await rm(submission, { recursive: true, force: true });
+    await step(hf, ['buckets', 'sync', `${CHALLENGE_BUCKET}/${CHALLENGE_SUBMISSION.path}`, submission]);
+    for (const [name, sha256] of Object.entries(CHALLENGE_SUBMISSION.files)) await checkSha(path.join(submission, name), sha256);
+    const warmup = path.join(submission, 'serve_patch_warmup_bridge.py');
+    await writeFile(warmup, (await readFile(warmup, 'utf8')).replace(WARMUP_AUTH.old, WARMUP_AUTH.new));
+    await markReady(submission);
+  }
+
+  const previous = getState().runtimes['gemma-challenge'] ?? {};
+  const info = { ...previous, kind: 'gemma-challenge', dir, submission, installedAt: new Date().toISOString() };
+  // Première version de l'état : les chemins de la pile du challenge à plat.
+  if (previous.model && !previous.submissionStack) info.submissionStack = { model: previous.model, drafter: previous.drafter };
+  if (model.challengeStack === 'qat') {
+    for (const source of [QAT_TARGET, QAT_DRAFTER]) {
+      const target = path.join(models, source.dir);
+      if (await ready(target)) continue;
+      await rm(target, { recursive: true, force: true });
+      await step(hf, ['download', source.repo, '--revision', source.revision, '--local-dir', target]);
+      await checkSha(path.join(target, 'model.safetensors'), source.sha256);
+      await markReady(target);
+    }
+    info.qat = { model: path.join(models, QAT_TARGET.dir), drafter: path.join(models, QAT_DRAFTER.dir) };
+  } else {
+    // Le bake osoi5 (8,5 Go), réduit sur place à 12k lignes de lm_head par le code de la
+    // soumission, comme son serve.py le fait au premier démarrage du job ; l'original est effacé.
+    const target = path.join(models, 'osoi5-12k');
+    if (!(await ready(target))) {
+      const source = path.join(models, 'osoi5-v0-baked');
+      const keepset = path.join(models, 'keepset-12k.json');
+      await rm(target, { recursive: true, force: true });
+      if (!(await stat(path.join(source, 'model.safetensors')).catch(() => null))) await step(hf, ['buckets', 'sync', `${CHALLENGE_BUCKET}/${CHALLENGE_WEIGHTS.path}`, source]);
+      await checkSha(path.join(source, 'model.safetensors'), CHALLENGE_WEIGHTS.sha256);
+      await step(hf, ['buckets', 'cp', `${CHALLENGE_BUCKET}/${CHALLENGE_KEEPSET.path}`, keepset]);
+      await checkSha(keepset, CHALLENGE_KEEPSET.sha256);
+      await step(python, ['-c', `import serve; serve._prune_lm_head_rows(${JSON.stringify(source)}, ${JSON.stringify(keepset)}, ${JSON.stringify(target)})`], { cwd: submission });
+      await markReady(target);
+      await rm(source, { recursive: true, force: true });
+      await rm(keepset, { force: true });
+    }
+    const drafter = path.join(models, 'drafter-ft-v1-epoch_001');
+    if (!(await ready(drafter))) {
+      await rm(drafter, { recursive: true, force: true });
+      await step(hf, ['buckets', 'sync', `${CHALLENGE_BUCKET}/${CHALLENGE_DRAFTER.path}`, drafter]);
+      await checkSha(path.join(drafter, 'model.safetensors'), CHALLENGE_DRAFTER.sha256);
+      await markReady(drafter);
+    }
+    info.submissionStack = { model: target, drafter };
+  }
+  delete info.model;
+  delete info.drafter;
+  update((s) => { s.runtimes['gemma-challenge'] = info; });
   return info;
 }

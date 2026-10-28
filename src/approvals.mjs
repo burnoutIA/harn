@@ -8,12 +8,12 @@ import { getState, update } from './state.mjs';
 // Les demandes vivent dans state.approvals (l'interface les reçoit par /api/events) ; elles ne
 // survivent pas à un redémarrage.
 
-const actions = new Map(); // id → fonction lancée à l'acceptation
+const actions = new Map(); // id → { run, refuse } : lancées à l'acceptation, au refus
 const KEEP_DECIDED_MS = 10 * 60_000;
 
-export function requestApproval({ kind, title, detail, run }) {
+export function requestApproval({ kind, title, detail, run, refuse = null }) {
   const id = randomBytes(6).toString('hex');
-  actions.set(id, run);
+  actions.set(id, { run, refuse });
   update((s) => {
     s.approvals = (s.approvals ?? []).filter((a) => a.status === 'pending' || Date.now() - a.decidedAt < KEEP_DECIDED_MS);
     s.approvals.push({ id, kind, title, detail, status: 'pending', at: Date.now(), decidedAt: null, error: null });
@@ -27,11 +27,11 @@ export function decideApproval(id, accept) {
   const entry = approvalOf(id);
   if (!entry) throw Object.assign(new Error('Demande inconnue ou expirée'), { status: 404 });
   if (entry.status !== 'pending') throw Object.assign(new Error('Demande déjà traitée'), { status: 409 });
-  const run = actions.get(id);
+  const { run, refuse } = actions.get(id) ?? {};
   actions.delete(id);
   let error = null;
   // Lancé avant la mise à jour : quand pi lit « accepted », le travail est déjà en route.
-  if (accept) { try { run?.(); } catch (caught) { error = caught.message; } }
+  try { (accept ? run : refuse)?.(); } catch (caught) { error = caught.message; }
   update((s) => {
     const target = s.approvals.find((a) => a.id === id);
     Object.assign(target, { status: error ? 'error' : accept ? 'accepted' : 'refused', decidedAt: Date.now(), error });

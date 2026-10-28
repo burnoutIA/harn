@@ -25,6 +25,7 @@ const initial = () => ({
   pi: { installed: false, version: null, lastLaunch: null },
   lan: false,     // API ouverte au réseau local (port à part, clé exigée)
   approvals: [],  // demandes de pi en attente d'un clic de l'utilisateur (approvals.mjs)
+  cleanupRefused: [], // fichiers de models/ que l'utilisateur a choisi de garder (cleanup.mjs)
 });
 
 let state = initial();

@@ -95,8 +95,9 @@ export function beginRequest({ model, client, key = null, endpoint, engine }) {
   return request;
 }
 
-// Pour Strata (pas de /slots) : estimation par morceaux, remplacée à la fin par l'usage.
-export function onChunk(request, tokens = 1) {
+// Sans /slots : le compte du moteur quand il le donne à chaque morceau (vLLM), sinon un token par
+// morceau (Strata), remplacé à la fin par l'usage.
+export function onChunk(request, total = null) {
   request.chunks += 1;
   if (request.engine === 'llama') return;
   const now = Date.now();
@@ -105,7 +106,7 @@ export function onChunk(request, tokens = 1) {
     request.ttft = (now - request.startedAt) / 1000;
     request.decodeStartedAt = now;
   }
-  request.decoded += tokens;
+  request.decoded = total ?? request.decoded + 1;
   const elapsed = (now - request.decodeStartedAt) / 1000;
   if (elapsed > 0.3) request.tps = request.decoded / elapsed;
 }

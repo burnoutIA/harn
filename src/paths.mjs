@@ -30,4 +30,5 @@ export const PORTS = {
   engine: Number(process.env.HARN_ENGINE_PORT ?? 4749),
   strata: Number(process.env.HARN_STRATA_PORT ?? 4750),
   hyperqwen: Number(process.env.HARN_HYPERQWEN_PORT ?? 4751),
+  gemmaChallenge: Number(process.env.HARN_GEMMA_CHALLENGE_PORT ?? 4752),
 };

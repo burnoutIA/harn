@@ -56,6 +56,7 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
 export function describe(tuning) {
   if (tuning.strataArm) return tuning.strataArm;
   if (tuning.hyperqwenArm) return tuning.hyperqwenArm;
+  if (tuning.challengeArm) return tuning.challengeArm;
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
@@ -185,7 +186,8 @@ async function waitReady(url, timeoutMs, exited) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (exited()) throw new Error('Le moteur s’est arrêté pendant le chargement (voir data/logs/engine.log)');
-    const ok = await fetch(url).then((response) => response.ok).catch(() => false);
+    // Avec la clé : la santé de la pile du Gemma Challenge passe par /v1/models, gardée par vLLM.
+    const ok = await fetch(url, { headers: engineHeaders() }).then((response) => response.ok).catch(() => false);
     if (ok) return;
     await new Promise((resolve) => setTimeout(resolve, 700));
   }

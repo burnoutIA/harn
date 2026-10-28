@@ -30,8 +30,12 @@ function roomFor(model, best, extraMiB) {
 export async function tuneModel(modelId, options = {}) {
   return withGpu(modelId, async () => {
     const result = await tuneModelInner(modelId, options);
-    // La vitesse et le contexte mesurés changent la note globale : le plan est recalculé.
-    update((s) => { s.plan = makePlan(s.hardware, iqScores(s), s.profiles); });
+    // La vitesse et le contexte mesurés changent la note globale : le plan est recalculé. Un banc
+    // réussi efface l'erreur d'un essai précédent (relancé seul, il ne passe pas par l'installation).
+    update((s) => {
+      s.plan = makePlan(s.hardware, iqScores(s), s.profiles);
+      if (s.models[modelId]) s.models[modelId].error = null;
+    });
     return result;
   });
 }
@@ -83,6 +87,13 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     let best = await trial('Réglages Strata', { ...initial.tuning, strataArm: 'Réglages de l’installeur' });
     for (const arm of await strataArms(model, initial.tuning)) best = better(await trial('Strata', arm), best);
     return finish(model, results, best);
+  }
+  // Le moteur du Gemma Challenge : le seul réglage de la fiche. La pile telle quelle (4k) ne tient
+  // ni la charge en profondeur (~32k) ni le prompt de code (plus de 4k tokens Gemma).
+  if (model.engine === 'gemma-challenge') {
+    const only = await trial('Gemma Challenge', initial.tuning, model.challengeStack === 'qat' ? compared : ['prose']);
+    if (only.error) throw new Error(only.error);
+    return finish(model, results, only);
   }
   // HyperQwen : ses deux réglages à 128k (HYPERQWEN_ARMS), celui en place d'abord. DFlash2 ne se
   // charge que si la carte est libre : son échec est noté, MTP reste.

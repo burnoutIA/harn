@@ -244,6 +244,61 @@ export const MODELS = [
     evidence: { gpu: 'RTX 3090', tps4k: 99.4, tps128k: 68.4, note: 'HyperQwen ce9615c, MTP CTX=long 131k, KV int8 pthfa, brouillon FR' },
   },
   {
+    // La pile gagnante du Fast Gemma Challenge (gemma-slayer, installGemmaChallenge), servie telle
+    // quelle pour comparer la carte à l'A10G du challenge. Taillée pour sa métrique : 5 couches
+    // retirées, lm_head réduit à 12k tokens choisis sur des prompts anglais, fenêtre glissante 188.
+    // En génération libre le français déraille (mots inventés, boucles) : un banc, pas un assistant.
+    id: 'gemma-4-e4b-challenge',
+    name: 'Gemma 4 E4B',
+    variant: 'Fast Gemma Challenge · vLLM',
+    tagline: 'La pile gagnante du Fast Gemma Challenge (511 tok/s vérifiés sur A10G), servie telle quelle : ~700 tok/s sur une 3090, 4k de contexte, qualité dégradée.',
+    engine: 'gemma-challenge',
+    challengeStack: 'submission',
+    repo: 'google/gemma-4-E4B-it',
+    // Les poids réduits (8,5 Go), le brouillon (0,2 Go) et l'environnement Python de vLLM (~11 Go),
+    // plus le bake d'origine le temps de la réduction : le total sert au contrôle de place.
+    files: [{ name: 'osoi5-12k', bytes: 29_000_000_000 }],
+    needs: { vramGiB: 23, ramGiB: 16, nvidiaCc: 8.6 },
+    contextByVram: [[23, 4096]],
+    quality: 25,
+    paramsB: 8,
+    reasoning: false,
+    // La soumission garde les encodeurs image et audio chargés, mais rien n'est mesuré ici avec eux.
+    vision: false,
+    moe: null,
+    // Le challenge impose le décodage glouton ; le serveur le prend par défaut.
+    sampling: { temperature: 0, top_p: 1, top_k: 0, min_p: 0 },
+    evidence: { gpu: 'RTX 3090', tps4k: 702, note: 'banc du challenge (128 prompts publics, 512 tokens, une requête à la fois) : 693 / 708 / 706 tok/s, PPL 2,3932 (A10G : ~507, PPL 2,3930)' },
+  },
+  {
+    // Le meilleur du challenge sans sa casse : la boucle MTP K=7 en un seul graphe CUDA, le split-KV
+    // en vérification et l'échauffement de la soumission gemma-slayer, sur le checkpoint QAT W4A16
+    // officiel complet (42 couches, vocabulaire entier) et le brouillon de Google, à 131k.
+    // 3090, réponses en français : 283 tok/s en glouton, 235 en échantillonnage (vLLM seul : 266 et
+    // 211), PPL 2,005 contre 2,032 pour vLLM seul. Outils, vision et flux vérifiés.
+    id: 'gemma-4-e4b-qat-vllm',
+    name: 'Gemma 4 E4B',
+    variant: 'QAT W4A16 · MTP · vLLM',
+    tagline: 'Le petit Gemma 4 officiel avec les accélérations sans perte du Fast Gemma Challenge : 131k de contexte, ~280 tok/s en français.',
+    engine: 'gemma-challenge',
+    challengeStack: 'qat',
+    repo: 'google/gemma-4-E4B-it-qat-w4a16-ct',
+    // Les poids (11,5 Go), le brouillon (0,2 Go) et l'environnement Python de vLLM (~11 Go), partagé
+    // avec la fiche du challenge : le total sert au contrôle de place sur le disque.
+    files: [{ name: 'qat-w4a16', bytes: 23_000_000_000 }],
+    needs: { vramGiB: 23, ramGiB: 16, nvidiaCc: 8.6 },
+    contextByVram: [[23, 131072]],
+    // Banc d'intelligence Harn sur la 3090 : 85 (Qwen3.8-27B : 100).
+    quality: 85,
+    paramsB: 8,
+    reasoning: false,
+    vision: true,
+    moe: null,
+    // Le generation_config.json de Google, que le serveur applique.
+    sampling: { temperature: 1, top_p: 0.95, top_k: 64, min_p: 0 },
+    evidence: { gpu: 'RTX 3090', tps4k: 298, tps128k: 129, note: 'banc Harn 298 tok/s (code 436, texte 227), 252 à 34k ; 129 tok/s après 92k de prompt (lu à 3 284 tok/s) ; intelligence 85' },
+  },
+  {
     id: 'qwen3-6-35b-a3b-mtp-gguf-ud-iq4-nl',
     name: 'Qwen3.6-35B-A3B',
     variant: 'UD-IQ4_NL · MTP · MoE',
@@ -304,9 +359,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
-// Strata et HyperQwen se lancent par leurs propres scripts, avec leurs propres réglages : ni
-// recette llama-server, ni repli sur moins de contexte au chargement.
-export const ownLauncher = (model) => model.engine === 'strata' || model.engine === 'hyperqwen';
+// Strata, HyperQwen et la pile du Gemma Challenge se lancent par leurs propres scripts, avec leurs
+// propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
+export const ownLauncher = (model) => ['strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine);
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

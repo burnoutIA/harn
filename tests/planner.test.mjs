@@ -42,6 +42,27 @@ test('HyperQwen hors de portée sous Windows et sur une 16 Go', () => {
   for (const plan of [windows, small]) assert.equal(plan.verdicts.find((v) => v.id === 'qwen3-8-27b-hyperqwen').fit, 'no');
 });
 
+test('Gemma Challenge : 4k sur une 24 Go sous Linux, jamais ni cible ni premier modèle', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
+  const verdict = plan.verdicts.find((v) => v.id === 'gemma-4-e4b-challenge');
+  assert.equal(verdict.fit, 'full');
+  assert.equal(verdict.context, 4096);
+  assert.equal(verdict.meetsContext, false);
+  for (const role of [plan.firstModel, plan.targetModel, plan.upgradeModel]) assert.notEqual(role, 'gemma-4-e4b-challenge');
+  const windows = makePlan({ ...machine(24, 128), os: { platform: 'win32' } });
+  assert.equal(windows.verdicts.find((v) => v.id === 'gemma-4-e4b-challenge').fit, 'no');
+});
+
+test('Gemma 4 E4B QAT (moteur du challenge) : 131k sur une 24 Go sous Linux, jamais en premier modèle', () => {
+  const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
+  const verdict = plan.verdicts.find((v) => v.id === 'gemma-4-e4b-qat-vllm');
+  assert.equal(verdict.fit, 'full');
+  assert.equal(verdict.context, 131072);
+  assert.notEqual(plan.firstModel, 'gemma-4-e4b-qat-vllm');
+  const small = makePlan({ ...machine(16, 64), os: { platform: 'linux' } });
+  assert.equal(small.verdicts.find((v) => v.id === 'gemma-4-e4b-qat-vllm').fit, 'no');
+});
+
 test('sous macOS : pas de Strata', () => {
   const plan = makePlan({ ...machine(24, 128), os: { platform: 'darwin' } });
   assert.ok(plan.verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));
@@ -109,6 +130,11 @@ test('raisonnement : medium par défaut, niveaux du client traduits', () => {
   assert.equal(shapeRequest({ reasoning_effort: 'none' }, model).chat_template_kwargs.enable_thinking, false);
   assert.equal(shapeRequest({ reasoning_effort: 'low' }, model).reasoning_effort, undefined);
   assert.equal(shapeRequest({ stream: true }, model).stream_options.include_usage, true);
+});
+
+test('vLLM en flux : le compte de tokens dans chaque morceau, pas pour llama-server', () => {
+  for (const id of ['qwen3-8-27b-hyperqwen', 'gemma-4-e4b-qat-vllm']) assert.equal(shapeRequest({ stream: true }, modelById(id)).stream_options.continuous_usage_stats, true);
+  assert.equal(shapeRequest({ stream: true }, modelById('swift15-q27-iq3s-mtp')).stream_options.continuous_usage_stats, undefined);
 });
 
 import { gpuProfile, mtpPlan, backendCandidates } from '../src/levers.mjs';

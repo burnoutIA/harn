@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installHyperQwen, installStrata, installStrataPack } from './runtimes.mjs';
+import { installGemmaChallenge, installHyperQwen, installStrata, installStrataPack } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -26,10 +26,12 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   const paths = {};
   try {
     // Avant de télécharger : le fichier est peut-être déjà sur la machine (même nom, même taille).
-    if (model.engine === 'hyperqwen') {
+    if (model.engine === 'hyperqwen' || model.engine === 'gemma-challenge') {
       // Ni GGUF ni copie locale à reprendre : l'installeur télécharge et prépare lui-même.
-      note('Installation de HyperQwen (vLLM) et préparation du modèle');
-      await installHyperQwen((line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
+      const hyperqwen = model.engine === 'hyperqwen';
+      note(hyperqwen ? 'Installation de HyperQwen (vLLM) et préparation du modèle' : 'Installation du moteur du Gemma Challenge (vLLM) et préparation du modèle');
+      const onLog = (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); };
+      await (hyperqwen ? installHyperQwen(onLog) : installGemmaChallenge(model, onLog));
       await log('Fichiers prêts.');
       update((s) => { s.models[model.id] = { installedAt: new Date().toISOString(), installing: false, files: [], paths: {} }; });
       return;

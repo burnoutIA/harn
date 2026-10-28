@@ -297,7 +297,7 @@ function engineLabel() {
   return `${runtime?.label ?? known[kind] ?? kind} ${runtime?.tag ?? ''}`.trim();
 }
 
-const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ', 'Réglages HyperQwen': 'Point de départ', 'HyperQwen': 'Anticipation' };
+const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ', 'Réglages HyperQwen': 'Point de départ', 'HyperQwen': 'Anticipation', 'Gemma Challenge': 'Point de départ' };
 const stageOf = (arm) => STAGE[arm.stage] ?? (arm.stage?.startsWith('Moteur ') ? 'Moteur' : arm.stage) ?? '';
 
 // Les réglages en mots simples ; le libellé technique reste visible en second plan.
@@ -722,7 +722,7 @@ function renderHome() {
 function archWithoutEngine(model) {
   const arch = model.profile?.arch;
   const lists = Object.values(state.engineArchs ?? {});
-  if (!arch || model.engine === 'strata' || model.engine === 'hyperqwen' || !lists.length) return null;
+  if (!arch || ['strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine) || !lists.length) return null;
   return lists.some((archs) => archs.includes(arch)) ? null : arch;
 }
 
@@ -745,6 +745,9 @@ function modelCard(model) {
   else if (isTarget && !isActive) badges.push('<span class="badge upgrade" title="Meilleure note globale parmi les modèles qui tiennent 100k de contexte et 40 tok/s">Meilleur choix ici</span>');
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
   if (model.engine === 'hyperqwen') badges.push('<span class="badge">vLLM · HyperQwen</span>');
+  if (model.engine === 'gemma-challenge') badges.push(model.challengeStack === 'qat'
+    ? '<span class="badge" title="Accélérations sans perte du Fast Gemma Challenge sur le checkpoint officiel">vLLM · Gemma Challenge</span>'
+    : '<span class="badge warn" title="Pile taillée pour la métrique du challenge : réponses dégradées, surtout en français">vLLM · banc du challenge</span>');
   if (model.vision) badges.push(`<span class="badge icon" title="Vision : comprend les images" aria-label="Vision : comprend les images">${icon.eye}</span>`);
   if (verdict.fit === 'partial' && !entry.installedAt) badges.push('<span class="badge warn">En partie sur le processeur</span>');
   for (const label of domainLeaders()[model.id] ?? []) badges.push(`<span class="badge lead" title="Meilleure note du banc d’intelligence en ${label.toLowerCase()} parmi vos modèles testés">Meilleur en ${label.toLowerCase()}</span>`);
@@ -1151,11 +1154,17 @@ async function loadAccess() {
 
 // Ce que pi demande et que seul un clic ici accorde (télécharger, relancer une installation).
 let approvalsHtml = '';
+const APPROVAL_WORDS = {
+  pi: { label: 'pi agent demande', refuse: 'Refuser', accept: 'Accepter' },
+  card: { label: 'Inférence occupée', refuse: 'Pas maintenant', accept: 'Laisser ma place' },
+  cleanup: { label: 'Ménage des modèles', refuse: 'Garder', accept: 'Supprimer' },
+};
 function renderApprovals() {
   const pending = (state.approvals ?? []).filter((a) => a.status === 'pending');
+  const words = (a) => APPROVAL_WORDS[a.kind] ?? APPROVAL_WORDS.pi;
   const html = pending.map((a) => `<section class="card approval" role="alertdialog" aria-label="${esc(a.title)}">
-      <div class="label">${a.kind === 'card' ? 'Inférence occupée' : 'pi agent demande'}</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
-      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">${a.kind === 'card' ? 'Pas maintenant' : 'Refuser'}</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">${a.kind === 'card' ? 'Laisser ma place' : 'Accepter'}</button></div>
+      <div class="label">${words(a).label}</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
+      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">${words(a).refuse}</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">${words(a).accept}</button></div>
     </section>`).join('');
   if (html !== approvalsHtml) { approvalsHtml = html; approvalsEl.innerHTML = html; }
   document.title = pending.length ? `(${pending.length}) ${baseTitle}` : baseTitle;
@@ -1166,7 +1175,8 @@ approvalsEl.addEventListener('click', async (event) => {
   for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = true;
   try {
     const r = await post(`/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
-    if (r.kind === 'card') toast(r.status === 'accepted' ? 'Place laissée' : 'Refusé : la personne en est avertie');
+    if (r.kind === 'cleanup') { if (r.status !== 'accepted') toast(r.status === 'refused' ? 'Fichiers gardés : Harn ne les proposera plus' : r.error ?? 'Échec'); }
+    else if (r.kind === 'card') toast(r.status === 'accepted' ? 'Place laissée' : 'Refusé : la personne en est avertie');
     else toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
   } catch (error) {
     toast(error.message);
