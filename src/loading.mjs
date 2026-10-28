@@ -19,10 +19,16 @@ export const runtimeKind = (model, tuning) => (tuning?.fork ?? (model.engine ===
 const sharedLayers = { layers: 'auto', fitTargetMiB: HEADROOM_MIN_MIB + 256, batch: 4096, ubatch: 4096 };
 // Le réglage de départ d'un modèle : contexte et type de KV viennent de l'objectif
 // (100k-150k), le reste des a priori de la carte.
+// HyperQwen à 131k, KV int8 (pthfa). MTP tient même quand le bureau prend ~1 Go de la carte ;
+// DFlash2 demande la carte libre (bureau sur la puce intégrée) mais génère plus vite jusqu'à ~50k
+// (3090 : code +49 %, français +19 %), MTP restant devant de ~10 % vers 130k. Le banc tranche.
+// KVarN (CTX=huge) tient aussi, mais génère trois fois moins vite à 130k : écarté.
+export const HYPERQWEN_ARMS = {
+  mtp: { context: 131072, spec: 'mtp', ctx: 'long', hyperqwenArm: 'MTP · KV int8 · 128k' },
+  dflash2: { context: 131072, spec: 'dflash2', ctx: 'long', hyperqwenArm: 'DFlash2 · KV int8 · 128k' },
+};
 export function startingTuning(model, hardware) {
-  // HyperQwen : MTP et KV int8 (pthfa) à 131k, le seul de ses modes qui tient 130k sur une 24 Go
-  // dont le bureau prend ~1 Go. KVarN tient aussi, mais génère trois fois moins vite à 130k.
-  if (model.engine === 'hyperqwen') return { context: 131072, spec: 'mtp', ctx: 'long', hyperqwenArm: 'MTP · KV int8 · 128k' };
+  if (model.engine === 'hyperqwen') return HYPERQWEN_ARMS.mtp;
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
   // Partagé avec la RAM : --fit remplit la carte jusqu'à sa cible ; on la met au-dessus de la marge
@@ -66,8 +72,10 @@ export function recipeFor(model, tuning) {
       // Avec une clé, le lanceur écouterait sur toutes les interfaces : HOST le garde en local.
       // Le nom servi est l'identifiant Harn, comme l'alias de llama-server ; la dernière
       // occurrence de --served-model-name l'emporte sur celle du lanceur.
+      // La variante française ne change que le brouillon MTP ; DFlash2 a son propre drafter et
+      // sert le modèle de base, que le lanceur choisit seul quand MODEL n'est pas donné.
       env: {
-        MODEL: runtime.model,
+        ...((tuning.spec ?? 'mtp') === 'mtp' ? { MODEL: runtime.model } : {}),
         SPEC: tuning.spec ?? 'mtp',
         CTX: tuning.ctx ?? 'long',
         MAX_LEN: String(tuning.context ?? 131072),

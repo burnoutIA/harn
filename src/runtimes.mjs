@@ -437,6 +437,14 @@ export async function installHyperQwen(onLog = () => {}) {
     await markReady(weights);
   }
 
+  // Le drafter DFlash2 (W4A16, 1,2 Go), pour le second réglage du banc.
+  const drafter = path.join(dir, 'models', 'Qwen3.8-27B-DFlash2-W4A16');
+  if (!(await ready(drafter))) {
+    await rm(drafter, { recursive: true, force: true });
+    await step(python, [path.join('prepare', 'fetch_dflash2.py')]);
+    await markReady(drafter);
+  }
+
   const fast = `${weights}-fast`;
   const french = `${fast}-fr`;
   if (!(await ready(french))) {

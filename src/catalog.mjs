@@ -219,11 +219,12 @@ export const MODELS = [
   },
   {
     // Le même 27B, servi par HyperQwen (vLLM 0.31 patché par syv-ai pour les cartes de 24 Go) :
-    // W4A16 AutoRound, KV int8 lu par pthfa, MTP avec un vocabulaire de brouillon recompté en
-    // français (src/assets/hyperqwen-draft-vocab-fr.json : +24 % sur des réponses françaises).
+    // W4A16 AutoRound, KV int8 lu par pthfa, et l'anticipation retenue au banc : DFlash2 quand la
+    // carte est libre, sinon MTP avec un vocabulaire de brouillon recompté en français
+    // (src/assets/hyperqwen-draft-vocab-fr.json : +24 % sur des réponses françaises).
     id: 'qwen3-8-27b-hyperqwen',
     name: 'Qwen3.8-27B',
-    variant: 'W4A16 · MTP · HyperQwen',
+    variant: 'W4A16 · HyperQwen',
     tagline: 'Le 27B officiel servi par HyperQwen (vLLM patché pour la 3090) : 131k de contexte, une centaine de tok/s en français.',
     engine: 'hyperqwen',
     repo: 'dbirks/Qwen3.8-27B-W4A16-AutoRound',

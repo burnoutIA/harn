@@ -5,7 +5,7 @@ import { describe, startEngine } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
-import { freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
+import { HYPERQWEN_ARMS, freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
 import { writeMachineFacts } from './machine-doc.mjs';
 import { downloadFile } from './model-files.mjs';
 import { makePlan, OBJECTIVE } from './planner.mjs';
@@ -84,10 +84,11 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     for (const arm of await strataArms(model, initial.tuning)) best = better(await trial('Strata', arm), best);
     return finish(model, results, best);
   }
-  // HyperQwen : un seul réglage tient 128k sur une 24 Go (voir startingTuning) ; on le mesure,
-  // et la vitesse en profondeur suit dans finish.
+  // HyperQwen : ses deux réglages à 128k (HYPERQWEN_ARMS), celui en place d'abord. DFlash2 ne se
+  // charge que si la carte est libre : son échec est noté, MTP reste.
   if (model.engine === 'hyperqwen') {
-    const best = await trial('Réglages HyperQwen', initial.tuning);
+    let best = await trial('Réglages HyperQwen', initial.tuning);
+    for (const arm of Object.values(HYPERQWEN_ARMS).filter((a) => a.spec !== initial.tuning.spec)) best = better(await trial('HyperQwen', arm), best);
     if (best.error) throw new Error(best.error);
     return finish(model, results, best);
   }

@@ -297,7 +297,7 @@ function engineLabel() {
   return `${runtime?.label ?? known[kind] ?? kind} ${runtime?.tag ?? ''}`.trim();
 }
 
-const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ', 'Réglages HyperQwen': 'Point de départ' };
+const STAGE = { 'Départ': 'Point de départ', 'Spéculation MTP': 'Anticipation', 'DFlash2': 'Brouillon', 'KV en profondeur': 'Mémoire de contexte', 'Flash Attention': 'Attention', 'Backend': 'Moteur', 'Strata': 'Strata', 'Réglages Strata': 'Point de départ', 'Réglages HyperQwen': 'Point de départ', 'HyperQwen': 'Anticipation' };
 const stageOf = (arm) => STAGE[arm.stage] ?? (arm.stage?.startsWith('Moteur ') ? 'Moteur' : arm.stage) ?? '';
 
 // Les réglages en mots simples ; le libellé technique reste visible en second plan.
