@@ -42,3 +42,22 @@ test('un fichier qui n’est pas un GGUF est refusé', async () => {
   await writeFile(file, Buffer.from('pas un modèle du tout'));
   await assert.rejects(readGgufFile(file), /n’est pas un GGUF/);
 });
+
+test('fenêtre glissante : seules les couches d’attention pleine comptent dans le cache par token', async () => {
+  const file = path.join(process.env.HARN_HOME, 'gemma.gguf');
+  const BOOL = 7;
+  const u8 = (n) => Buffer.from([n]);
+  const pattern = [true, true, true, true, true, false];
+  await writeFile(file, gguf([
+    ['general.architecture', STRING, str('gemma4')],
+    ['gemma4.block_count', U32, u32(6)],
+    ['gemma4.attention.head_count_kv', ARRAY, Buffer.concat([u32(U32), u64(6), ...[8, 8, 8, 8, 8, 1].map(u32)])],
+    ['gemma4.attention.key_length', U32, u32(512)],
+    ['gemma4.attention.value_length', U32, u32(512)],
+    ['gemma4.attention.sliding_window', U32, u32(1024)],
+    ['gemma4.attention.sliding_window_pattern', ARRAY, Buffer.concat([u32(BOOL), u64(6), ...pattern.map((b) => u8(b ? 1 : 0))])],
+  ]));
+  const profile = profileFromMetadata(await readGgufFile(file));
+  // Une couche pleine, une tête KV : (512 + 512) × 2 octets.
+  assert.equal(profile.kvBytesPerToken.f16, 2048);
+});

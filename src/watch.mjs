@@ -3,7 +3,7 @@
 // bien sur cette machine (même estimation que le planificateur). Et les modèles installés dont
 // les fichiers ont changé sur Hugging Face. Une fois par jour, sans clé (API publique).
 import { MODELS, modelById } from './catalog.mjs';
-import { buildEntry, inspectRepo } from './custom-models.mjs';
+import { buildEntry, inspectRepo, plausibleWeights } from './custom-models.mjs';
 import { enginesFor } from './engines.mjs';
 import { OBJECTIVE, assess } from './planner.mjs';
 import { paramsOf } from './rating.mjs';
@@ -16,6 +16,8 @@ const RECENT_DAYS = 30;
 const MAX_INSPECT = 12;       // dépôts analysés par passage (chacun : 3 requêtes + l'en-tête du GGUF)
 const MIN_TPS = 15;           // sous ce débit, on ne le propose pas (voir planner, CRAWL_TPS)
 const EVERY_MS = 24 * 60 * 60 * 1000;
+// Monte quand l'analyse d'un dépôt change (annexes mieux reconnues…) : le cache est alors refait.
+const ANALYSIS = 2;
 
 // Texte ou vision seulement : pas d'image, de son, d'embeddings.
 const TEXT_TAGS = /^(text-generation|image-text-to-text|conversational)$/;
@@ -54,7 +56,7 @@ function bestQuant(report, hardware) {
   const options = report.quants.filter((quant) => !/^(PQ|PTQ)\d/i.test(quant.quant)).map((quant) => {
     const entry = buildEntry({ repo: report.repo, quant, profile: report.profile });
     return { quant, entry, verdict: assess(entry, hardware) };
-  }).filter(({ verdict }) => verdict.fit !== 'no' && verdict.tps !== null && verdict.tps >= MIN_TPS && verdict.context >= OBJECTIVE.floorContext);
+  }).filter(({ quant, entry }) => plausibleWeights(quant.bytes, paramsOf(entry))).filter(({ verdict }) => verdict.fit !== 'no' && verdict.tps !== null && verdict.tps >= MIN_TPS && verdict.context >= OBJECTIVE.floorContext);
   const rank = ({ verdict }) => (verdict.meetsContext && verdict.meetsSpeed ? 4 : 0) + (verdict.fit === 'full' ? 2 : 0) + (verdict.meetsContext ? 1 : 0);
   return options.sort((a, b) => rank(b) - rank(a) || b.quant.bytes - a.quant.bytes)[0] ?? null;
 }
@@ -132,10 +134,13 @@ export function checkHub() {
       let inspected = 0;
       for (const candidate of fresh) {
         const cached = cache.get(candidate.repo);
-        if (cached && cached.lastModified === candidate.lastModified && cached.hardwareKey === hardwareKey(hardware)) { items.push({ ...cached, likes: candidate.likes, downloads: candidate.downloads }); continue; }
-        if (inspected >= MAX_INSPECT) continue;
-        inspected += 1;
-        items.push({ ...(await inspectCandidate(candidate, hardware)), hardwareKey: hardwareKey(hardware) });
+        if (cached && cached.lastModified === candidate.lastModified && cached.hardwareKey === hardwareKey(hardware) && cached.analysis === ANALYSIS) { items.push({ ...cached, likes: candidate.likes, downloads: candidate.downloads }); continue; }
+        // La limite freine les dépôts nouveaux ou modifiés ; un dépôt déjà connu à réanalyser (autre
+        // machine, analyse améliorée) passe quand même, sinon la liste se viderait pendant des jours.
+        const known = cached && cached.lastModified === candidate.lastModified;
+        if (!known && inspected >= MAX_INSPECT) continue;
+        if (!known) inspected += 1;
+        items.push({ ...(await inspectCandidate(candidate, hardware)), hardwareKey: hardwareKey(hardware), analysis: ANALYSIS });
       }
       const { updates, baseline } = await installedUpdates(previous);
       update((s) => { s.watch = { ...s.watch, checking: false, checkedAt: new Date().toISOString(), items, updates, baseline, error: null }; });

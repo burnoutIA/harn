@@ -116,8 +116,12 @@ export function profileFromMetadata({ meta }) {
   const kvHeads = get('attention.head_count_kv');
   // Couches qui portent un cache KV : toutes, sauf dans les hybrides (attention linéaire
   // entre deux couches d'attention pleine) et quand les têtes KV sont données couche par couche.
+  // Fenêtre glissante donnée couche par couche (Gemma 3/4) : ces couches ne gardent que les
+  // derniers milliers de tokens, un coût fixe ; seules les couches d'attention pleine suivent le contexte.
+  const swa = get('attention.sliding_window') ? get('attention.sliding_window_pattern') : null;
   let kvSum;
-  if (Array.isArray(kvHeads)) kvSum = kvHeads.reduce((sum, n) => sum + (n || 0), 0);
+  if (Array.isArray(swa)) kvSum = swa.reduce((sum, sliding, i) => sum + (sliding ? 0 : (Array.isArray(kvHeads) ? kvHeads[i] : kvHeads ?? 8) || 0), 0);
+  else if (Array.isArray(kvHeads)) kvSum = kvHeads.reduce((sum, n) => sum + (n || 0), 0);
   else {
     const interval = get('full_attention_interval');
     const attnLayers = interval ? Math.ceil(layers / interval) : layers;

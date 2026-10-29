@@ -302,6 +302,8 @@ main { padding: 8px clamp(16px, 4vw, 48px) 72px; max-width: var(--page-max); wid
 .badge.icon svg { width: 15px; height: 15px; }
 .model h3 { font-size: calc(18.5px * var(--fs)); }
 .model .variant { font: calc(12px * var(--fs)) var(--mono); color: var(--muted); margin-top: 4px; }
+.model .repo { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: calc(12px * var(--fs)) var(--mono); color: var(--muted); text-decoration: none; }
+.model .repo:hover { color: var(--text); text-decoration: underline; }
 .model .tagline { margin: 0; color: var(--muted); font-size: calc(14px * var(--fs)); }
 .model .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 10px 8px; padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .model .facts .k { font-size: calc(11.5px * var(--fs)); color: var(--muted); }
