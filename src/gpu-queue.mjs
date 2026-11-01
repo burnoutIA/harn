@@ -27,9 +27,12 @@ export function withGpu(modelId, task) {
 export const activationBlocker = (modelId) => {
   if (!busy || busy === modelId) return null;
   if (isImageJob(busy)) return 'Harn génère une image : la carte graphique revient dans un instant';
+  if (isVoiceJob(busy)) return 'Harn démarre la voix : la carte graphique revient dans un instant';
   return `Harn mesure « ${modelById(busy)?.name ?? busy} » : attendez la fin du banc pour changer de modèle`;
 };
 // Une image en cours occupe la carte quelques secondes à quelques minutes : la passerelle attend
 // qu'elle soit rendue au lieu de refuser la requête.
 export const isImageJob = (id) => String(id ?? '').startsWith('image:');
+// Le démarrage de la voix (voice.mjs) fait de la place sur la carte : une minute au plus.
+export const isVoiceJob = (id) => String(id ?? '').startsWith('voice:');
 export const gpuFree = () => gpuQueue;

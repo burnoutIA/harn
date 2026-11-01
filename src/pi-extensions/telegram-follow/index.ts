@@ -6,7 +6,9 @@
 //     (une image est aussi montrée au modèle quand il sait voir) ;
 //   - l'agent lui montre une image ou lui envoie un fichier (outil send_file) ; une image générée
 //     part toute seule ;
-//   - « écrit… » reste affiché tant que l'agent travaille ; /new ouvre une nouvelle conversation.
+//   - « écrit… » reste affiché tant que l'agent travaille ; /new ouvre une nouvelle conversation ;
+//   - avec la case Voix de l'agent, /parler fait répondre en messages vocaux (Voxtral, dans Harn),
+//     les liens sources à part en texte ; /ecrire revient au texte. Sans la case, rien de tout cela.
 //
 // Aucun secret ici : le jeton du bot et l'identifiant Telegram de la personne sont lus dans
 // telegram.json, que Harn écrit dans le dossier pi de l'agent (data/, hors dépôt). Sans ce fichier,
@@ -24,6 +26,8 @@ interface Config {
   agent?: string; // identifiant de l'agent dans Harn
   harn?: string; // adresse de Harn, pour demander la carte
   files?: string; // où ranger les fichiers reçus (le dossier files/ du workspace)
+  voice?: boolean; // case Voix cochée : /parler et /ecrire existent
+  web?: boolean; // case Recherche web cochée
 }
 
 interface Attachment {
@@ -101,8 +105,77 @@ function releaseLock() {
 }
 
 // Ce qui survit au remplacement de session (/new recharge l'extension, pas le processus) : la
-// position dans la file du bot et le chat où répondre.
-const shared = ((globalThis as any).__harnTelegram ??= { offset: 0, chat: 0 }) as { offset: number; chat: number };
+// position dans la file du bot, le chat où répondre, et le mode vocal.
+const shared = ((globalThis as any).__harnTelegram ??= { offset: 0, chat: 0, voice: false }) as { offset: number; chat: number; voice: boolean };
+
+// --- Mode vocal ---
+// Ce que Voxtral lit d'un coup (MAX_SPEAK_CHARS de voice.mjs) : au-delà, plusieurs messages vocaux.
+const SPEAK_CHARS = 1100;
+const URL_RE = /https?:\/\/[^\s<>()\]]+[^\s<>()\].,;:!?'"»]/g;
+// Un chemin de fichier (images/2026…png, /home/…/notes.pdf) : illisible à voix haute, et le fichier
+// lui-même est déjà parti dans le chat.
+const FILE_RE = /(?:~|\.{1,2})?\/?(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b/g;
+
+// Une réponse à dire, en trois parts : le texte parlé, débarrassé de ce qui ne se lit pas (liens,
+// markdown, bloc de code, émojis) ; l'écrit qui suit une ligne « Texte : » (ce que la personne a
+// demandé à lire ou garder), envoyé tel quel ; les liens, envoyés à part. « Sources : » ou
+// « Liens : » en fin de réponse partent avec eux.
+const WRITTEN_RE = /^[ \t]*\**texte\**[ \t]*:\**[ \t]*/im;
+const LINKS_RE = /^[ \t]*(?:#+[ \t]*)?\**(?:sources?|liens?)\**[ \t]*:?[ \t]*\**[ \t]*$/im;
+export function splitForVoice(text: string): { spoken: string; written: string; links: string[] } {
+  let said = text;
+  let written = "";
+  const mark = WRITTEN_RE.exec(text);
+  if (mark) {
+    said = text.slice(0, mark.index);
+    written = text.slice(mark.index + mark[0].length);
+    // Les liens de fin de réponse ne font pas partie de l'écrit.
+    const tail = LINKS_RE.exec(written);
+    if (tail) {
+      said += `\n${written.slice(tail.index)}`;
+      written = written.slice(0, tail.index);
+    }
+    written = written.trim();
+  }
+  const links = [...new Set(said.match(URL_RE) ?? [])];
+  const spoken = said
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(URL_RE, "")
+    .replace(FILE_RE, "")
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\uFE0F\u200D\u20E3]/gu, "")
+    .replace(/(^|\s)[:;]-?[()DPp](?=\s|$)/g, "$1")
+    .split("\n")
+    .filter((line) => /[\p{L}\p{N}]/u.test(line) && !/^\s*(?:#+\s*)?\**(?:sources?|liens?)\**\s*:?\**\s*$/i.test(line))
+    .join("\n")
+    .replace(/[*_`#>|]+/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .replace(/\(\s*\)/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ +([.,])/g, "$1")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
+  return { spoken, written, links };
+}
+
+// Le texte parlé en morceaux de SPEAK_CHARS au plus, coupés en fin de phrase quand c'est possible.
+export function voiceChunks(spoken: string, max = SPEAK_CHARS): string[] {
+  const sentences = spoken.replace(/\n+/g, " ").match(/[^.!?…]+[.!?…]+["»]?\s*|[^.!?…]+$/g) ?? [];
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    for (let piece = sentence; piece; ) {
+      const room = max - current.length;
+      if (piece.length <= room) { current += piece; piece = ""; continue; }
+      if (current.trim()) { chunks.push(current.trim()); current = ""; continue; }
+      const cut = piece.lastIndexOf(" ", max) > 0 ? piece.lastIndexOf(" ", max) : max;
+      chunks.push(piece.slice(0, cut).trim());
+      piece = piece.slice(cut);
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
 
 function assistantText(m: any): string {
   if (m?.role !== "assistant") return "";
@@ -165,6 +238,28 @@ export default function (pi: ExtensionAPI) {
         "Reading an image with `read` shows it to you, never to them. " +
         "Whenever they ask to see, show, display or receive an image or a file (\"montre-moi l'image\", \"envoie-la\"), call `send_file` with its path, then answer in one short sentence. " +
         "Never say an image is displayed or visible unless `send_file` or `generate_image` has just succeeded.",
+      // Un modèle local se croit souvent coupé du monde : sans ce rappel, il répond « je n'ai pas
+      // accès à l'actualité » alors que la recherche est là.
+      ...(config.web
+        ? {
+            web:
+              `Today is ${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}. You have live web access through your web search and page-reading tools. ` +
+              "For anything about current events, news, recent facts, prices, schedules, or anything that may have changed since your training, search the web before answering instead of relying on memory. " +
+              "Never claim you cannot access current information or the news.",
+          }
+        : {}),
+      ...(config.voice && shared.voice
+        ? {
+            voice:
+              "Voice mode is on: your final reply is read aloud by a French text-to-speech voice and sent as a voice message. " +
+              "Write it as natural spoken French, the way you would say it on the phone: short sentences, no markdown, no lists, no tables, no code, no URLs inside the sentences. " +
+              "Never use emojis or emoticons: the voice would read them aloud. " +
+              "Keep it brief unless asked for detail. " +
+              "When they ask for something to read or keep (a text, a letter, a message to send, a poem, a list, a recipe, code), do not read it aloud: " +
+              "say one short spoken sentence (that it is done, and ask what they think), then a line \"Texte :\", then the written content exactly as it should appear. It is sent as a text message right after the voice message. " +
+              "Every link you want to give (the web sources you used, a page or a video worth opening) goes at the end of the reply, after a line \"Liens :\", one URL per line: they are sent as a separate text message, not read aloud.",
+          }
+        : {}),
     };
   });
 
@@ -236,11 +331,54 @@ export default function (pi: ExtensionAPI) {
     running = false;
     stopTyping();
     const chat = shared.chat || config.ownerId;
-    if (lastTurnText) sendText(chat, lastTurnText);
+    if (lastTurnText && config.voice && shared.voice) say(chat, lastTurnText);
+    else if (lastTurnText) sendText(chat, lastTurnText);
     else if (asked) sendText(chat, "Je n'ai pas pu répondre. Le détail est dans le terminal de l'agent.");
     lastTurnText = "";
     asked = false;
   });
+
+  // La réponse dite : un message vocal par morceau, puis les liens en texte. La voix en panne,
+  // la réponse part quand même, écrite.
+  async function voiceOf(text: string): Promise<Buffer> {
+    const res = await fetch(`${config!.harn}/api/agents/${config!.agent}/voice/speak`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as any).error ?? `Harn a répondu ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  function say(chat: number, text: string) {
+    const { spoken, written, links } = splitForVoice(text);
+    const chunks = voiceChunks(spoken);
+    sendQueue = sendQueue.then(async () => {
+      try {
+        for (const chunk of chunks) {
+          tg("sendChatAction", { chat_id: chat, action: "record_voice" }).catch(() => {});
+          const form = new FormData();
+          form.set("chat_id", String(chat));
+          form.set("voice", new Blob([await voiceOf(chunk)], { type: "audio/ogg" }), "reponse.ogg");
+          const json: any = await (await fetch(`${api}/sendVoice`, { method: "POST", body: form })).json();
+          if (!json.ok) throw new Error(json.description);
+        }
+        for (let i = 0; i < written.length; i += 4000) await tg("sendMessage", { chat_id: chat, text: written.slice(i, i + 4000), disable_web_page_preview: true });
+        if (links.length) await tg("sendMessage", { chat_id: chat, text: links.join("\n"), disable_web_page_preview: true });
+      } catch (error: any) {
+        await tg("sendMessage", { chat_id: chat, text: `(Voix indisponible : ${error.message})\n\n${text}`.slice(0, 4000), disable_web_page_preview: true }).catch(() => {});
+      }
+    });
+  }
+
+  // /parler : Harn démarre la voix (une minute la première fois), puis les réponses sont dites.
+  async function startVoice(chat: number) {
+    sendText(chat, "Je mets ma voix en route, un instant…");
+    try {
+      const res = await fetch(`${config!.harn}/api/agents/${config!.agent}/voice/start`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const report: any = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(report.error ?? `Harn a répondu ${res.status}`);
+      shared.voice = true;
+      sendText(chat, "Mode vocal : je vous réponds de vive voix. /ecrire pour revenir au texte.");
+    } catch (error: any) {
+      sendText(chat, `La voix n'a pas pu démarrer : ${error.message}`);
+    }
+  }
 
   // --- /new : seule une commande peut remplacer la session ---
   pi.registerCommand(NEW_COMMAND, {
@@ -326,7 +464,9 @@ export default function (pi: ExtensionAPI) {
   // --- Entrée : la file du bot, lue en continu tant que la session vit ---
   let stop: AbortController | null = null;
   async function poll(signal: AbortSignal) {
-    await tg("setMyCommands", { commands: [{ command: "new", description: "Nouvelle conversation" }] }, signal).catch(() => {});
+    const commands = [{ command: "new", description: "Nouvelle conversation" }];
+    if (config!.voice) commands.push({ command: "parler", description: "Réponses en messages vocaux" }, { command: "ecrire", description: "Réponses écrites" });
+    await tg("setMyCommands", { commands }, signal).catch(() => {});
     while (!signal.aborted) {
       try {
         const updates: any[] = await tg("getUpdates", { offset: shared.offset, timeout: 50, allowed_updates: ["message"] }, signal);
@@ -339,6 +479,11 @@ export default function (pi: ExtensionAPI) {
           const command = /^\/(\w+)(?:@\w+)?\s*$/.exec(String(msg.text ?? "").trim())?.[1];
           if (command === "start") {
             sendText(msg.chat.id, "Bonjour. Écrivez-moi ; /new ouvre une nouvelle conversation.");
+          } else if (config!.voice && command === "parler") {
+            void startVoice(msg.chat.id);
+          } else if (config!.voice && command === "ecrire") {
+            shared.voice = false;
+            sendText(msg.chat.id, "Je reviens à l'écrit. /parler pour reprendre la voix.");
           } else if (command === "new") {
             // La session remplacée coupe cette boucle (session_shutdown) ; la suivante reprend la
             // file après ce /new, la position étant gardée hors de la session.

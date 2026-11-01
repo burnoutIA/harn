@@ -26,7 +26,8 @@ const MAX_LORA_NOTE = 400;
 // Ce qu'un nouvel agent peut faire : le moins possible, on coche ce dont il a besoin.
 // autostart : lancé avec Harn, pour que son bot Telegram réponde sans qu'on y pense.
 // memory : il note lui-même ce qu'il juge durable, et le relit à chaque conversation.
-const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, memory: true, images: false, autostart: false };
+// voice : /parler sur Telegram lui donne une voix (voice.mjs) ; sans la case, rien n'en paraît.
+const DEFAULT_OPTIONS = { shell: false, harnTools: false, web: true, memory: true, images: false, autostart: false, voice: false };
 
 const failure = (status, message) => Object.assign(new Error(message), { status });
 const slugify = (text) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -220,7 +221,7 @@ export async function launchAgent(id, { window = true } = {}) {
   await mkdir(filesOf(id), { recursive: true });
   // harn, agent : pour demander la carte avant chaque message (claimCard). files : où ranger ce
   // que la personne envoie.
-  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify({ ...agent.telegram, agent: id, harn: `http://127.0.0.1:${PORTS.app}`, files: filesOf(id) }));
+  if (agent.telegram) await writeFile(telegramFileOf(id), JSON.stringify({ ...agent.telegram, agent: id, harn: `http://127.0.0.1:${PORTS.app}`, files: filesOf(id), voice: Boolean(agent.options.voice), web: Boolean(agent.options.web && getState().ketch?.path) }));
   else await rm(telegramFileOf(id), { force: true });
   if (agent.options.memory) await writeFile(memoryConfigOf(id), JSON.stringify({ file: memoryFileOf(id), maxChars: MAX_MEMORY }));
   else await rm(memoryConfigOf(id), { force: true });
@@ -240,6 +241,13 @@ export async function agentForImages(id) {
   const agent = await readAgent(id);
   if (!agent.options.images) throw failure(403, 'La génération d’images n’est pas cochée pour cet agent');
   return { who: agent.name, workspace: workspaceOf(id), preferred: agent.imageModel ?? null, loraNotes: agent.loraNotes ?? {}, shell: Boolean(agent.options.shell) };
+}
+
+// Qui demande la voix : seulement un agent dont la case Voix est cochée.
+export async function agentForVoice(id) {
+  const agent = await readAgent(id);
+  if (!agent.options.voice) throw failure(403, 'La voix n’est pas cochée pour cet agent');
+  return { who: agent.name };
 }
 
 // Retirer un LoRA de son dossier lora/ (depuis la fenêtre de Harn).

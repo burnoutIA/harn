@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, updateAgent } from '../src/agents.mjs';
+import { claimCard, createAgent, deleteAgent, launchAgent, listAgents, stopAgent, updateAgent } from '../src/agents.mjs';
 import { approvalOf, decideApproval } from '../src/approvals.mjs';
 import { addViewer, beginRequest, endRequest } from '../src/metrics.mjs';
 import { DIRS } from '../src/paths.mjs';
@@ -16,7 +16,7 @@ const json = async (file) => JSON.parse(await readFile(file, 'utf8'));
 test('un agent naît avec son dossier, ses consignes et le moins de droits possible', async () => {
   const agent = await createAgent({ name: 'Éloïse' });
   assert.equal(agent.id, 'eloise');
-  assert.deepEqual(agent.options, { shell: false, harnTools: false, web: true, memory: true, images: false, autostart: false });
+  assert.deepEqual(agent.options, { shell: false, harnTools: false, web: true, memory: true, images: false, autostart: false, voice: false });
   assert.equal(agent.model, null);
   assert.match(agent.prompt, /Consignes de Éloïse/);
   assert.equal(agent.workspace, path.join(DIRS.agents, 'eloise', 'workspace'));
@@ -32,12 +32,13 @@ test('la fiche se modifie, sans accepter n’importe quoi', async () => {
   const saved = await updateAgent('eloise', { name: 'Élo', prompt: 'Sois brève.', options: { shell: true, inconnu: true, web: 'oui' } });
   assert.equal(saved.name, 'Élo');
   assert.equal(saved.prompt, 'Sois brève.');
-  assert.deepEqual(saved.options, { shell: true, harnTools: false, web: true, memory: true, images: false, autostart: false });
+  assert.deepEqual(saved.options, { shell: true, harnTools: false, web: true, memory: true, images: false, autostart: false, voice: false });
   await assert.rejects(updateAgent('eloise', { name: '  ' }), { status: 400 });
   await assert.rejects(updateAgent('eloise', { model: 'pas-installe' }), { status: 409 });
   // L'identifiant est un nom de dossier : rien ne sort de data/agents.
   await assert.rejects(updateAgent('../pi-agent', { name: 'x' }), { status: 404 });
   await assert.rejects(deleteAgent('..'), { status: 404 });
+  await assert.rejects(stopAgent('..'), { status: 404 });
   await assert.rejects(createAgent({ name: '???' }), { status: 400 });
 });
 

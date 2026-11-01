@@ -779,3 +779,39 @@ export async function installGemmaChallenge(model, onLog = () => {}) {
   update((s) => { s.runtimes['gemma-challenge'] = info; });
   return info;
 }
+
+// ── La voix : Voxtral TTS de Mistral, servi par vLLM-Omni (src/voice.mjs) ──
+// Un venv à part dans runtime/voxtral et les poids d'origine (bf16, 8 Go), compressés en fp8 au
+// chargement (deploy-config de voice.mjs). ninja : vLLM compile ses noyaux au premier démarrage.
+const VOXTRAL_PIP = ['vllm==0.32.0', 'vllm-omni==0.32.0', 'huggingface_hub', 'ninja'];
+export const VOXTRAL_WEIGHTS = { repo: 'mistralai/Voxtral-4B-TTS-2603', revision: 'b81be46c3777f88621676791b512bb01dc1cb970', dir: 'Voxtral-4B-TTS-2603' };
+
+export async function installVoxtral(onLog = () => {}) {
+  if (!LINUX) throw new Error('La voix n’est installée par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'voxtral');
+  const venv = path.join(dir, 'venv');
+  await mkdir(dir, { recursive: true });
+  const step = (command, args) => {
+    onLog(`${path.basename(command)} ${args.join(' ')}`);
+    return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000, env: { ...process.env, HF_XET_HIGH_PERFORMANCE: '1' } }, onLog);
+  };
+
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    await step(uv, ['venv', '--python', '3.12', '--seed', 'venv']);
+    await step(uv, ['pip', 'install', '--python', path.join(venv, 'bin', 'python'), '--link-mode', 'copy', ...VOXTRAL_PIP]);
+    await markReady(venv);
+  }
+
+  const weights = path.join(dir, 'models', VOXTRAL_WEIGHTS.dir);
+  if (!(await ready(weights))) {
+    await rm(weights, { recursive: true, force: true });
+    await step(path.join(venv, 'bin', 'hf'), ['download', VOXTRAL_WEIGHTS.repo, '--revision', VOXTRAL_WEIGHTS.revision, '--local-dir', weights]);
+    await markReady(weights);
+  }
+
+  const info = { kind: 'voxtral', dir, venv, model: weights, revision: VOXTRAL_WEIGHTS.revision, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes.voxtral = info; });
+  return info;
+}

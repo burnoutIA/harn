@@ -43,7 +43,7 @@ function fakeTelegram(updates, harn = []) {
     const method = String(url).split('/').pop();
     // Un fichier envoyé : un formulaire, pas du JSON.
     if (body instanceof FormData) {
-      calls.push([method, { chat_id: Number(body.get('chat_id')), file: (body.get('photo') ?? body.get('document')).name }]);
+      calls.push([method, { chat_id: Number(body.get('chat_id')), file: (body.get('photo') ?? body.get('document') ?? body.get('voice')).name }]);
       return { json: async () => ({ ok: true, result: true }) };
     }
     const params = JSON.parse(body);
@@ -196,4 +196,86 @@ test('une image produite par l’agent part dans le chat de la personne', async 
   await settle();
   pi.emit('session_shutdown');
   assert.deepEqual(calls.filter(([method]) => /^send(Photo|Document)$/.test(method)), [['sendPhoto', { chat_id: OWNER, file: 'chat.png' }], ['sendDocument', { chat_id: OWNER, file: 'notes.pdf' }]]);
+});
+
+test('mode vocal : la réponse se dit sans liens ni markdown, les liens partent à part', async () => {
+  const { splitForVoice, voiceChunks } = await import(`../src/pi-extensions/telegram-follow/index.ts?${Math.random()}`);
+  const { spoken, links } = splitForVoice('Le prix a **beaucoup** baissé ([source](https://exemple.fr/a)) 🙂.\n\n- Rentable en huit ans 👍🏽 :)\n\nLiens :\nhttps://exemple.fr/a\nhttps://ademe.fr/solaire.');
+  assert.equal(spoken, 'Le prix a beaucoup baissé (source).\nRentable en huit ans');
+  assert.deepEqual(links, ['https://exemple.fr/a', 'https://ademe.fr/solaire']);
+  // Ce qui est à lire part écrit, tel quel ; les liens de fin restent à part.
+  const poem = splitForVoice('Voilà, c’est fait, dis-moi ce que tu en penses.\n\nTexte :\n**L’automne**\n\nLes feuilles tombent 🍂.\n\nLiens :\nhttps://exemple.fr/automne');
+  assert.equal(poem.spoken, 'Voilà, c’est fait, dis-moi ce que tu en penses.');
+  assert.equal(poem.written, '**L’automne**\n\nLes feuilles tombent 🍂.');
+  assert.deepEqual(poem.links, ['https://exemple.fr/automne']);
+  assert.equal(splitForVoice('Rien à écrire.').written, '');
+  assert.equal(splitForVoice('C’est fait.\nTexte : Cher Paul, merci.').written, 'Cher Paul, merci.');
+  // Les chemins de fichiers ne se lisent pas.
+  assert.equal(splitForVoice('Voilà ton chat, rangé dans `images/20261031-1200-flux2-klein-4b-42.png`.').spoken, 'Voilà ton chat, rangé dans.');
+  // Coupé en fin de phrase, jamais au-delà de la limite.
+  const chunks = voiceChunks('Une phrase courte. '.repeat(10).trim(), 60);
+  assert.ok(chunks.every((c) => c.length <= 60 && /\.$/.test(c)));
+  assert.equal(chunks.join(' '), 'Une phrase courte. '.repeat(10).trim());
+  assert.ok(voiceChunks('mot '.repeat(50), 40).every((c) => c.length <= 40));
+});
+
+test('/parler : seulement avec la case Voix ; Harn démarre la voix, la réponse part en vocal', async () => {
+  // Sans la case : /parler est un message comme un autre, pour l'agent.
+  writeFileSync(path.join(dir, 'telegram.json'), JSON.stringify({ token: 'jeton-de-test', ownerId: OWNER, agent: 'eloise', harn: 'http://harn' }));
+  fakeTelegram([message(50, '/parler')], [{ status: 'free' }]);
+  let pi = fakePi();
+  (await load())(pi);
+  pi.emit('session_start');
+  await settle();
+  pi.emit('session_shutdown');
+  assert.deepEqual(pi.sent.map(([text]) => text), ['/parler']);
+
+  writeFileSync(path.join(dir, 'telegram.json'), JSON.stringify({ token: 'jeton-de-test', ownerId: OWNER, agent: 'eloise', harn: 'http://harn', voice: true }));
+  const calls = fakeTelegram([message(51, '/parler'), message(52, 'les panneaux solaires ?')], [{ status: 'ready' }, { status: 'free' }]);
+  // Harn : /voice/start répond, /voice/speak rend de l'audio.
+  const telegram = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/voice/speak')) {
+      calls.push(['speak', JSON.parse(options.body).text]);
+      return { ok: true, arrayBuffer: async () => Buffer.from('OggS') };
+    }
+    if (String(url).endsWith('/voice/start')) { calls.push(['harn', '/voice/start']); return { ok: true, json: async () => ({ status: 'ready' }) }; }
+    return telegram(url, options);
+  };
+  pi = fakePi();
+  (await load())(pi);
+  pi.emit('session_start');
+  await settle();
+  assert.deepEqual(pi.sent.map(([text]) => text), ['les panneaux solaires ?']);
+  assert.ok(calls.some(([method, params]) => method === 'setMyCommands' && params.commands.some((c) => c.command === 'parler')));
+  // Le prompt dit au modèle de parler, et où mettre ses sources.
+  const event = { systemPromptOptions: {} };
+  pi.emit('before_agent_start', event);
+  assert.match(event.systemPromptOptions.sections.voice, /Liens :/);
+  assert.match(event.systemPromptOptions.sections.voice, /emojis/);
+  assert.equal(event.systemPromptOptions.sections.web, undefined);
+
+  pi.emit('turn_end', { message: { role: 'assistant', content: [{ type: 'text', text: 'Ça vaut le coup.\n\nLiens :\nhttps://ademe.fr' }] } });
+  pi.emit('agent_settled');
+  await settle();
+  pi.emit('session_shutdown');
+  assert.deepEqual(calls.filter(([kind]) => kind === 'speak'), [['speak', 'Ça vaut le coup.']]);
+  assert.ok(calls.some(([method, params]) => method === 'sendVoice' && params.chat_id === OWNER));
+  const texts = calls.filter(([method]) => method === 'sendMessage').map(([, params]) => params.text);
+  assert.ok(texts.includes('https://ademe.fr'));
+  assert.ok(!texts.some((text) => text.includes('Ça vaut le coup')));
+
+  // /ecrire : retour au texte, et le mode survit au /new (objet partagé).
+  globalThis.__harnTelegram.voice = false;
+});
+
+test('recherche web cochée : le modèle sait la date et qu’il peut chercher l’actualité', async () => {
+  writeFileSync(path.join(dir, 'telegram.json'), JSON.stringify({ token: 'jeton-de-test', ownerId: OWNER, web: true }));
+  fakeTelegram([]);
+  const pi = fakePi();
+  (await load())(pi);
+  const event = { systemPromptOptions: {} };
+  pi.emit('before_agent_start', event);
+  assert.match(event.systemPromptOptions.sections.web, new RegExp(String(new Date().getFullYear())));
+  assert.match(event.systemPromptOptions.sections.web, /current events/);
 });

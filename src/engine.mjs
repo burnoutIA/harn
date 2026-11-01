@@ -194,7 +194,7 @@ export function freePort() {
 // la VRAM. Sous Linux, chaque moteur a son groupe de processus (spawn détaché) : on arrête le
 // groupe entier, poliment puis de force, sinon un petit-enfant garderait la carte.
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-async function killTree(pid) {
+export async function killTree(pid) {
   if (!pid) return;
   if (process.platform === 'win32') return void await run('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }).catch(() => {});
   // Un orphelin repris par reapOrphans n'est pas forcément chef de groupe : on vise alors le seul PID.
@@ -210,6 +210,10 @@ async function killTree(pid) {
 // resté orphelin (crash, arrêt brutal) est repris. On vérifie les PID, pas les ports.
 // Le moteur d'images (runtime/sdcpp) est épargné tant qu'une image tient la carte : un modèle de
 // texte rechargé à ce moment-là le tuait en plein travail.
+// La voix (voice.mjs) tourne à côté du modèle de texte : tant qu'elle est en marche, son dossier
+// est épargné. Celle d'un Harn précédent, elle, est reprise comme les autres.
+const spared = new Set();
+export const spareRuntime = (dir, on) => { if (on) spared.add(dir + path.sep); else spared.delete(dir + path.sep); };
 export async function reapOrphans() {
   const sparing = isImageJob(busyWith());
   // Les moteurs vivants et leurs enfants (même groupe de processus) ne sont pas des orphelins.
@@ -250,6 +254,7 @@ async function linuxRuntimePids(sparingImages = false) {
     const exe = await readlink(`/proc/${entry}/exe`).catch(() => '');
     const argv0 = (await readFile(`/proc/${entry}/cmdline`, 'utf8').catch(() => '')).split('\0')[0];
     if (sparingImages && (exe.startsWith(images) || argv0.startsWith(images))) continue;
+    if ([...spared].some((dir) => exe.startsWith(dir) || argv0.startsWith(dir))) continue;
     if ((exe.startsWith(root) || argv0.startsWith(root)) && path.basename(exe) !== 'ketch') { pids.push(Number(entry)); continue; }
     // vLLM lancé dans un conteneur (Radiance) : son exécutable n'est pas dans runtime/, mais il
     // sert un modèle de notre catalogue sous son id. Resté seul, il tenait 29 Go de la carte

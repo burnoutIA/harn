@@ -28,7 +28,8 @@ import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
 import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel, loraTargets } from './images.mjs';
 import { listLoras, loraDirOf } from './loras.mjs';
-import { agentForImages, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, stopAgent, updateAgent } from './agents.mjs';
+import { installVoice, speak, startVoice, stopVoice, voiceReport } from './voice.mjs';
+import { agentForImages, agentForVoice, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, stopAgent, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
@@ -215,6 +216,7 @@ async function api(req, res, url) {
   }
   if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
   if (req.method === 'GET' && url.pathname === '/api/agents') return json(res, 200, { agents: await listAgents(), remoteModels: remoteModels() });
+  if (req.method === 'GET' && url.pathname === '/api/voice') return json(res, 200, voiceReport());
   if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
     const entry = approvalOf(parts[2]);
     return entry ? json(res, 200, entry) : json(res, 404, { error: 'Demande inconnue ou expirée (Harn a-t-il redémarré ?)' });
@@ -310,12 +312,37 @@ async function api(req, res, url) {
     return json(res, 404, { error: 'inconnu' });
   }
 
+  // La voix : installer et arrêter, depuis la fenêtre seulement.
+  if (parts[1] === 'voice') {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    if (parts[2] === 'install') { background(installVoice()); return json(res, 202, { ok: true }); }
+    if (parts[2] === 'stop') { await stopVoice(); return json(res, 200, voiceReport()); }
+    return json(res, 404, { error: 'inconnu' });
+  }
+
   // Agents : créés, réglés et lancés depuis la fenêtre de Harn seulement (un agent ne s'accorde
   // pas lui-même le shell).
   if (parts[1] === 'agents') {
     // La seule demande qu'un agent fait lui-même : la carte, avant d'injecter un message reçu.
     if (parts[2] && parts[3] === 'claim') {
       try { return json(res, 200, await claimCard(parts[2])); } catch (error) { return json(res, error.status ?? 500, { error: error.message }); }
+    }
+    // La voix, pour un agent dont la case est cochée : /parler la démarre, chaque réponse parlée
+    // revient en Ogg/Opus (message vocal Telegram).
+    if (parts[2] && parts[3] === 'voice' && req.method === 'POST') {
+      try {
+        await agentForVoice(parts[2]);
+        if (parts[4] === 'start') { await startVoice(); return json(res, 200, voiceReport()); }
+        if (parts[4] === 'speak') {
+          const body = await new Response(req).json().catch(() => ({}));
+          const audio = await speak(body.text, body.voice ?? undefined);
+          res.writeHead(200, { 'content-type': 'audio/ogg', 'content-length': audio.length });
+          return res.end(audio);
+        }
+      } catch (error) {
+        return json(res, error.status ?? 500, { error: error.message });
+      }
+      return json(res, 404, { error: 'inconnu' });
     }
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
     const body = await new Response(req).json().catch(() => ({}));
@@ -548,6 +575,8 @@ async function main() {
     console.log(`Harn · interface ${ORIGIN} · API OpenAI ${ORIGIN}/v1`);
     openWindow();
     await reapOrphans();
+    // La voix d'avant ce démarrage vient d'être reprise avec les autres orphelins.
+    update((s) => { if (s.voice) s.voice = { ...s.voice, status: 'stopped', installing: false, detail: null }; });
     watchForUpdates();
     watchHub();
     watchImageHub();

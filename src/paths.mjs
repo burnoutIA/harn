@@ -37,4 +37,6 @@ export const PORTS = {
   hyperqwen: Number(process.env.HARN_HYPERQWEN_PORT ?? 4751),
   gemmaChallenge: Number(process.env.HARN_GEMMA_CHALLENGE_PORT ?? 4752),
   radiance: Number(process.env.HARN_RADIANCE_PORT ?? 4753),
+  // La voix des agents (Voxtral sous vLLM-Omni, voice.mjs).
+  voice: Number(process.env.HARN_VOICE_PORT ?? 4754),
 };

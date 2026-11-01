@@ -11,10 +11,12 @@ import { ARCH_NAMES, familyById, loraSources } from './image-families.mjs';
 import { addedImageModels, forgetImageModel, imageSuggestions } from './image-hub.mjs';
 import { listLoras, loraDirOf, lorasIn } from './loras.mjs';
 import { withGpu } from './gpu-queue.mjs';
+import { sampleGpu } from './hardware.mjs';
 import { getLive } from './metrics.mjs';
 import { DIRS } from './paths.mjs';
 import { engineEnv, extract } from './runtimes.mjs';
 import { bus, getState, update } from './state.mjs';
+import { stopVoice } from './voice.mjs';
 
 // La génération d'images : un moteur à part (stable-diffusion.cpp, sans interface, comme
 // llama.cpp pour le texte) et des modèles à part. Une image se fait à la demande d'un agent : la
@@ -354,6 +356,10 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
       const loaded = Object.entries(getState().engines ?? {}).filter(([, e]) => ['ready', 'loading'].includes(e.status)).map(([id]) => id);
       if (loaded.length) textToRestore = loaded;
       await stopEngine();
+      // La voix (~8,5 Go) reste si le modèle d'images tient à côté (FLUX.2 klein sur une 3090) :
+      // sinon elle rend sa place, et redémarre d'elle-même au prochain message vocal.
+      const free = (await sampleGpu())?.freeMiB ?? 0;
+      if (free < ((model.vramGiB ?? model.gigabytes ?? Infinity) * 1024 + 512)) await stopVoice();
       report = await runCli(engine, args);
       if (!(await stat(output).catch(() => null))) throw new Error('Le moteur d’images s’est terminé sans écrire d’image');
     });

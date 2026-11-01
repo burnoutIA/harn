@@ -189,7 +189,8 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   let modelId = state.active?.modelId ?? null;
   if (body?.model && state.models[body.model]?.installedAt) modelId = body.model;
   if (!modelId) return sendJson(res, 503, { error: { message: 'Aucun modèle installé pour l’instant.' } }, cors);
-  if (String(busyWith() ?? '').startsWith('image:')) await gpuFree();
+  // Une image ou le démarrage de la voix rendent la carte d'eux-mêmes : on attend.
+  if (/^(image|voice):/.test(String(busyWith() ?? ''))) await gpuFree();
   const busy = busyWith();
   if (busy && busy !== modelId) {
     return sendJson(res, 503, { error: { message: `Harn mesure le modèle « ${busy} » : la carte graphique est occupée. Réessayez dans quelques minutes.` } }, { ...cors, 'Retry-After': '60' });

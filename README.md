@@ -387,6 +387,23 @@ du jour), `inspect_image_repo` et `install_image_model`, guidés par le skill
 taille, licence) et ne démarre qu'au clic sur Accepter. Supprimer un modèle reste réservé à la
 fenêtre.
 
+## Voix
+
+Un agent dont la case **Voix** est cochée peut répondre en messages vocaux sur Telegram. Sans la
+case, rien ne change pour lui : ni commande, ni consigne en plus dans son contexte.
+
+- **Installer** : une fois, depuis la fiche de l'agent (« Installer la voix »). Harn installe
+  vLLM-Omni dans `runtime/voxtral` et télécharge Voxtral TTS de Mistral (4B, ~8 Go). Linux
+  seulement. Licence CC BY-NC : usage non commercial.
+- **Sur Telegram** : `/parler` démarre la voix (une minute la première fois), puis chaque réponse
+  arrive en message vocal, voix `fr_female`. Les liens cités partent juste après, en texte. Une
+  longue réponse est coupée en plusieurs vocaux. `/ecrire` revient au texte.
+- **La carte graphique** : la voix prend ~8,5 Go (poids compressés en fp8 au chargement, une
+  requête à la fois), à côté du modèle de texte. S'il manque de place, le modèle de texte est
+  déchargé puis rechargé avec moins de contexte, pour ce chargement-là seulement. La voix
+  s'arrête après un quart d'heure sans rien dire, et le temps d'une image.
+- 30 s de parole se génèrent en ~5 s sur une RTX 3090. Journal : `data/logs/voice.log`.
+
 ## Sécurité de l'inférence
 
 - **Clés API** (Machine → Brancher une application, ou `npm run keys -- create "Portable — Copilot"`,
@@ -540,6 +557,7 @@ pi, agents, images
   src/pi-extensions/     extensions pi : ctx-optimizer, telegram-follow, agent-memory, image-gen
   src/skills/            marches à suivre de pi : installer un modèle, dépanner une installation
   src/images.mjs         génération d'images : moteur, modèles, partage de la carte avec le texte
+  src/voice.mjs          la voix des agents : Voxtral sous vLLM-Omni, à côté du modèle de texte
   src/image-families.mjs familles d'images : fichiers d'accompagnement, réglages, choix de la version
   src/image-hub.mjs      modèles d'images ajoutés depuis Hugging Face, propositions du jour
 

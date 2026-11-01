@@ -1358,7 +1358,24 @@ const AGENT_OPTIONS = [
   ['memory', 'Mémoire', 'Note lui-même ce qu’il juge durable et le relit à chaque conversation.'],
   ['images', 'Images', 'Générer et retoucher des images avec un modèle d’images installé (vue Modèles).'],
   ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
+  ['voice', 'Voix', 'Sur Telegram, /parler le fait répondre en messages vocaux (Voxtral), les sources à part en texte.'],
 ];
+
+// La voix d'un agent (case Voix) : à installer une fois pour tous, puis lancée par /parler. Peinte
+// à part de la fiche : sa progression ne doit pas effacer ce qu'on est en train d'y écrire.
+function voiceBlock(agent) {
+  if (!agent.options.voice) return '';
+  const v = state.voice ?? {};
+  const installed = Boolean(state.runtimes?.voxtral?.installedAt);
+  let body;
+  if (v.installing) body = `<p class="hint">Installation de la voix… <small>${esc(v.detail ?? '')}</small></p>`;
+  else if (!installed) body = `<p class="hint">Voxtral (Mistral) : environ 15 Go à télécharger (moteur et poids). En mode vocal, ~8,5 Go sur la carte graphique, à côté du modèle de texte. Licence CC BY-NC : usage non commercial.</p>${v.error ? `<p class="hint bad">${esc(v.error)}</p>` : ''}<button class="btn small" type="button" data-action="voice-install">Installer la voix</button>`;
+  else {
+    const status = v.status === 'ready' ? 'en marche, elle s’arrête après un quart d’heure sans rien dire' : v.status === 'starting' ? 'démarre…' : 'arrêtée, /parler la démarre';
+    body = `<p class="hint">Sur Telegram, <code>/parler</code> pour des réponses vocales, <code>/ecrire</code> pour revenir au texte. Voix : ${status}.</p>${v.status === 'error' && v.error ? `<p class="hint bad">${esc(v.error)}</p>` : ''}${v.status === 'ready' ? '<button class="btn small ghost" type="button" data-action="voice-stop">Arrêter la voix</button>' : ''}`;
+  }
+  return `<h4>Voix</h4>${agent.telegram ? '' : '<p class="hint">La voix passe par Telegram : renseignez le bot ci-dessous.</p>'}${body}`;
+}
 
 // Ses LoRA : le dossier lora/ de son workspace, à lui seul. Chacun avec la famille de modèles pour
 // laquelle il a été entraîné, et si un modèle de cette famille est installé.
@@ -1407,6 +1424,7 @@ function agentCard(agent) {
       ${loraBlock(agent)}
       <label class="field"><span>Consignes (ajoutées à son prompt système)</span><textarea name="prompt" spellcheck="false">${esc(agent.prompt)}</textarea></label>
       <label class="field"><span>Mémoire (${fr(agent.memory.length)} / ${fr(agent.memoryMax)} caractères)</span><textarea class="memory" name="memoryNotes" maxlength="${agent.memoryMax}" spellcheck="false" placeholder="Vide : l’agent n’a encore rien noté.">${esc(agent.memory)}</textarea></label>
+      <div class="voice" id="voice-${esc(agent.id)}"></div>
       <div class="telegram"><h4>Telegram</h4>
         <label class="field"><span>Identifiant Telegram de la personne</span><input type="text" name="tgOwner" inputmode="numeric" value="${esc(agent.telegram?.ownerId ?? '')}" placeholder="Le nombre donné par @userinfobot" autocomplete="off"></label>
         <label class="field"><span>Jeton du bot</span><input type="password" name="tgToken" placeholder="${agent.telegram ? 'Enregistré · laisser vide pour le garder' : '123456:ABC…, donné par @BotFather'}" autocomplete="new-password"></label>
@@ -1425,7 +1443,14 @@ function renderAgents() {
   </div>`);
   // Le cadre de la vue n'est posé qu'une fois : ce bouton dépend des agents en marche, il est repeint.
   paint('agents-all', (agents ?? []).filter((a) => a.running).length > 1 ? `<button class="btn small" type="button" data-action="agents-overview" title="Tous les agents en marche dans une seule fenêtre de terminal, un panneau chacun">${icon.terminal} Tout voir</button>` : '');
+  const listBefore = regions.get('agents-list');
   paint('agents-list', agents === null ? '<p class="empty">Lecture…</p>' : agents.length ? agents.map(agentCard).join('') : '<p class="empty">Aucun agent pour l’instant.</p>');
+  // Une fiche repeinte a perdu son bloc Voix : il est repeint lui aussi.
+  const listChanged = regions.get('agents-list') !== listBefore;
+  for (const agent of agents ?? []) {
+    if (listChanged) regions.delete(`voice-${agent.id}`);
+    paint(`voice-${agent.id}`, voiceBlock(agent));
+  }
   paint('pi-test', `<div class="label">pi de test</div>
     <div class="pi-block">
       <h3>Instructions</h3>
@@ -1803,6 +1828,8 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       if (r.session) { agents = agents.map((a) => (a.id === id ? { ...a, running: true } : a)); renderAgents(); }
       toast(r.restarted || saved.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
     }
+    if (action === 'voice-install') { await post('/api/voice/install'); toast('Installation de la voix lancée, en arrière-plan'); }
+    if (action === 'voice-stop') { await post('/api/voice/stop'); toast('Voix arrêtée'); }
     if (action === 'agent-stop') {
       const r = await post(`/api/agents/${id}/stop`);
       agents = agents.map((a) => (a.id === id ? { ...a, running: false } : a));
