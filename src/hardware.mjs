@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { statfs } from 'node:fs/promises';
+import { access, readdir, readFile, statfs } from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { HOME } from './paths.mjs';
 
@@ -66,6 +67,68 @@ $items | Where-Object { $_.DriverDesc } | ForEach-Object {
     }));
 }
 
+// Les Radeon sous Linux : tout est dans sysfs, sans ROCm ni droit particulier. La VRAM se lit
+// même quand la carte dort (runtime PM) ; les capteurs, eux, répondent EBUSY et ne la réveillent pas.
+const DRM = '/sys/class/drm';
+const readSys = (file) => readFile(file, 'utf8').then((text) => text.trim()).catch(() => null);
+const sysNumber = async (file) => { const text = await readSys(file); return text === null || text === '' ? null : Number(text); };
+
+async function linuxAmdGpus() {
+  if (process.platform !== 'linux') return [];
+  const cards = (await readdir(DRM).catch(() => [])).filter((name) => /^card\d+$/.test(name)).sort();
+  const gpus = [];
+  for (const card of cards) {
+    const device = path.join(DRM, card, 'device');
+    if ((await readSys(path.join(device, 'vendor'))) !== '0x1002') continue;
+    const total = await sysNumber(path.join(device, 'mem_info_vram_total'));
+    if (!total) continue;
+    const used = await sysNumber(path.join(device, 'mem_info_vram_used'));
+    const slot = (await readSys(path.join(device, 'uevent')))?.match(/PCI_SLOT_NAME=(\S+)/)?.[1] ?? null;
+    const pciId = (await readSys(path.join(device, 'device')))?.replace(/^0x/, '') ?? '?';
+    // « Navi 48 [Radeon AI PRO R9700] » : le nom commercial est entre crochets.
+    const lspci = slot ? await tryRun('lspci', ['-mm', '-s', slot]) : null;
+    const chip = lspci?.match(/^\S+ "[^"]*" "[^"]*" "([^"]*)"/)?.[1] ?? null;
+    const name = chip ? `AMD ${chip.match(/\[([^\]]+)\]/)?.[1] ?? chip}` : `AMD Radeon (1002:${pciId})`;
+    gpus.push({
+      vendor: 'amd',
+      index: gpus.length,
+      name,
+      vramMiB: Math.round(total / 1024 ** 2),
+      freeMiB: used === null ? null : Math.round((total - used) / 1024 ** 2),
+      driver: 'amdgpu',
+      // La puce intégrée n'a qu'une réserve de quelques centaines de Mo prise sur la RAM.
+      integrated: total < 2 * GiB,
+      sysfs: device,
+    });
+  }
+  return gpus;
+}
+
+// ROCm (pour HIP sous Linux) : il faut sudo pour l'installer, Harn ne peut que le constater.
+// Deux origines : le dépôt d'AMD (/opt/rocm) ou les paquets de la distribution (Ubuntu 26.04
+// livre ROCm 7.1 dans /usr). C'est la bibliothèque HIP qui compte : sans elle, rien ne tourne.
+const HIP_LIBS = ['/opt/rocm/lib/libamdhip64.so', '/usr/lib/x86_64-linux-gnu/libamdhip64.so', '/usr/lib64/libamdhip64.so', '/usr/lib/libamdhip64.so'];
+export async function linuxRocm() {
+  if (process.platform !== 'linux') return null;
+  let lib = null;
+  for (const file of HIP_LIBS) if (await access(file).then(() => true, () => false)) { lib = file; break; }
+  if (!lib) return null;
+  const version = (await readSys('/opt/rocm/.info/version')) ?? (await tryRun('hipconfig', ['--version']))?.trim() ?? null;
+  return { version: version?.split('-')[0] ?? null, lib };
+}
+
+// La commande qui installe ROCm, selon la distribution (sudo : c'est l'utilisateur qui la tape).
+export async function rocmInstallHint() {
+  const release = (await readSys('/etc/os-release')) ?? '';
+  const id = release.match(/^ID=(.*)$/m)?.[1]?.replace(/"/g, '');
+  const version = Number.parseFloat(release.match(/^VERSION_ID="?([\d.]+)/m)?.[1] ?? '0');
+  if (id === 'ubuntu' && version >= 25.10) return 'sudo apt install rocm';
+  if (id === 'ubuntu' || id === 'debian') return 'Ajouter le dépôt ROCm d’AMD (rocm.docs.amd.com, « Quick start installation »), puis : sudo apt install rocm';
+  if (id === 'fedora') return 'sudo dnf install rocm';
+  if (id === 'arch') return 'sudo pacman -S rocm-hip-sdk';
+  return 'Suivre rocm.docs.amd.com, « Quick start installation »';
+}
+
 async function cpuInfo() {
   const cpus = os.cpus();
   let physical = null;
@@ -115,19 +178,32 @@ export async function buildTools() {
   return { ok: Boolean(cmake && hostCompiler), nvcc: `${major}.${minor}`, cmake, hostCompiler };
 }
 
+// Podman : les moteurs livrés en image de conteneur (vllm-radiance pour les Radeon RDNA4) passent
+// par lui, sans démon ni droits root. Seulement constaté : son installation demande sudo.
+export async function linuxPodman() {
+  if (process.platform !== 'linux') return null;
+  return (await tryRun('podman', ['--version']))?.match(/(\d+\.\d+(?:\.\d+)?)/)?.[1] ?? null;
+}
+
 export async function detectHardware() {
-  const [nvidia, others, cpu, disk, hasGitBash, python, tools] = await Promise.all([
+  const [nvidia, others, amd, cpu, disk, hasGitBash, python, tools, rocm, podman] = await Promise.all([
     nvidiaGpus(),
     windowsOtherGpus(),
+    linuxAmdGpus(),
     cpuInfo(),
     statfs(HOME).catch(() => null),
     gitBash(),
     linuxPython(),
     buildTools(),
+    linuxRocm(),
+    linuxPodman(),
   ]);
-  const gpus = [...nvidia, ...others];
-  // La carte de référence : la plus grosse NVIDIA, sinon la plus grosse tout court.
-  const primary = [...gpus].sort((a, b) => (b.vendor === 'nvidia') - (a.vendor === 'nvidia') || b.vramMiB - a.vramMiB)[0] ?? null;
+  const gpus = [...nvidia, ...others, ...amd];
+  // La carte de référence : la plus grosse NVIDIA, sinon la plus grosse dédiée. Une puce intégrée
+  // seule n'en fait pas une : ses quelques centaines de Mo ne portent aucun modèle.
+  const primary = [...gpus].filter((gpu) => !gpu.integrated)
+    .sort((a, b) => (b.vendor === 'nvidia') - (a.vendor === 'nvidia') || b.vramMiB - a.vramMiB)[0] ?? null;
+  amdSysfs = primary?.vendor === 'amd' ? primary.sysfs ?? null : null;
   return {
     detectedAt: new Date().toISOString(),
     os: { platform: process.platform, release: os.release(), arch: process.arch },
@@ -142,15 +218,41 @@ export async function detectHardware() {
     gitBash: hasGitBash,
     python,
     buildTools: tools,
+    rocm,
+    podman,
   };
 }
 
 // Relevé léger pour le direct : un nvidia-smi par seconde au plus, quand l'interface regarde.
+// Radeon sous Linux : lu dans sysfs, sur la carte retenue au dernier relevé matériel.
 let gpuSampler = null;
+let amdSysfs = null;
 export const setGpuSampler = (sampler) => { gpuSampler = sampler; };
+
+async function sampleAmd(device) {
+  const total = await sysNumber(path.join(device, 'mem_info_vram_total'));
+  if (!total) return null;
+  const used = await sysNumber(path.join(device, 'mem_info_vram_used'));
+  // Carte en veille : les capteurs refusent de répondre, et c'est très bien ainsi.
+  const asleep = (await readSys(path.join(device, 'power', 'runtime_status'))) === 'suspended';
+  const hwmon = (await readdir(path.join(device, 'hwmon')).catch(() => []))[0];
+  const sensor = async (name) => (asleep || !hwmon ? null : sysNumber(path.join(device, 'hwmon', hwmon, name)));
+  const [util, power, junction, edge, sclk] = await Promise.all([
+    asleep ? 0 : sysNumber(path.join(device, 'gpu_busy_percent')),
+    sensor('power1_average').then((v) => v ?? sensor('power1_input')),
+    sensor('temp2_input'), sensor('temp1_input'), sensor('freq1_input'),
+  ]);
+  const MiB = 1024 ** 2;
+  return {
+    util: util ?? 0, usedMiB: Math.round((used ?? 0) / MiB), freeMiB: Math.round((total - (used ?? 0)) / MiB), totalMiB: Math.round(total / MiB),
+    powerW: power ? Math.round(power / 1e6) : null, tempC: (junction ?? edge) ? Math.round((junction ?? edge) / 1000) : null,
+    pstate: asleep ? 'veille' : 'active', smMHz: sclk ? Math.round(sclk / 1e6) : null,
+  };
+}
 
 export async function sampleGpu() {
   if (gpuSampler) return gpuSampler();
+  if (amdSysfs) return sampleAmd(amdSysfs);
   const csv = await tryRun('nvidia-smi', [
     '--query-gpu=utilization.gpu,memory.used,memory.free,memory.total,power.draw,temperature.gpu,pstate,clocks.sm',
     '--format=csv,noheader,nounits', '-i', '0',

@@ -103,8 +103,19 @@ export function llamaArgs(model, files, tuning, hardware) {
     if (draft.length) args.push('--spec-type', 'draft-mtp', ...draft);
   } else if (spec.type === 'mtp') {
     args.push('--spec-type', 'draft-mtp', ...draft, '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
+    // Brouillon calculé sur les N premiers tokens seulement (fork RDNA Boosts) : la tête de sortie
+    // (248k × 5120 pour Qwen3.8) n'est plus relue en entier à chaque passe du brouillon.
+    if (spec.vocab) args.push('--spec-draft-mtp-vocab', String(spec.vocab));
+  } else if (spec.type === 'mtp-adaptive') {
+    // Fork RDNA Boosts : profondeur MTP adaptative jusqu'à n, doublée d'un brouillon n-gramme qui
+    // reprend les passages déjà vus dans le contexte (code, agents). --spec-type s'y additionne :
+    // jamais draft-mtp en plus, le moteur refuserait et coupait l'anticipation sans le dire.
+    args.push('--spec-type', 'draft-mtp-adaptive,ngram-mod', ...draft, '--spec-ngram-mod-n-match', String(spec.n * 5),
+      '--spec-draft-n-max', String(spec.n), '--spec-draft-n-start', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', '0');
+    if (spec.vocab) args.push('--spec-draft-mtp-vocab', String(spec.vocab));
   } else if (spec.type === 'dflash' && files.dflash) {
-    args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n));
+    // Le brouillon entier sur la carte (sinon le moteur peut le laisser au processeur).
+    args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n), '-ngld', '999');
   } else if (model.mtp) {
     // Sans spéculation demandée, on le dit : certains builds activent la tête MTP d'office.
     args.push('--spec-type', 'none');

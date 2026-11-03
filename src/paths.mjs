@@ -31,4 +31,5 @@ export const PORTS = {
   strata: Number(process.env.HARN_STRATA_PORT ?? 4750),
   hyperqwen: Number(process.env.HARN_HYPERQWEN_PORT ?? 4751),
   gemmaChallenge: Number(process.env.HARN_GEMMA_CHALLENGE_PORT ?? 4752),
+  radiance: Number(process.env.HARN_RADIANCE_PORT ?? 4753),
 };

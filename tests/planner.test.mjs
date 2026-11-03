@@ -159,6 +159,14 @@ test('Radeon RDNA 3/4 : Vulkan et HIP mesurés', () => {
   assert.deepEqual(backendCandidates(amd, gpuProfile(amd)), ['vulkan', 'hip']);
 });
 
+test('Radeon sous Linux : HIP seulement si ROCm est installé', () => {
+  const r9700 = { ...named('AMD Radeon AI PRO R9700', 0, 32, 'amd'), os: { platform: 'linux' }, rocm: null };
+  const profile = gpuProfile(r9700);
+  assert.deepEqual([profile.arch, profile.bandwidth], ['rdna4', 640]);
+  assert.deepEqual(backendCandidates(r9700, profile), ['vulkan']);
+  assert.deepEqual(backendCandidates({ ...r9700, rocm: { version: '7.1.0' } }, profile), ['vulkan', 'hip']);
+});
+
 test('échelle commune : le score du banc remplace la note estimée', () => {
   const m = machine(24, 16);
   const target = makePlan(m).targetModel;
@@ -335,4 +343,54 @@ test('GitHub : limite atteinte dite clairement, réponses gardées en cache', as
     await github('/test/cache');
     assert.equal(calls, 1);
   } finally { globalThis.fetch = realFetch; }
+});
+
+test('Radiance : une Radeon RDNA4 de 32 Go sous Linux, avec Podman', async () => {
+  const { assess } = await import('../src/planner.mjs');
+  const model = modelById('qwen3-8-27b-radiance');
+  const r9700 = { ...named('AMD Radeon AI PRO R9700', 0, 31.8, 'amd'), diskFreeGiB: 500, os: { platform: 'linux' }, podman: '5.7.0' };
+  const ok = assess(model, r9700);
+  assert.deepEqual([ok.fit, ok.context], ['full', 131072]);
+  assert.match(assess(model, { ...r9700, podman: null }).reasons.join(), /Podman/);
+  assert.match(assess(model, named('NVIDIA GeForce RTX 3090', 8.6)).reasons.join(), /RDNA4/);
+  // L'inverse : HyperQwen ne tourne pas sur la Radeon.
+  assert.equal(assess(modelById('qwen3-8-27b-hyperqwen'), r9700).fit, 'no');
+});
+
+test('RDNA Boosts : proposé aux Radeon RDNA4 sous Linux, deux façons d’anticiper', async () => {
+  const { alternates, engineSheet } = await import('../src/engines.mjs');
+  const { gpuProfile } = await import('../src/levers.mjs');
+  const { sandboxAvailable } = await import('../src/sandbox.mjs');
+  const { llamaArgs } = await import('../src/engine.mjs');
+  const { radeonVulkanEnv } = await import('../src/loading.mjs');
+  const model = modelById('qwen3-8-27b-gguf-ud-q4-k-m');
+  const r9700 = { ...named('AMD Radeon AI PRO R9700', 0, 32, 'amd'), os: { platform: 'linux' }, cpu: { physical: 8 } };
+  const official = { context: 131072, backend: 'vulkan', kv: 'q8_0', batch: 1024, ubatch: 512, spec: { type: 'mtp', n: 3, pMin: 0 } };
+  if (await sandboxAvailable()) {
+    const found = await alternates(model, official, gpuProfile(r9700), r9700);
+    const boosts = found.find((a) => a.id === 'rdnaboosts');
+    assert.ok(boosts);
+    // Avec un brouillon DFlash2 : DFlash2 n=4 et n=6, puis MTP 3 sur brouillon réduit.
+    const [d4, d6, short] = boosts.arms('vulkan');
+    assert.deepEqual([d4.spec, d6.spec.n, d4.backend, d4.fork], [{ type: 'dflash', n: 4 }, 6, 'hip', 'rdnaboosts']);
+    assert.deepEqual([short.backend, short.kv, short.fork, short.spec.vocab], ['hip', 'f16', 'rdnaboosts', 98304]);
+    const dflashArgs = llamaArgs(model, { model: 'm.gguf', dflash: 'd.gguf' }, d4, r9700);
+    assert.deepEqual(dflashArgs.slice(dflashArgs.indexOf('--spec-type'), dflashArgs.indexOf('--spec-type') + 8), ['--spec-type', 'draft-dflash', '--spec-draft-model', 'd.gguf', '--spec-draft-n-max', '4', '-ngld', '999']);
+    // Sans brouillon DFlash2 : MTP 3 réduit et MTP adaptatif + n-gramme.
+    const [, agent] = engineSheet('rdnaboosts').arms({ ...official, fork: 'rdnaboosts' }, { ...model, dflash: undefined });
+    assert.equal(agent.spec.type, 'mtp-adaptive');
+    // --spec-type n'apparaît qu'une fois : le fork additionne les valeurs et refuserait draft-mtp + adaptatif.
+    const args = llamaArgs(model, { model: 'm.gguf' }, agent, r9700);
+    assert.equal(args.filter((a) => a === '--spec-type').length, 1);
+    assert.equal(args[args.indexOf('--spec-type') + 1], 'draft-mtp-adaptive,ngram-mod');
+    assert.equal(args[args.indexOf('--spec-draft-mtp-vocab') + 1], '98304');
+    assert.equal(llamaArgs(model, { model: 'm.gguf' }, short, r9700).at(llamaArgs(model, { model: 'm.gguf' }, short, r9700).indexOf('--spec-draft-mtp-vocab') + 1), '98304');
+  }
+  // Pas sur une NVIDIA, ni sous Windows.
+  assert.ok(!(await alternates(model, official, gpuProfile(named('NVIDIA GeForce RTX 3090', 8.6)), { ...named('NVIDIA GeForce RTX 3090', 8.6), os: { platform: 'linux' } })).some((a) => a.id === 'rdnaboosts'));
+  assert.ok(!(await alternates(model, official, gpuProfile(r9700), { ...r9700, os: { platform: 'win32' } })).some((a) => a.id === 'rdnaboosts'));
+  // Vulkan sur Radeon : file graphique ; rien ailleurs.
+  assert.deepEqual(radeonVulkanEnv({ backend: 'vulkan' }, r9700), { GGML_VK_ALLOW_GRAPHICS_QUEUE: '1' });
+  assert.deepEqual(radeonVulkanEnv({ backend: 'hip' }, r9700), {});
+  assert.deepEqual(radeonVulkanEnv({ backend: 'vulkan' }, named('NVIDIA GeForce RTX 3090', 8.6)), {});
 });

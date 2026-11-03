@@ -39,6 +39,20 @@ export async function tuneModel(modelId, options = {}) {
     return result;
   });
 }
+// Un banc lancé à la main (bouton Mesurer) : suivi dans le panneau « En cours » comme à
+// l'installation, et l'erreur reste sur la carte du modèle.
+export async function benchWithProgress(modelId) {
+  update((s) => { if (s.models[modelId]) Object.assign(s.models[modelId], { tuning: true, tuneDetail: null, error: null }); });
+  try {
+    return await tuneModel(modelId, { onProgress: (detail) => update((s) => { if (s.models[modelId]) s.models[modelId].tuneDetail = detail; }) });
+  } catch (error) {
+    update((s) => { if (s.models[modelId]) s.models[modelId].error = error.message; });
+    throw error;
+  } finally {
+    update((s) => { if (s.models[modelId]) Object.assign(s.models[modelId], { tuning: false, tuneDetail: null }); });
+  }
+}
+
 async function tuneModelInner(modelId, { startFrom = null, engine = null, onProgress = () => {} } = {}) {
   const model = modelById(modelId);
   const state = getState();
@@ -69,7 +83,9 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         loadedTuning = tuning;
         loadedHeadroom = await freeVram();
       }
-      const result = await measure(getState().active.endpoint, modelId, { workloads, weights, onProgress: say });
+      // Un brouillon n-gramme se souvient de la réponse du passage précédent : un seul passage.
+      const runs = tuning.spec?.type === 'mtp-adaptive' ? 1 : 2;
+      const result = await measure(getState().active.endpoint, modelId, { workloads, weights, runs, sampling: model.sampling, onProgress: say });
       const entry = { id: `arm${index}`, stage, label, tuning, headroomMiB: loadedHeadroom, ...result };
       entry.ok = ownLauncher(model) || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
       results.push(entry);
@@ -92,6 +108,12 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   // ni la charge en profondeur (~32k) ni le prompt de code (plus de 4k tokens Gemma).
   if (model.engine === 'gemma-challenge') {
     const only = await trial('Gemma Challenge', initial.tuning, model.challengeStack === 'qat' ? compared : ['prose']);
+    if (only.error) throw new Error(only.error);
+    return finish(model, results, only);
+  }
+  // Radiance : le seul réglage de la fiche, mesuré sur toutes les charges.
+  if (model.engine === 'radiance') {
+    const only = await trial('Radiance', initial.tuning);
     if (only.error) throw new Error(only.error);
     return finish(model, results, only);
   }
@@ -167,7 +189,13 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
         if (step) onProgress(`${alt.label} · compilation ${step}`);
       } });
-      for (const arm of alt.arms(info.backend)) best = better(await trial(`Moteur ${alt.label}`, arm), best);
+      const arms = alt.arms(info.backend);
+      // Un réglage DFlash2 sans son brouillon tournerait sans anticipation : téléchargé d'abord.
+      if (model.dflash && arms.some((arm) => arm.spec?.type === 'dflash')) {
+        onProgress(`${alt.label} · téléchargement du brouillon DFlash2`);
+        await downloadFile(model, model.dflash);
+      }
+      for (const arm of arms) best = better(await trial(`Moteur ${alt.label}`, arm), best);
     } catch (error) {
       if (engineSheet(alt.id).source === 'build') recordBuildFailure(alt.id, error, hardware);
       results.push({ id: alt.id, stage: `Moteur ${alt.label}`, label: 'installation', error: error.message.slice(0, 200), ok: false });
@@ -182,7 +210,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     let depth = best.workloads?.find((w) => w.workload === 'depth') ?? null;
     if (!depth && model.engine !== 'strata' && best.tuning.backend !== 'cpu' && best.tuning.context >= 40960) {
       onProgress('Vitesse en profondeur (~32k tokens)');
-      depth = (await measure(getState().active.endpoint, modelId, { workloads: ['depth'] }).catch(() => null))?.workloads[0] ?? null;
+      depth = (await measure(getState().active.endpoint, modelId, { workloads: ['depth'], sampling: model.sampling }).catch(() => null))?.workloads[0] ?? null;
     }
     update((s) => {
       const entry = (s.profiles[model.id] ??= {});

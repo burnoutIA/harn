@@ -202,6 +202,9 @@ export const MODELS = [
     engine: 'llama',
     repo: 'unsloth/Qwen3.8-27B-GGUF',
     files: [{ name: 'Qwen3.8-27B-UD-Q4_K_M.gguf', bytes: 16_464_440_224, sha256: '322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482' }],
+    // Le brouillon DFlash2 de z-lab : le meilleur réglage mesuré sur R9700 (RDNA Boosts, n=4 à 6).
+    // Le Q8_0 ne devine pas mieux et calcule plus lentement.
+    dflash: { repo: 'z-lab/Qwen3.8-27B-DFlash2-GGUF', name: 'Qwen3.8-27B-DFlash2-Q4_K_M.gguf', bytes: 1_143_006_816, sha256: '1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd' },
     mmproj: { repo: 'unsloth/Qwen3.8-27B-GGUF', name: 'mmproj-F16.gguf', bytes: 927_607_488, sha256: 'cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e' },
     kvBytesPerToken: { f16: 69_632, q8_0: 36_992, q4_0: 19_584 },
     needs: { vramGiB: 0, ramGiB: 16 },
@@ -242,6 +245,31 @@ export const MODELS = [
     sampling: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0 },
     reasoningLevels: ['low', 'medium', 'xhigh'],
     evidence: { gpu: 'RTX 3090', tps4k: 99.4, tps128k: 68.4, note: 'HyperQwen ce9615c, MTP CTX=long 131k, KV int8 pthfa, brouillon FR' },
+  },
+  {
+    // Le même 27B pour les Radeon RDNA4, servi par vllm-radiance (deadcode) dans Podman : MXFP4
+    // W4A8 d'AMD (Quark), KV fp8, DFlash2 K7 avec tête de brouillon INT2, vision comprise. Cache KV
+    // imposé et deux correctifs de Harn (src/assets/radiance) : sans eux, 128k et vision ne tiennent
+    // pas ensemble dans 32 Go.
+    id: 'qwen3-8-27b-radiance',
+    name: 'Qwen3.8-27B',
+    variant: 'MXFP4 · Radiance',
+    tagline: 'Le 27B officiel servi par vLLM Radiance sur Radeon RDNA4 : 128k de contexte et la vision, ~120 tok/s sur une R9700.',
+    engine: 'radiance',
+    repo: 'amd/Qwen3.8-27B-Quark-AWQ-MXFP4',
+    // Les poids (19,8 Go), le brouillon DFlash2 (2,1 Go) et l'image du moteur (~10 Go), installés
+    // par installRadiance. Ce total sert au contrôle de place sur le disque.
+    files: [{ name: 'Qwen3.8-27B-Quark-AWQ-MXFP4', bytes: 32_000_000_000 }],
+    needs: { vramGiB: 30, ramGiB: 32 },
+    contextByVram: [[30, 131072]],
+    quality: 95,
+    paramsB: 27,
+    reasoning: true,
+    vision: true,
+    moe: null,
+    sampling: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0 },
+    reasoningLevels: ['low', 'medium', 'xhigh'],
+    evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 173, tps128k: 139, note: 'vllm-radiance b73bf3e, DFlash2 K7, KV fp8, vision, 128k ; ~97k de prompt : 139 tok/s ; intelligence 100' },
   },
   {
     // La pile gagnante du Fast Gemma Challenge (gemma-slayer, installGemmaChallenge), servie telle
@@ -359,9 +387,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
-// Strata, HyperQwen et la pile du Gemma Challenge se lancent par leurs propres scripts, avec leurs
+// Strata, HyperQwen, Radiance et la pile du Gemma Challenge se lancent par leurs propres scripts, avec leurs
 // propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
-export const ownLauncher = (model) => ['strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine);
+export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine);
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

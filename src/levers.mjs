@@ -25,7 +25,7 @@ const BANDWIDTH = [
   [/3090 Ti/, 1008], [/3090/, 936], [/3080 Ti/, 912], [/3080/, 760], [/3070 Ti/, 608], [/3070|3060 Ti/, 448], [/3060/, 360],
   [/2080 Ti/, 616], [/2080/, 448], [/2070|2060 SUPER/, 448], [/2060/, 336],
   [/RTX PRO 6000/, 1792], [/A6000|RTX 6000 Ada/, 960], [/A100/, 1555], [/H100/, 3350],
-  [/7900 XTX/, 960], [/7900 XT/, 800], [/7800 XT/, 624], [/7700 XT/, 432], [/9070/, 640], [/9060 XT/, 320], [/6900|6800/, 512],
+  [/7900 XTX/, 960], [/7900 XT/, 800], [/7800 XT/, 624], [/7700 XT/, 432], [/9070|R9700/, 640], [/9060 XT/, 320], [/6900|6800/, 512],
   [/B580/, 456], [/A770/, 560], [/A750/, 512],
 ];
 
@@ -79,7 +79,10 @@ export function backendCandidates(hardware, profile) {
     if (cuda >= 12.4) return ['cuda12'];
     return ['vulkan'];
   }
-  if (gpu?.vendor === 'amd' && ['rdna3', 'rdna4'].includes(profile.arch)) return ['vulkan', 'hip'];
+  // Sous Linux, le build HIP s'appuie sur le ROCm installé : sans lui, Vulkan seul.
+  if (gpu?.vendor === 'amd' && ['rdna3', 'rdna4'].includes(profile.arch)) {
+    return hardware.os?.platform === 'linux' && !hardware.rocm ? ['vulkan'] : ['vulkan', 'hip'];
+  }
   if (gpu && gpu.vramMiB >= 2048) return ['vulkan'];
   return ['cpu'];
 }
@@ -120,6 +123,10 @@ export function hardwareNotes(hardware, profile) {
   }
   if (profile.flashAttentionUncertain) notes.push({ level: 'info', text: 'Sur cette génération, la Flash Attention est mesurée activée et désactivée.' });
   if (profile.laptop) notes.push({ level: 'warn', text: 'Ordinateur portable : branchez-le sur secteur, la carte graphique ralentit fortement sur batterie.' });
-  if (gpu?.vendor === 'amd') notes.push({ level: 'info', text: 'Radeon : Vulkan et HIP (ROCm) sont mesurés tous les deux ; le plus rapide est gardé.' });
+  if (gpu?.vendor === 'amd') {
+    notes.push(hardware.os?.platform === 'linux' && !hardware.rocm && ['rdna3', 'rdna4'].includes(profile.arch)
+      ? { level: 'info', text: 'Radeon : seul Vulkan est mesuré. Installer ROCm (il faut sudo) ajoute HIP au banc, souvent plus rapide pour lire le prompt.' }
+      : { level: 'info', text: 'Radeon : Vulkan et HIP (ROCm) sont mesurés tous les deux ; le plus rapide est gardé.' });
+  }
   return notes;
 }

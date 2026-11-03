@@ -32,7 +32,7 @@ export function shapeRequest(body, model) {
   }
   // vLLM livre plusieurs tokens par morceau en décodage spéculatif (~2 avec DFlash2) : il donne le
   // compte exact dans chaque morceau, sinon le direct afficherait la moitié de la vitesse.
-  const vllm = model.engine === 'hyperqwen' || model.engine === 'gemma-challenge';
+  const vllm = ['hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine);
   if (shaped.stream) shaped.stream_options = { include_usage: true, ...(vllm ? { continuous_usage_stats: true } : {}), ...(body.stream_options ?? {}) };
   return shaped;
 }
@@ -122,7 +122,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   const active = getState().active;
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
-  const engine = ['strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';
+  const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';
   const target = `${active.endpoint}${url.pathname}${url.search}`;
 
   const generative = body && /\/(chat\/)?completions$/.test(url.pathname);

@@ -6,7 +6,12 @@ import { sampleGpu } from './hardware.mjs';
 //   en prose, et le type de KV ne se départage qu'en profondeur (pente f16 deux fois plus
 //   faible que q8_0 sur le build officiel) ;
 // - les compteurs du moteur (timings), jamais le comptage des événements SSE ;
-// - une passe d'échauffement, glouton, graine fixe, longueur de sortie fixe ;
+// - une passe d'échauffement, l'échantillonnage du modèle (celui de l'usage réel), une graine par
+//   passage, longueur de sortie fixe. Pas de glouton : en glouton, une fois sa réponse finie
+//   (ignore_eos), le modèle répète en boucle et l'anticipation devine tout (R9700, Qwen3.8-27B :
+//   92 % d'acceptation en code glouton contre 84 % à température 1). Pas de graine commune aux
+//   passages : le second réécrirait mot pour mot le premier, et un brouillon n-gramme, qui se
+//   souvient de la réponse précédente, la recopierait (324 tok/s mesurés au lieu de ~116) ;
 // - l'état P relevé pendant la génération : en P3 la mesure est fausse.
 
 export const HEADROOM_MIN_MIB = 1536;
@@ -63,7 +68,7 @@ export const WORKLOADS = {
 // En flux : llama-server donne ses timings dans le dernier événement ; les moteurs qui n'en ont pas
 // (vLLM, Strata) sont chronométrés au premier token, sinon la lecture d'un prompt de 32k compterait
 // dans la génération (4,6 tok/s affichés pour ~80 réels avec HyperQwen).
-async function complete(endpoint, model, messages, maxTokens) {
+async function complete(endpoint, model, messages, maxTokens, { sampling = null, seed = 42 } = {}) {
   const startedAt = Date.now();
   const response = await fetch(`${endpoint}/v1/chat/completions`, {
     method: 'POST',
@@ -72,8 +77,9 @@ async function complete(endpoint, model, messages, maxTokens) {
       model,
       messages,
       max_tokens: maxTokens,
-      temperature: 0,
-      seed: 42,
+      temperature: sampling?.temperature ?? 1,
+      ...(sampling ? { top_p: sampling.top_p, top_k: sampling.top_k, min_p: sampling.min_p } : {}),
+      seed,
       ignore_eos: true,
       stream: true,
       stream_options: { include_usage: true },
@@ -140,9 +146,9 @@ export function isBetter(candidate, current) {
 }
 
 // runs : chaque charge mesurée plusieurs fois, la moyenne gardée et l'écart noté (la profondeur,
-// longue à lire, une seule fois).
-export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, runs = 2, weights = {}, onProgress = () => {} } = {}) {
-  await complete(endpoint, modelId, [{ role: 'user', content: 'Bonjour' }], 16); // échauffement
+// longue à lire, une seule fois). sampling : celui du modèle (catalogue) ; sans, température 1.
+export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, runs = 2, weights = {}, sampling = null, onProgress = () => {} } = {}) {
+  await complete(endpoint, modelId, [{ role: 'user', content: 'Bonjour' }], 16, { sampling }); // échauffement
   const results = [];
   const pstates = new Set();
   for (const id of workloads) {
@@ -154,7 +160,7 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
     try {
       for (let run = 0; run < (id === 'depth' ? 1 : runs); run += 1) {
         const started = Date.now();
-        const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens);
+        const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens, { sampling, seed: 42 + run });
         const t = answer.timings ?? {};
         const generated = t.predicted_n ?? answer.usage?.completion_tokens ?? workload.maxTokens ?? maxTokens;
         samples.push({

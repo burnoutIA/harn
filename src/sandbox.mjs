@@ -40,12 +40,14 @@ export const sandboxReady = () => available === true;
 export const SANDBOX_INSTALL = 'sudo apt install bubblewrap';
 
 // readable / writable : chemins visibles dans la bulle (lecture seule / lecture-écriture).
-// gpu : la carte NVIDIA (et /sys, que CUDA lit pour la trouver).
+// gpu : la carte (et /sys, que CUDA et ROCm lisent pour la trouver). NVIDIA : /dev/nvidia* ;
+// AMD : /dev/kfd (files de calcul ROCm) et /dev/dri (rendu, Vulkan).
 export function sandboxed(command, args, { readable = [], writable = [], gpu = false, cwd = null } = {}) {
   const box = [...systemArgs(), '--unshare-all', '--die-with-parent', '--new-session', '--setenv', 'HOME', '/tmp'];
   if (gpu) {
     box.push('--ro-bind', '/sys', '/sys');
     for (const name of readdirSync('/dev').filter((n) => n.startsWith('nvidia'))) box.push('--dev-bind', `/dev/${name}`, `/dev/${name}`);
+    if (existsSync('/dev/kfd')) box.push('--dev-bind', '/dev/kfd', '/dev/kfd');
     if (existsSync('/dev/dri')) box.push('--dev-bind', '/dev/dri', '/dev/dri');
   }
   for (const target of [...new Set(readable.filter(Boolean))]) box.push('--ro-bind', target, target);

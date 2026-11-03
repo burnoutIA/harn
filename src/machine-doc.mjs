@@ -90,7 +90,7 @@ export function factsMarkdown(state) {
       lines.push(`| ${arm.stage ?? ''} | ${arm.label} | ${fr(w('code'))} | ${fr(w('prose'))} | ${fr(w('deep'))} | ${fr(arm.tps, 1)} | ${arm.headroomMiB ? `${fr(arm.headroomMiB / 1024, 1)} Go` : '—'} | ${arm.id === profile.bench.winner.id ? 'oui' : arm.ok === false ? 'écarté (marge)' : ''} |`);
     }
     const pstates = [...new Set(profile.bench.arms.flatMap((arm) => arm.pstates ?? []))];
-    lines.push('', `Protocole : glouton (température 0), graine 42, sortie fixe de 384 tokens, un échauffement par variante, compteurs du moteur. Charges : code (~3 900 tokens de prompt), texte (prompt court), contexte long (~20 000 tokens, seulement quand le type de KV est comparé). États P relevés pendant la génération : ${pstates.length ? pstates.join(', ') : 'non relevés'}.`);
+    lines.push('', `Protocole : échantillonnage du modèle (température 1 le plus souvent), une graine par passage, sortie fixe de 384 tokens, un échauffement par variante, compteurs du moteur. Charges : code (~3 900 tokens de prompt), texte (prompt court), contexte long (~20 000 tokens, seulement quand le type de KV est comparé). États P relevés pendant la génération : ${pstates.length ? pstates.join(', ') : 'non relevés'}.`);
     if (profile.bench.winner.throttled) lines.push('', '> La carte est passée en économie d’énergie (P3+) pendant la mesure : chiffres sous-évalués.');
     if (profile.usage?.seconds) lines.push('', `Usage réel : ${profile.usage.requests} requêtes, ${fr(profile.usage.tokens / profile.usage.seconds)} tok/s en moyenne.`);
   }

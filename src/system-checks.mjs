@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { MODELS } from './catalog.mjs';
+import { rocmInstallHint } from './hardware.mjs';
 import { gpuProfile, hardwareNotes, isAmpereLinux } from './levers.mjs';
 import { assess } from './planner.mjs';
+import { update } from './state.mjs';
 
 const run = promisify(execFile);
 const quiet = (command, args) => run(command, args, { windowsHide: true, timeout: 10_000 }).then((r) => r.stdout).catch(() => '');
@@ -40,6 +42,17 @@ export async function systemChecks(hardware, { vramBaselineMiB = null } = {}) {
       title: 'Moteur llamAmpere possible',
       text: `Votre RTX 30 peut utiliser llamAmpere, un llama.cpp écrit pour elle (+15 à 20 % en code mesurés sur une 3090). Harn le compile lui-même, mais il manque ${[!tools.nvcc && 'le toolkit CUDA', !tools.cmake && 'cmake', tools.nvcc && !tools.hostCompiler && `un g++ accepté par nvcc ${tools.nvcc}`].filter(Boolean).join(', ') || 'des outils de compilation'}.`,
       how: 'Dans un terminal : sudo apt install nvidia-cuda-toolkit cmake build-essential, puis relancer Harn et refaire le banc du modèle.',
+    });
+  }
+  // Radeon RDNA 3/4 sous Linux sans ROCm : seul Vulkan est mesuré. HIP lit les longs prompts
+  // plus vite, et vLLM (HyperQwen, voix) n'a que ROCm sur une carte AMD.
+  if (process.platform === 'linux' && hardware.primary?.vendor === 'amd' && ['rdna3', 'rdna4'].includes(gpuProfile(hardware).arch) && !hardware.rocm) {
+    checks.push({
+      id: 'rocm',
+      level: 'warn',
+      title: 'HIP indisponible : ROCm n’est pas installé',
+      text: 'Votre Radeon tourne en Vulkan, qui marche bien. Avec ROCm, Harn mesure aussi HIP, souvent nettement plus rapide pour lire un long prompt, et garde le meilleur des deux.',
+      how: `Dans un terminal : ${await rocmInstallHint()}. Puis relancer Harn et refaire le banc des modèles.`,
     });
   }
   // Linux : pi gère lui-même la sélection à la souris et copie par un outil du bureau. Sans lui,
@@ -112,6 +125,10 @@ export async function applyCheck(id) {
   if (id === 'power-plan') {
     await run('powercfg', ['/setactive', HIGH_PERFORMANCE], { windowsHide: true });
     return 'Mode performances élevées activé';
+  }
+  if (id === 'gpu-change-ok') {
+    update((s) => { s.gpuChange = null; });
+    return 'C’est noté';
   }
   throw new Error('Action inconnue');
 }

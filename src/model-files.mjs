@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installGemmaChallenge, installHyperQwen, installStrata, installStrataPack } from './runtimes.mjs';
+import { installGemmaChallenge, installHyperQwen, installRadiance, installStrata, installStrataPack } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -26,12 +26,17 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   const paths = {};
   try {
     // Avant de télécharger : le fichier est peut-être déjà sur la machine (même nom, même taille).
-    if (model.engine === 'hyperqwen' || model.engine === 'gemma-challenge') {
+    if (['hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine)) {
       // Ni GGUF ni copie locale à reprendre : l'installeur télécharge et prépare lui-même.
-      const hyperqwen = model.engine === 'hyperqwen';
-      note(hyperqwen ? 'Installation de HyperQwen (vLLM) et préparation du modèle' : 'Installation du moteur du Gemma Challenge (vLLM) et préparation du modèle');
+      const installers = {
+        hyperqwen: ['Installation de HyperQwen (vLLM) et préparation du modèle', installHyperQwen],
+        radiance: ['Installation de Radiance (image vLLM pour Radeon, ~10 Go) et des poids', installRadiance],
+        'gemma-challenge': ['Installation du moteur du Gemma Challenge (vLLM) et préparation du modèle', (onLog) => installGemmaChallenge(model, onLog)],
+      };
+      const [label, install] = installers[model.engine];
+      note(label);
       const onLog = (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); };
-      await (hyperqwen ? installHyperQwen(onLog) : installGemmaChallenge(model, onLog));
+      await install(onLog);
       await log('Fichiers prêts.');
       update((s) => { s.models[model.id] = { installedAt: new Date().toISOString(), installing: false, files: [], paths: {} }; });
       return;

@@ -156,7 +156,7 @@ function settlePending() {
 // qu'elle arrive : une fois reçue, ses 14 Mo afficheraient « 100 % » pendant que Strata tire 70 Go.
 function downloadItems(id) {
   const engine = modelOf(id)?.engine;
-  const runtime = engine === 'strata' || engine === 'hyperqwen' ? downloadsFor(`runtime:${engine}`).filter((d) => !d.done) : [];
+  const runtime = ['strata', 'hyperqwen'].includes(engine) ? downloadsFor(`runtime:${engine}`).filter((d) => !d.done) : [];
   return downloadsFor(`model:${id}`).concat(runtime).filter((d) => d.total);
 }
 // Dernière ligne lisible du journal d'un installeur (codes de terminal et retours chariot retirés).
@@ -722,8 +722,40 @@ function renderHome() {
 function archWithoutEngine(model) {
   const arch = model.profile?.arch;
   const lists = Object.values(state.engineArchs ?? {});
-  if (!arch || ['strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine) || !lists.length) return null;
+  if (!arch || ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) || !lists.length) return null;
   return lists.some((archs) => archs.includes(arch)) ? null : arch;
+}
+
+// Nouvelle carte : les modèles installés à remesurer, ceux qu'elle ne peut pas faire tourner, et
+// ce que l'ancienne carte en tirait (gardé pour comparer). Même règle que src/gpu-profiles.mjs.
+function benchTodo() {
+  const installed = Object.keys(state.models ?? {}).filter((id) => state.models[id]?.installedAt);
+  const unusable = installed.filter((id) => verdictOf(id)?.fit === 'no');
+  const toMeasure = installed.filter((id) => !unusable.includes(id) && !state.profiles[id]?.bench);
+  return { toMeasure, unusable };
+}
+function measuredElsewhere(id) {
+  for (const [card, shelf] of Object.entries(state.gpuArchive ?? {})) {
+    const tps = shelf.profiles?.[id]?.bench?.winner?.tps;
+    if (tps) return { card: card.replace(/^(NVIDIA|AMD)\s+(GeForce\s+)?/, ''), tps };
+  }
+  return null;
+}
+function gpuBanner() {
+  const change = state.gpuChange;
+  if (!change) return '';
+  const { toMeasure, unusable } = benchTodo();
+  const running = toMeasure.some((id) => state.models[id]?.tuning || state.models[id]?.waitingGpu);
+  const parts = [change.restored
+    ? `Harn a repris les réglages déjà mesurés sur cette carte pour ${change.restored} modèle${change.restored > 1 ? 's' : ''}.`
+    : `Les réglages et les vitesses mesurés sur la ${esc(change.from)} ne valent pas pour cette carte : ils sont mis de côté (ils reviendront si vous la remettez) et restent affichés en gris pour comparer.`];
+  if (toMeasure.length) parts.push(`<b>${toMeasure.length} modèle${toMeasure.length > 1 ? 's' : ''} à mesurer sur cette carte.</b> Chaque banc charge le modèle et essaie plusieurs réglages : comptez quelques minutes par modèle.`);
+  if (unusable.length) parts.push(`Ne tournent pas sur cette carte : ${unusable.map((id) => esc(nameOf(id))).join(', ')}.`);
+  return `<section class="card check-item warn gpu-banner">
+    <div class="icon">${icon.alert}</div>
+    <div><h3>Nouvelle carte : ${esc(change.to)}</h3><p>${parts.join(' ')}</p></div>
+    <div class="acts">${toMeasure.length ? `<button class="btn small primary" data-action="bench-all" ${running ? 'disabled' : ''}>${running ? 'Mesures en cours…' : `Tout mesurer (${toMeasure.length})`}</button>` : ''}<button class="btn small ghost" data-action="gpu-ok">Masquer</button></div>
+  </section>`;
 }
 
 function modelCard(model) {
@@ -741,10 +773,16 @@ function modelCard(model) {
   const badges = [];
   if (isActive) badges.push(state.active.status === 'ready' || loading ? `<span class="badge active">${loading ? 'Chargement…' : 'Actif'}</span>` : '<span class="badge">En pause</span>');
   else if (entry.installedAt) badges.push('<span class="badge">Installé</span>');
+  const unusableHere = entry.installedAt && verdict.fit === 'no';
+  const toMeasureHere = entry.installedAt && !unusableHere && !profile.bench;
+  const elsewhere = measuredElsewhere(model.id);
+  if (unusableHere) badges.push(`<span class="badge warn" title="${esc(verdict.reasons.join(', '))}">Ne tourne pas sur cette carte</span>`);
+  else if (toMeasureHere && !entry.tuning && !entry.waitingGpu) badges.push('<span class="badge warn" title="Aucune mesure sur la carte présente : contexte et vitesse sont des estimations">À mesurer sur cette carte</span>');
   if (isUpgrade) badges.push('<span class="badge upgrade">Recommandé pour vous</span>');
   else if (isTarget && !isActive) badges.push('<span class="badge upgrade" title="Meilleure note globale parmi les modèles qui tiennent 100k de contexte et 40 tok/s">Meilleur choix ici</span>');
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
   if (model.engine === 'hyperqwen') badges.push('<span class="badge">vLLM · HyperQwen</span>');
+  if (model.engine === 'radiance') badges.push('<span class="badge" title="vLLM pour Radeon RDNA4, dans Podman">vLLM · Radiance</span>');
   if (model.engine === 'gemma-challenge') badges.push(model.challengeStack === 'qat'
     ? '<span class="badge" title="Accélérations sans perte du Fast Gemma Challenge sur le checkpoint officiel">vLLM · Gemma Challenge</span>'
     : '<span class="badge warn" title="Pile taillée pour la métrique du challenge : réponses dégradées, surtout en français">vLLM · banc du challenge</span>');
@@ -753,19 +791,24 @@ function modelCard(model) {
   for (const label of domainLeaders()[model.id] ?? []) badges.push(`<span class="badge lead" title="Meilleure note du banc d’intelligence en ${label.toLowerCase()} parmi vos modèles testés">Meilleur en ${label.toLowerCase()}</span>`);
   if (iqResult(model.id)?.verbosity.label === 'bavard') badges.push('<span class="badge warn" title="Réfléchit longtemps avant de répondre">Bavard</span>');
 
-  const speed = measured
+  const before = !measured && elsewhere ? `<div class="before" title="Mesuré sur l’ancienne carte, ne vaut pas ici">avant (${esc(elsewhere.card)}) : ${fr(elsewhere.tps)} tok/s</div>` : '';
+  const speed = (measured
     ? `<div class="v ${measured < minTps ? 'bad' : ''}">${fr(measured)}<small>tok/s</small></div>`
-    : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}" ${verdict.calibration ? `title="Estimation corrigée ×${fr(verdict.calibration, 2)} d’après les modèles déjà mesurés sur cette machine"` : ''}>~${verdict.tps}<small>${verdict.calibration ? 'estimé ici' : 'estimé'}</small></div>` : '<div class="v est">—</div>';
+    : verdict.tps ? `<div class="v est ${verdict.tps < minTps ? 'bad' : ''}" ${verdict.calibration ? `title="Estimation corrigée ×${fr(verdict.calibration, 2)} d’après les modèles déjà mesurés sur cette machine"` : ''}>~${verdict.tps}<small>${verdict.calibration ? 'estimé ici' : 'estimé'}</small></div>` : '<div class="v est">—</div>') + before;
 
   let action = '';
   if (entry.phase || entry.installing || entry.tuning || pending.has(model.id)) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
   else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
   else if (isActive && !loading) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">${icon.power} Recharger</button>`;
+  else if (unusableHere) action = `<p class="why">Ne tourne pas sur cette carte : ${esc(verdict.reasons.join(', '))}. Ses fichiers restent là si vous remettez l’ancienne.</p>`;
   else if (entry.installedAt && archWithoutEngine(model)) action = `<p class="why">Architecture « ${esc(archWithoutEngine(model))} » : aucun moteur installé ne sait la charger.</p><button class="btn" data-action="engine-find" data-id="${model.id}">Chercher un moteur</button>`;
   else if (entry.installedAt) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">Utiliser ce modèle</button>`;
   // Le banc d'intelligence se lance depuis la carte : le modèle est chargé si besoin.
   const iqRun = state.profiles[model.id]?.iqRunning;
-  if (entry.installedAt && !entry.phase && !entry.installing && !entry.tuning) action += archWithoutEngine(model) ? '' : `<button class="btn ghost" data-action="iq" data-id="${model.id}" ${iqRun ? 'disabled' : ''} title="${iqRun ? esc(iqRun) : 'Une à deux minutes, le modèle est chargé si besoin'}">${iqRun ? 'Banc en cours…' : iqResult(model.id) ? 'Retester l’intelligence' : 'Tester l’intelligence'}</button>`;
+  if (toMeasureHere && !entry.phase && !entry.installing && !entry.tuning && !entry.waitingGpu && !archWithoutEngine(model)) action += `<button class="btn" data-action="bench" data-id="${model.id}" title="Charge le modèle et essaie plusieurs réglages : quelques minutes">Mesurer sur cette carte</button>`;
+  // Un modèle que la carte ne fait pas tourner n'a rien d'autre à proposer (ni test, ni installation).
+  if (unusableHere) action += '';
+  else if (entry.installedAt && !entry.phase && !entry.installing && !entry.tuning) action += archWithoutEngine(model) ? '' : `<button class="btn ghost" data-action="iq" data-id="${model.id}" ${iqRun ? 'disabled' : ''} title="${iqRun ? esc(iqRun) : 'Une à deux minutes, le modèle est chargé si besoin'}">${iqRun ? 'Banc en cours…' : iqResult(model.id) ? 'Retester l’intelligence' : 'Tester l’intelligence'}</button>`;
   else if (!off) action = `<button class="btn ${isUpgrade ? 'violet' : ''}" data-action="install" data-id="${model.id}">${icon.bolt} Installer et régler</button>`;
 
   return `<article class="card model ${isActive ? 'active' : ''} ${isUpgrade ? 'upgrade' : ''} ${off ? 'off' : ''}">
@@ -912,6 +955,7 @@ function renderImageModels() {
 function renderModels() {
   mount('models', `<div class="view">
     <div class="view-head"><div><h1>Modèles</h1><p>Pour chacun, ce que votre machine en tire : contexte qui tient sur la carte, vitesse attendue à 100k, intelligence.</p></div></div>
+    <div id="gpu-banner"></div>
     <section class="card add-model">
       <div><h2>Ajouter un modèle depuis Hugging Face</h2><p>Collez l’adresse d’un dépôt GGUF. pi agent l’analyse pour votre carte, vous propose la meilleure version, puis Harn la télécharge, la règle et teste son intelligence.</p></div>
       <form class="add-form" data-form="add-model">
@@ -938,6 +982,7 @@ function renderModels() {
     <div id="models-body"></div>
   </div>`);
   renderImageModels();
+  paint('gpu-banner', gpuBanner());
   const mine = catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id);
   const upgrade = catalog.filter((m) => !mine.includes(m) && state.plan?.upgradeModel === m.id);
   const rest = catalog.filter((m) => !mine.includes(m) && !upgrade.includes(m)).sort((a, b) => b.quality - a.quality);
@@ -999,7 +1044,7 @@ function renderTuning() {
       ${id ? `<button class="btn ghost" data-action="cmd-show">${icon.terminal} Commande du moteur</button><button class="btn" data-action="bench" data-id="${id}" ${!ready ? 'disabled' : ''}>Remesurer</button>` : ''}
     </div>`);
   renderEngineCmd();
-  if (!bench) { paint('tune-arms', '<p class="empty">Pas encore de mesure.</p>'); }
+  if (!bench) { paint('tune-arms', `<p class="empty">${id && state.hardware?.primary ? `Pas encore de mesure sur la ${esc(state.hardware.primary.name)}. « Remesurer » lance le banc.` : 'Pas encore de mesure.'}</p>`); }
   else {
     const all = bench.arms.flatMap((a) => (a.workloads ?? []).map((w) => w.tps));
     const max = Math.max(...all, 1);
@@ -1046,7 +1091,7 @@ function renderTuning() {
       <dt>Mémoire de contexte</dt><dd>Précision de la mémoire de la conversation. 8 bits tient deux fois plus de contexte que 16 bits.</dd>
       <dt>Marge de 1,5 Go</dt><dd>Sous ce seuil, Windows déborde en mémoire système sans prévenir et tout ralentit fortement.</dd>
     </dl>
-    <p>Mesures en mode déterministe, sortie de 384 tokens, compteurs du moteur.</p>`);
+    <p>Mesures avec l’échantillonnage du modèle (comme en usage réel), sortie de 384 tokens, compteurs du moteur.</p>`);
 }
 
 // ── Machine ────────────────────────────────────────────────
@@ -1571,6 +1616,8 @@ app.addEventListener('click', async (event) => {
       toast(r.message);
     }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }
+    if (action === 'bench-all') { const r = await post('/api/bench/all'); toast(`${r.count} banc${r.count > 1 ? 's' : ''} en file, l’un après l’autre`); }
+    if (action === 'gpu-ok') await post('/api/checks/gpu-change-ok/apply');
     if (action === 'cmd-show') {
       engineCmd = await fetch('/api/engine/command').then(async (r) => (r.ok ? r.json() : { error: (await r.json()).error }));
       renderEngineCmd();

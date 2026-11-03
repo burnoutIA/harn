@@ -12,6 +12,9 @@ import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
 const run = promisify(execFile);
+// Une compilation de moteur prend tous les cœurs 10 à 20 minutes, souvent pendant un banc : en
+// priorité basse, le bureau reste fluide (le processeur reste à 100 %, mais cède la main).
+const niced = (command, args) => (LINUX ? { command: 'nice', args: ['-n', '15', command, ...args] } : { command, args });
 
 // Deux sources de binaires llama.cpp : l'officiel (Qwen3.8, MTP, vision) et le fork Prism,
 // seul à lire les packs ternaires de Bonsai. Même nommage d'assets, même installation.
@@ -84,9 +87,18 @@ async function findServerDir(root) {
 
 // Sous Linux, les bibliothèques livrées avec le moteur (libggml-*, cudart, cublas) sont à côté
 // de llama-server : on les rend visibles au chargeur, la machine n'a pas forcément CUDA.
-export function engineEnv(dir) {
+// libs : bibliothèques d'un moteur qui ne sont pas à côté de llama-server (ROCm hors système).
+export function engineEnv(dir, libs = []) {
   if (process.platform !== 'linux') return process.env;
-  return { ...process.env, LD_LIBRARY_PATH: [dir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
+  return { ...process.env, LD_LIBRARY_PATH: [dir, ...libs, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
+}
+
+// Les cartes que ce build voit (« Vulkan1: AMD Radeon AI PRO R9700 (RADV GFX1201) (32624 MiB, … ») :
+// une puce intégrée y figure aussi, avec la RAM pour mémoire. null si le build ne sait pas répondre.
+export async function listDevices(serverPath, dir) {
+  const { stdout, stderr } = await run(serverPath, ['--list-devices'], { env: engineEnv(dir), windowsHide: true, timeout: 30_000 }).catch((error) => error);
+  const devices = [...`${stdout ?? ''}\n${stderr ?? ''}`.matchAll(/^\s+([A-Za-z]+\d+): (.+?) \((\d+) MiB/gm)].map(([, id, name, mib]) => ({ id, name, mib: Number(mib) }));
+  return devices.length ? devices : null;
 }
 
 // refresh : passer à la dernière version publiée (une architecture récente l'exige). Les
@@ -142,7 +154,8 @@ export async function installLlama(kind, backend, { refresh = false } = {}) {
   const serverPath = path.join(serverDir, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
   const { stdout, stderr } = await run(serverPath, ['--version'], { env: engineEnv(serverDir), windowsHide: true, timeout: 30_000 }).catch((error) => error);
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1] ?? release.tag_name;
-  const info = { kind, backend, tag: release.tag_name, version, dir: serverDir, serverPath, verified: Boolean(assetSha(asset)), installedAt: new Date().toISOString() };
+  const devices = await listDevices(serverPath, serverDir);
+  const info = { kind, backend, tag: release.tag_name, version, dir: serverDir, serverPath, devices, verified: Boolean(assetSha(asset)), installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
 }
@@ -222,9 +235,11 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
     // nvcc refuse un g++ trop récent : on lui passe celui que la détection a retenu, par son chemin.
     const hostCompiler = (await run('sh', ['-c', `command -v ${tools.hostCompiler}`])).stdout.trim();
     // Code non relu (fiche isolée) : compilé dans la bulle, sans réseau, ne voyant que ses sources.
-    const step = (args, options) => (sheet.isolated
-      ? (({ command, args: boxed }) => runLogged(command, boxed, options, onLog))(sandboxed('cmake', args, { writable: [repoDir], cwd: repoDir }))
-      : runLogged('cmake', args, options, onLog));
+    const step = (args, options) => {
+      const boxed = sheet.isolated ? sandboxed('cmake', args, { writable: [repoDir], cwd: repoDir }) : { command: 'cmake', args };
+      const { command, args: full } = niced(boxed.command, boxed.args);
+      return runLogged(command, full, options, onLog);
+    };
     onLog('Configuration (cmake)');
     await step(['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
       `-DCMAKE_CUDA_ARCHITECTURES=${sheet.cudaArch}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir });
@@ -237,6 +252,108 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1];
   if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
   const info = { kind: sheet.id, label: sheet.label, backend, tag: sheet.version ?? sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes[runtimeId] = info; });
+  return info;
+}
+
+// ── RDNA Boosts : llama.cpp en HIP pour les Radeon RDNA4, compilé contre ROCm 10.1 ──────────
+// Le fork de stew675 n'est pas un dépôt llama.cpp mais une série de correctifs (16 blocs) posée sur
+// un commit d'upstream : on part de ce commit, on applique la série par git am et on vérifie que
+// l'arbre obtenu est celui publié (release.json). Code non relu : compilé et lancé dans la bulle.
+// ROCm 10.1 : l'archive TheRock d'AMD, dépliée dans runtime/rocm (aucun paquet, pilote noyau
+// inchangé ; le ROCm 7.1 d'Ubuntu reste en place). R9700, Qwen3.8-27B Q4_K_M (2026-11-03) :
+// génération MTP +10 % et lecture des prompts +37 % contre le même fork sur ROCm 7.1, et
+// 66 → 81 tok/s pondérés (94 avec MTP adaptatif + n-gramme) contre llama.cpp Vulkan.
+const ROCM = {
+  version: '10.1.0',
+  url: 'https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-gfx120X-all-10.1.0.tar.gz',
+  // AMD ne publie pas d'empreinte : celle de l'archive téléchargée le 2026-11-03 (2 610 141 883 octets).
+  sha256: '985b0f082698629a62bfd1759f4874b58b6163edfdeee14cf529719c9761ddaf',
+};
+export const rocmDir = () => path.join(DIRS.runtime, 'rocm', ROCM.version);
+
+async function ensureRocm(onLog) {
+  const dir = rocmDir();
+  if (await ready(dir)) return dir;
+  const archive = await download({ id: `runtime:rocm-${ROCM.version}`, label: `ROCm ${ROCM.version} (TheRock, RDNA4)`, url: ROCM.url, dest: path.join(DIRS.downloads, path.basename(ROCM.url)), sha256: ROCM.sha256 });
+  onLog(`Extraction de ROCm ${ROCM.version}`);
+  await rm(dir, { recursive: true, force: true });
+  await extract(archive, dir);
+  await rm(archive, { force: true });
+  await markReady(dir);
+  return dir;
+}
+
+// Les puces RDNA4 : gfx1201 (Navi 48 : RX 9070, R9700, R9600D), gfx1200 (Navi 44 : RX 9060).
+export const rdna4Target = (hardware) => (/9060/.test(hardware?.primary?.name ?? '') ? 'gfx1200' : 'gfx1201');
+
+// sheet : { id, label, repo, ref (commit des correctifs), base (commit llama.cpp), tree }.
+export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
+  const runtimeId = `${sheet.id}-hip`;
+  const existing = getState().runtimes[runtimeId];
+  if (existing?.commit === sheet.ref && (await stat(existing.serverPath).catch(() => null))) return existing;
+  const rocm = await ensureRocm(onLog);
+  const repoDir = path.join(DIRS.runtime, sheet.id, sheet.ref.slice(0, 12));
+  const target = rdna4Target(hardware);
+  const buildDir = `build-${target}`;
+  const binDir = path.join(repoDir, buildDir, 'bin');
+  const serverPath = path.join(binDir, 'llama-server');
+  const libs = [path.join(rocm, 'lib')];
+
+  if (!((await builtCommit(repoDir)) === sheet.ref && (await stat(serverPath).catch(() => null)))) {
+    const fetchSource = (repo, ref, what) => download({
+      id: `runtime:${sheet.id}-${what}`, label: `${sheet.label} (${what} ${ref.slice(0, 7)})`,
+      url: `https://github.com/${repo}/archive/${ref}.tar.gz`, dest: path.join(DIRS.downloads, `${sheet.id}-${what}-${ref.slice(0, 7)}.tar.gz`),
+    });
+    const parent = path.dirname(repoDir);
+    const baseArchive = await fetchSource('ggml-org/llama.cpp', sheet.base, 'base');
+    const patchArchive = await fetchSource(sheet.repo, sheet.ref, 'correctifs');
+    const unpacked = path.join(parent, `llama.cpp-${sheet.base}`);
+    const patchDir = path.join(parent, `${sheet.repo.split('/')[1]}-${sheet.ref}`);
+    for (const dir of [repoDir, unpacked, patchDir]) await rm(dir, { recursive: true, force: true });
+    await extract(baseArchive, parent);
+    await extract(patchArchive, parent);
+    await rename(unpacked, repoDir);
+    // git am n'exécute rien : appliqué hors de la bulle, sur un dépôt créé pour l'occasion.
+    const git = (args) => runLogged('git', ['-c', 'user.name=harn', '-c', 'user.email=harn@localhost', '-c', 'commit.gpgsign=false', ...args],
+      { cwd: repoDir, env: { ...process.env, GIT_COMMITTER_NAME: 'harn', GIT_COMMITTER_EMAIL: 'harn@localhost' } }, onLog);
+    await git(['init', '-q']);
+    // -f : quelques fichiers suivis par llama.cpp tombent sous son propre .gitignore (build-*, *.log).
+    await git(['add', '-A', '-f']);
+    await git(['commit', '-q', '-m', `llama.cpp ${sheet.base}`]);
+    const patches = (await readdir(path.join(patchDir, 'patches'))).filter((name) => /^\d{4}-.*\.patch$/.test(name)).sort();
+    await git(['am', '-q', ...patches.map((name) => path.join(patchDir, 'patches', name))]);
+    const tree = (await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir })).stdout.trim();
+    if (tree !== sheet.tree) throw new Error(`${sheet.label} : les sources obtenues ne sont pas celles publiées (arbre ${tree.slice(0, 12)}, attendu ${sheet.tree.slice(0, 12)})`);
+    await rm(patchDir, { recursive: true, force: true });
+    // Le clang de ROCm range ses en-têtes après /usr/include : sans -isystem, ceux du ROCm de la
+    // distribution (Ubuntu 26.04 : 7.1, dans /usr/include/hip) passent devant et la compilation échoue.
+    const env = { ...process.env, PATH: `${path.join(rocm, 'bin')}:${path.join(rocm, 'llvm', 'bin')}:${process.env.PATH}`, ROCM_PATH: rocm, HIP_PATH: rocm, HIP_PLATFORM: 'amd' };
+    const step = (args, options) => {
+      const boxed = sandboxed('cmake', args, { writable: [repoDir], readable: [rocm], cwd: repoDir });
+      const { command, args: full } = niced(boxed.command, boxed.args);
+      return runLogged(command, full, { ...options, env }, onLog);
+    };
+    onLog(`Configuration (cmake, HIP ${target}, ROCm ${ROCM.version})`);
+    await step(['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_HIP=ON', `-DGPU_TARGETS=${target}`, '-DLLAMA_CURL=OFF', '-DGGML_NATIVE=ON',
+      `-DCMAKE_HIP_COMPILER=${path.join(rocm, 'llvm', 'bin', 'clang++')}`, `-DCMAKE_HIP_COMPILER_ROCM_ROOT=${rocm}`, `-DCMAKE_PREFIX_PATH=${rocm}`,
+      `-Dhip_DIR=${path.join(rocm, 'lib', 'cmake', 'hip')}`, `-DCMAKE_HIP_FLAGS=--rocm-path=${rocm} -isystem ${path.join(rocm, 'include')}`,
+      `-DCMAKE_CXX_FLAGS=-isystem ${path.join(rocm, 'include')}`], { cwd: repoDir });
+    await step(['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 120 * 60_000 });
+    await writeFile(path.join(repoDir, '.harn-commit'), sheet.ref);
+  }
+
+  // Version et cartes relevées dans la bulle : ce binaire ne tourne jamais hors d'elle.
+  const probe = async (args) => {
+    const boxed = sandboxed(serverPath, args, { readable: [binDir, rocm], gpu: true });
+    const { stdout, stderr } = await run(boxed.command, boxed.args, { env: engineEnv(binDir, libs), timeout: 60_000 }).catch((error) => error);
+    return `${stdout ?? ''}\n${stderr ?? ''}`;
+  };
+  const version = (await probe(['--version'])).match(/version:\s*(\S+)/)?.[1];
+  if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
+  const devices = [...(await probe(['--list-devices'])).matchAll(/^\s+([A-Za-z]+\d+): (.+?) \((\d+) MiB/gm)].map(([, id, name, mib]) => ({ id, name, mib: Number(mib) }));
+  const info = { kind: sheet.id, label: sheet.label, backend: 'hip', tag: sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, libs,
+    devices: devices.length ? devices : null, verified: false, builtWith: `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
 }
@@ -461,6 +578,51 @@ export async function installHyperQwen(onLog = () => {}) {
   await step('bash', ['verify.sh', '--no-server']);
   const info = { kind: 'hyperqwen', commit: HYPERQWEN_COMMIT, dir, model: french, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes.hyperqwen = info; });
+  return info;
+}
+
+// ── Radiance : vLLM pour les Radeon RDNA4 (vllm-radiance, deadcode) ─────────────────────
+// Livré en image de conteneur (vLLM 0.30, ROCm 7.14, noyaux libr4d) : Harn passe par Podman, sans
+// démon ni root. L'image est figée par son empreinte : les correctifs de src/assets/radiance
+// remplacent deux de ses fichiers entiers et ne valent que pour elle. Les poids aussi sont figés,
+// téléchargés par le hf de l'image (rien à installer sur la machine). Mesuré sur une R9700 32 Go :
+// 120 tok/s pondérés à 128k, vision comprise (radiance-essai, 2026-11-03).
+export const RADIANCE_IMAGE = 'docker.io/magiccodingman/vllm-radiance@sha256:b73bf3e41bc0a1cf7aaa5935bebe31123f549639e69b61a3ffa81acd5f7313e0';
+const RADIANCE_IMAGE_ID = 'c8059c55c39c04f34dee5c6500e666d8fea6539a69d76d65c15f3d30852f2fea';
+const RADIANCE_WEIGHTS = [
+  { repo: 'amd/Qwen3.8-27B-Quark-AWQ-MXFP4', revision: '5233554c5fa56afda40150556b95573c2d7d29c0', dir: 'Qwen3.8-27B-Quark-AWQ-MXFP4' },
+  { repo: 'tcclaviger/Qwen3.8-27B-DFlash2-FP8', revision: 'f02593d0ea2e3b7eedbb831fb26f465b1e6238bb', dir: 'Qwen3.8-27B-DFlash2-FP8' },
+];
+export const RADIANCE_ASSETS = fileURLToPath(new URL('./assets/radiance/', import.meta.url));
+
+export async function installRadiance(onLog = () => {}) {
+  if (!LINUX) throw new Error('Radiance n’est installé par Harn que sous Linux');
+  if (!(await run('podman', ['--version']).then(() => true, () => false))) throw new Error('Radiance demande Podman : sudo apt install podman');
+  const dir = path.join(DIRS.runtime, 'radiance');
+  const step = (command, args) => {
+    onLog(`${command} ${args.join(' ')}`);
+    return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000 }, onLog);
+  };
+  await mkdir(path.join(dir, 'models'), { recursive: true });
+  await mkdir(path.join(dir, 'cache'), { recursive: true });
+  // ~10 Go : déjà là si l'image a servi ailleurs sur la machine. Une image chargée par podman load
+  // a perdu l'empreinte du registre mais garde son identifiant (celui de sa configuration).
+  const exists = (ref) => run('podman', ['image', 'exists', ref]).then(() => true, () => false);
+  let image = RADIANCE_IMAGE;
+  if (!(await exists(RADIANCE_IMAGE))) {
+    if (await exists(RADIANCE_IMAGE_ID)) image = RADIANCE_IMAGE_ID;
+    else await step('podman', ['pull', RADIANCE_IMAGE]);
+  }
+  // hf reprend un téléchargement interrompu et saute les fichiers déjà complets.
+  for (const weights of RADIANCE_WEIGHTS) {
+    const target = path.join(dir, 'models', weights.dir);
+    if (await ready(target)) continue;
+    await step('podman', ['run', '--rm', '-e', 'HF_XET_HIGH_PERFORMANCE=1', '-v', `${path.join(dir, 'models')}:/models`, '--entrypoint', '/opt/vllm/bin/hf',
+      image, 'download', weights.repo, '--revision', weights.revision, '--local-dir', `/models/${weights.dir}`]);
+    await markReady(target);
+  }
+  const info = { kind: 'radiance', image, dir, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes.radiance = info; });
   return info;
 }
 

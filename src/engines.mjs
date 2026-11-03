@@ -10,14 +10,17 @@ import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { llamAmpereEligible, mtpPlan } from './levers.mjs';
 import { github } from './github.mjs';
-import { sandboxAvailable } from './sandbox.mjs';
-import { buildEngine, installLlama, latestRelease } from './runtimes.mjs';
+import { sandboxAvailable, sandboxReady } from './sandbox.mjs';
+import { buildEngine, buildRdnaBoosts, installLlama, latestRelease } from './runtimes.mjs';
 import { modelById } from './catalog.mjs';
 import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
 // Compiler demande Linux, une NVIDIA et les outils (nvcc, cmake, g++ accepté par nvcc).
 export const canBuild = (hardware) => hardware?.os?.platform === 'linux' && hardware?.primary?.vendor === 'nvidia' && Boolean(hardware?.buildTools?.ok);
+// Radeon RDNA4 (RX 9000, R9700) sous Linux, la bulle disponible : le fork RDNA Boosts n'est pas relu.
+const rdna4Linux = (hardware) => hardware?.os?.platform === 'linux' && hardware?.primary?.vendor === 'amd'
+  && /RX 9\d{3}|R9[67]00/.test(hardware.primary.name ?? '') && sandboxReady();
 const cudaArchOf = (hardware) => String(Math.round((hardware?.primary?.computeCapability ?? 8.6) * 10));
 
 // Réglage repris d'un autre moteur : K/V et profondeur MTP propres à un fork ramenés au commun.
@@ -47,6 +50,33 @@ const BUILTIN = {
     arms: (tuning, model) => {
       const base = { ...tuning, kvV: undefined, kv: tuning.kvV ? 'q8_0' : tuning.kv, spec: model.mtp ? { type: 'mtp', n: 'auto' } : tuning.spec };
       return [{ ...base, kv: 'tq5_0', kvV: 'turbo4' }, base];
+    },
+  },
+  // RDNA Boosts (github.com/stew675/llama-cpp-rdna-boosts) : 16 blocs de correctifs HIP pour RDNA,
+  // posés sur llama.cpp 6050b467c, compilés contre ROCm 10.1 (buildRdnaBoosts). Non relu : isolé.
+  // R9700, Qwen3.8-27B Q4_K_M, température 1 (pas MTP, code / ~32k) : Vulkan officiel 43,7 / 48,1 ms,
+  // ce fork 42,0 / 45,7 ms ; brouillon réduit aux 98 304 premiers tokens 39,3 / 42,8 ms.
+  rdnaboosts: {
+    id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'stew675/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
+    ref: '81e969e9a90322b6416b4fd930dfd3d655275d7d', base: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807',
+    tree: '1bac1001f1780a5907fbce256ceeeaac8b8561ec', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807' },
+    isolated: true, eligible: rdna4Linux,
+    // Sa fenêtre MTP (le brouillon ne garde que ~¼ du contexte) casse la vision : une image arrivée
+    // au-delà de la fenêtre (816 tokens à la même position, Qwen-VL) ne trouve pas de place dans le
+    // cache du brouillon → « failed to process mtmd chunk » (session pi à 43,7k tokens, 2026-11-03).
+    // Coupée : ~0,6 Gio de plus à 150k, le brouillon voit tout le contexte.
+    env: { LLAMA_SPEC_DRAFT_WINDOW: '0' },
+    // Les façons d'anticiper, départagées par le banc selon l'usage (R9700, Qwen3.8-27B Q4_K_M,
+    // température 1, code / prose / ~32k) :
+    // - brouillon DFlash2 : n=4 106 / 68 / 97, n=6 120 / 64 / 107 (n=5 115 / 66 / 105). Le meilleur partout ;
+    // - MTP 3 sur un brouillon réduit aux 98 304 premiers tokens : 92 / 59 / 85 ;
+    // - MTP adaptatif jusqu'à 9 + n-gramme : 116 / 51 / 126 (la profondeur monte trop en prose).
+    arms: (tuning, model) => {
+      const base = { ...tuning, backend: 'hip', kv: 'f16', kvV: undefined };
+      const mtp = { ...base, spec: { type: 'mtp', n: 3, pMin: 0, vocab: 98304 } };
+      if (model.dflash) return [{ ...base, spec: { type: 'dflash', n: 4 } }, { ...base, spec: { type: 'dflash', n: 6 } }, ...(model.mtp && !tuning.noNextn ? [mtp] : [])];
+      if (!model.mtp || tuning.noNextn) return [{ ...base, spec: tuning.spec }];
+      return [mtp, { ...base, spec: { type: 'mtp-adaptive', n: 9, vocab: 98304 } }];
     },
   },
 };
@@ -82,7 +112,8 @@ export async function engineArchs(id, ref) {
     const local = await readFile(path.join(runtime.dir, up, 'src', 'llama-arch.cpp'), 'utf8').catch(() => null);
     if (local) { archs = parseArchs(local); break; }
   }
-  archs ??= await rawArchs(sheet.repo, ref);
+  // Un fork livré en correctifs (RDNA Boosts) n'a pas de src/ : la liste est celle de sa base.
+  archs ??= await rawArchs(sheet.archsFrom?.repo ?? sheet.repo, sheet.archsFrom?.ref ?? ref);
   if (!archs.length) throw new Error(`Aucune architecture trouvée pour ${key}`);
   update((s) => { s.engineArchs = { ...s.engineArchs, [key]: archs }; });
   return archs;
@@ -139,6 +170,7 @@ export const archMissing = (arch) => `Architecture « ${arch} » : aucun moteur 
 export async function ensureEngine(candidate, { hardware = getState().hardware, backend = getState().plan?.backend?.id, onLog = () => {} } = {}) {
   const sheet = engineSheet(candidate.id);
   if (sheet.source === 'release') return installLlama(sheet.id, backend, { refresh: Boolean(candidate.refresh) });
+  if (sheet.builder === 'rdna') return buildRdnaBoosts(sheet, hardware, onLog);
   if (!canBuild(hardware)) throw new Error(`${sheet.label} se compile sur cette machine, ce qui demande Linux, une carte NVIDIA et les outils de compilation`);
   return buildEngine(sheet, hardware.buildTools, onLog);
 }
@@ -154,7 +186,7 @@ export function recordBuildFailure(id, error, hardware = getState().hardware) {
 
 // Les autres moteurs à mesurer au banc pour ce modèle, et les réglages à essayer sur chacun.
 export async function alternates(model, tuning, profile, hardware = getState().hardware) {
-  if (['prism', 'strata', 'hyperqwen', 'gemma-challenge'].includes(model.engine)) return [];
+  if (['prism', 'strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine)) return [];
   const current = tuning.fork ?? 'llama';
   const arch = model.profile?.arch;
   // Sans architecture connue (catalogue intégré) : les moteurs généraux utilisables ici.

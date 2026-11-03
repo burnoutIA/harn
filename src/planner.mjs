@@ -166,6 +166,17 @@ export function assess(model, hardware) {
     // Mesuré sur la 3090 de référence à 128k (le bureau y prend ~1 Go) ; le banc remesure ici.
     return finalize({ fit: 'full', reasons, context: 131072, kv: 'int8', tps: model.evidence.tps128k });
   }
+  if (model.engine === 'radiance') {
+    // vllm-radiance ne vise que RDNA4 (gfx1201 : RX 9070, R9700), en image Podman sous Linux. 32 Go :
+    // 128k et vision tiennent avec ~4 Go de marge ; une RX 9070 (16 Go) ne porte pas le 27B.
+    if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['Radiance n’est installé par Harn que sous Linux'] };
+    if (gpu?.vendor !== 'amd' || !/RX 9\d{3}|R9700/.test(gpu.name ?? '')) reasons.push('Radiance demande une Radeon RDNA4 (RX 9000, R9700)');
+    if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
+    if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
+    if (hardware.podman === null) reasons.push('Radiance passe par Podman : sudo apt install podman');
+    if (reasons.length) return { fit: 'no', reasons };
+    return finalize({ fit: 'full', reasons, context: 131072, kv: 'fp8', tps: model.evidence.tps128k });
+  }
   if (model.engine === 'gemma-challenge') {
     // Le vLLM nightly de la soumission (CUDA 12.9, noyaux Triton), mesuré sur une 3090 seulement,
     // sous Linux. La pile telle quelle (4k) n'atteint jamais l'objectif : un banc, pas un assistant.
@@ -201,7 +212,7 @@ export function assess(model, hardware) {
 // de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
 // peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
 // Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
-const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'gemma-challenge'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
+const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
 
 export function measuredAt100k(bench) {
   const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);

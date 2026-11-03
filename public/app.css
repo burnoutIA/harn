@@ -654,3 +654,5 @@ body.onboarding .topline { max-width: none; }
 .usage { display: grid; gap: 4px; font-size: calc(12px * var(--fs)); color: var(--muted); }
 .usage .modes { min-width: 300px; }
 .usage small { color: var(--amber-ink); }
+.gpu-banner { margin-bottom: 20px; }
+.model .facts .before { margin-top: 2px; font-size: calc(11px * var(--fs)); color: var(--muted); white-space: nowrap; }

@@ -6,9 +6,9 @@ import { engineSheet } from './engines.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { assess, OBJECTIVE } from './planner.mjs';
-import { engineEnv } from './runtimes.mjs';
+import { RADIANCE_ASSETS, RADIANCE_IMAGE, engineEnv, installLlama, listDevices } from './runtimes.mjs';
 import { SANDBOX_INSTALL, sandboxReady, sandboxed } from './sandbox.mjs';
-import { getState } from './state.mjs';
+import { getState, update } from './state.mjs';
 import { HEADROOM_MIN_MIB } from './tuner.mjs';
 
 // Lancer un modèle : recette du moteur, réglage de départ, chargement avec la marge VRAM.
@@ -27,6 +27,8 @@ export const HYPERQWEN_ARMS = {
   mtp: { context: 131072, spec: 'mtp', ctx: 'long', hyperqwenArm: 'MTP · KV int8 · 128k' },
   dflash2: { context: 131072, spec: 'dflash2', ctx: 'long', hyperqwenArm: 'DFlash2 · KV int8 · 128k' },
 };
+// Radiance : un seul réglage, celui du banc sur la R9700 (DFlash2 K7, vision, 128k, cache KV de 6 Gio).
+export const RADIANCE_TUNING = { context: 131072, kvBytes: 6 * 2 ** 30, radianceArm: 'DFlash2 K7 · vision · 128k' };
 // Les fiches du moteur du Gemma Challenge : un seul réglage chacune.
 export const GEMMA_CHALLENGE_TUNING = {
   submission: { context: 4096, challengeArm: 'Soumission gemma-slayer · 4k' },
@@ -97,6 +99,7 @@ function challengeRecipe(model, runtime) {
 }
 export function startingTuning(model, hardware) {
   if (model.engine === 'hyperqwen') return HYPERQWEN_ARMS.mtp;
+  if (model.engine === 'radiance') return RADIANCE_TUNING;
   if (model.engine === 'gemma-challenge') return GEMMA_CHALLENGE_TUNING[model.challengeStack];
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
@@ -113,6 +116,10 @@ function nameStrataConfig(file, modelId) {
   if (config.model_name === modelId) return;
   writeFileSync(file, JSON.stringify({ ...config, model_name: modelId }, null, 2));
 }
+// Vulkan sur Radeon (RADV) : soumettre aussi sur la file graphique raccourcit chaque pas MTP de
+// ~5 % (R9700, Qwen3.8-27B : 45,7 → 43,7 ms en code, 50,1 → 48,1 ms vers 32k), sans rien coûter
+// à la lecture des prompts.
+export const radeonVulkanEnv = (runtime, hardware) => (runtime?.backend === 'vulkan' && hardware?.primary?.vendor === 'amd' ? { GGML_VK_ALLOW_GRAPHICS_QUEUE: '1' } : {});
 export function recipeFor(model, tuning) {
   const state = getState();
   if (model.engine === 'strata') {
@@ -158,6 +165,30 @@ export function recipeFor(model, tuning) {
       health: `${endpoint}/health`,
     };
   }
+  if (model.engine === 'radiance') {
+    const runtime = state.runtimes.radiance;
+    if (!runtime) throw new Error('Radiance n’est pas installé');
+    const endpoint = `http://127.0.0.1:${PORTS.radiance}`;
+    return {
+      modelId: model.id,
+      label: displayName(model),
+      command: 'bash',
+      args: [path.join(RADIANCE_ASSETS, 'serve.sh')],
+      cwd: runtime.dir,
+      // Le port n'est publié que sur 127.0.0.1 ; la clé reste exigée comme pour les autres moteurs.
+      env: {
+        RADIANCE_DIR: runtime.dir,
+        IMAGE: runtime.image ?? RADIANCE_IMAGE,
+        PORT: String(PORTS.radiance),
+        SERVED: model.id,
+        CTX: String(tuning.context ?? RADIANCE_TUNING.context),
+        KV_BYTES: String(tuning.kvBytes ?? RADIANCE_TUNING.kvBytes),
+        VLLM_API_KEY: engineKey(),
+      },
+      endpoint,
+      health: `${endpoint}/health`,
+    };
+  }
   if (model.engine === 'gemma-challenge') return challengeRecipe(model, state.runtimes['gemma-challenge']);
   const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
   if (!runtime) throw new Error(`Moteur ${runtimeKind(model, tuning)} ${tuning.backend} non installé`);
@@ -166,9 +197,9 @@ export function recipeFor(model, tuning) {
     modelId: model.id,
     label: displayName(model),
     command: runtime.serverPath,
-    args: [...(runtime.serverArgs ?? []), ...llamaArgs(model, files, tuning, state.hardware)],
+    args: [...(runtime.serverArgs ?? []), ...llamaArgs(model, files, tuning, state.hardware), ...deviceArgs(runtime.devices, state.hardware, { draft: tuning.spec?.type === 'dflash' })],
     cwd: runtime.dir,
-    env: engineEnv(runtime.dir),
+    env: { ...engineEnv(runtime.dir, runtime.libs), ...radeonVulkanEnv(runtime, state.hardware), ...(engineSheet(tuning.fork)?.env ?? {}) },
     endpoint: `http://127.0.0.1:${PORTS.engine}`,
     health: `http://127.0.0.1:${PORTS.engine}/health`,
   };
@@ -186,14 +217,14 @@ export function recipeFor(model, tuning) {
   const where = (name) => state.models[model.id]?.paths?.[name] ?? path.join(DIRS.models, model.id, name);
   const modelPaths = [...model.files.map((f) => where(f.name)), ...Object.values(files)].filter((file) => file && existsSync(file));
   const box = sandboxed(runtime.serverPath, args, {
-    readable: [runtime.dir, ENGINE_KEY_FILE, ...modelPaths],
+    readable: [runtime.dir, ...(runtime.libs ?? []), ENGINE_KEY_FILE, ...modelPaths],
     writable: [socketDir],
     gpu: true,
     cwd: runtime.dir,
   });
   return { ...recipe, ...box, socket };
 }
-export const freeVram = async () => (getState().hardware?.primary?.vendor === 'nvidia' ? (await sampleGpu())?.freeMiB ?? null : null);
+export const freeVram = async () => (['nvidia', 'amd'].includes(getState().hardware?.primary?.vendor) ? (await sampleGpu())?.freeMiB ?? null : null);
 // Charger, puis vérifier la marge VRAM. C'est le levier ×21 du poste de référence : sous
 // ~1,5 Gio libre, le préfill retombe sur la mémoire hôte sans la moindre erreur. Pour retrouver
 // la marge on cède dans l'ordre de l'objectif : contexte par paliers jusqu'à 100k, puis KV q4_0,
@@ -211,9 +242,32 @@ const exhausted = (tuning) => tuning.context <= OBJECTIVE.floorContext && layers
 // abandonne au lieu de réessayer (sinon les deux se tueraient le moteur à tour de rôle).
 let loadTicket = 0;
 const superseded = () => new Error('Chargement remplacé par celui d’un autre modèle');
+// La carte retenue par Harn, désignée au moteur quand il en voit plusieurs : la puce intégrée
+// d'un Ryzen apparaît en Vulkan comme en HIP, avec la RAM pour mémoire. llama.cpp l'écarte
+// aujourd'hui de lui-même ; on ne dépend pas de ce choix. Rien si le nom n'est pas reconnu.
+// Un brouillon chargé à part (DFlash2) se voit désigner la même carte.
+export function deviceArgs(devices, hardware, { draft = false } = {}) {
+  const name = hardware?.primary?.name?.replace(/^(NVIDIA|AMD)\s+/i, '');
+  if (!name || !devices || devices.length < 2) return [];
+  const matching = devices.filter((device) => device.name.includes(name));
+  if (matching.length !== 1) return [];
+  return ['--device', matching[0].id, ...(draft ? ['--device-draft', matching[0].id] : [])];
+}
+
 export async function loadWithHeadroom(model, tuning) {
   const ticket = ++loadTicket;
   let current = { ...tuning };
+  // Le build publié pour ce backend manque encore (nouvelle carte : Vulkan après CUDA) : on le
+  // télécharge plutôt que d'échouer. Les forks compilés, eux, passent par leur fiche moteur.
+  const kind = runtimeKind(model, current);
+  if (!ownLauncher(model) && current.backend && ['llama', 'prism'].includes(kind) && !getState().runtimes[`${kind}-${current.backend}`]) await installLlama(kind, current.backend);
+  // Un moteur installé avant qu'on relève ses cartes : relevé une fois, gardé avec lui.
+  const runtimeId = `${kind}-${current.backend}`;
+  const runtime = getState().runtimes[runtimeId];
+  if (!ownLauncher(model) && runtime?.serverPath && runtime.devices === undefined) {
+    const devices = await listDevices(runtime.serverPath, runtime.dir);
+    update((s) => { if (s.runtimes[runtimeId]) s.runtimes[runtimeId].devices = devices; });
+  }
   for (let attempt = 0; attempt < 14; attempt += 1) {
     if (ticket !== loadTicket) throw superseded();
     let active;

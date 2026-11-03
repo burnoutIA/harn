@@ -19,6 +19,8 @@ import { inspectRepo, loadCustomModels } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
+import { benchWithProgress } from './bench.mjs';
+import { benchTodo } from './gpu-profiles.mjs';
 import { createKey, flushKeys, internalKey, keysEnforced, listKeys, loadKeys, revokeKey } from './api-keys.mjs';
 import { gpuFree, isImageJob } from './gpu-queue.mjs';
 import { watchIdle } from './idle.mjs';
@@ -359,6 +361,15 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/setup/start') { background(runFirstSetup()); return json(res, 202, { ok: true }); }
   if (url.pathname === '/api/hardware/refresh') return json(res, 200, await refreshHardware());
+  // Nouvelle carte : les bancs des modèles installés, l'un après l'autre (la carte n'en prend qu'un).
+  if (url.pathname === '/api/bench/all') {
+    const { toMeasure } = benchTodo(getState());
+    background((async () => {
+      for (const id of toMeasure) await benchWithProgress(id).catch(() => {});
+      if (toMeasure.length) await runAnalysis().catch(() => {});
+    })());
+    return json(res, 202, { count: toMeasure.length });
+  }
   if (parts[1] === 'checks' && parts[2] && parts[3] === 'apply') {
     try {
       const message = await applyCheck(parts[2]);
@@ -467,7 +478,7 @@ async function api(req, res, url) {
       return json(res, 200, { ...launched, helper });
     }
     if (parts[3] === 'iq') { background(runIq(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
-    if (parts[3] === 'bench') { background(tuneModel(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
+    if (parts[3] === 'bench') { background(benchWithProgress(id).then(() => runAnalysis())); return json(res, 202, { ok: true }); }
   }
   // Un identifiant que le catalogue ne connaît pas : le dire, pi lit cette réponse.
   if (parts[1] === 'models' && parts[2]) return json(res, 404, { error: `Modèle « ${parts[2]} » absent du catalogue de Harn : un nouveau modèle s’ajoute avec install_model et l’adresse de son dépôt Hugging Face, même si son fichier est déjà sur cette machine. harn_status liste les identifiants connus.` });
