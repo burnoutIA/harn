@@ -35,6 +35,14 @@ EXECUTER = {  # dans le conteneur, fichier f.<ext>
     "rs": "timeout 60 rustc -O --edition 2021 -o f f.rs && timeout 15 ./f",
     "sh": "timeout 15 bash f.sh",
 }
+DEFINITIONS = {  # comment la fonction {nom} est définie dans chaque langage
+    "py": r"^\s*(?:async\s+)?def\s+{nom}\s*\(",
+    "ts": r"(?:function\s+{nom}\b|\b(?:const|let|var)\s+{nom}\s*[:=])",
+    "js": r"(?:function\s+{nom}\b|\b(?:const|let|var)\s+{nom}\s*=)",
+    "php": r"function\s+{nom}\s*\(",
+    "rs": r"\bfn\s+{nom}\b",
+    "sh": r"^\s*(?:function\s+)?{nom}\s*(?:\(\s*\))?\s*\{{",
+}
 
 
 def epreuves(langage, limite, famille="humaneval"):
@@ -61,7 +69,14 @@ def epreuves(langage, limite, famille="humaneval"):
         ds = load_dataset("nuprl/MultiPL-E", f"{famille}-{langage}", split="test")
         for ex in list(ds)[: limite or None]:
             nom = re.sub(r"^(HumanEval|mbpp)_\d+_", "", ex["name"])
-            yield {"id": ex["name"], "langage": langage, "enonce": ex["prompt"], "nom": nom, "tests": ex["tests"]}
+            e = {"id": ex["name"], "langage": langage, "enonce": ex["prompt"], "nom": nom, "tests": ex["tests"]}
+            if famille == "mbpp":  # énoncés traduits souvent trop vagues : un test sert d'exemple
+                cas = [l.strip() for l in ex["tests"].splitlines()
+                       if re.search(r"\bcandidate\b\s*[( ]", l) and re.search(r"assert|==|!=|\]\]", l)
+                       and not re.search(r"\b(let|const|var|function)\s+\$?candidate\b|\$candidate\s*=", l)]
+                if cas:
+                    e["exemple"] = re.sub(r"\bcandidate\b", nom, cas[0])
+            yield e
 
 
 def consigne(e):
@@ -91,7 +106,9 @@ def extraire(e, texte):
     blocs = re.findall(r"```[a-zA-Z0-9_+-]*\n(.*?)```", texte, re.S)
     if not blocs:
         return None
-    code = max(blocs, key=len)
+    # Le bloc qui DÉFINIT la fonction, pas un exemple d'utilisation (souvent plus long) qui l'appelle.
+    definition = re.compile(DEFINITIONS[e["langage"]].format(nom=re.escape(e["nom"])), re.M)
+    code = max([b for b in blocs if definition.search(b)] or blocs, key=len)
     if e["nom"] not in code:  # le modèle n'a donné que le corps
         code = e["enonce"] + code
     if e["langage"] == "php" and "<?php" not in code:

@@ -37,8 +37,11 @@ CONSIGNES = [
 
 
 def consigne(e):
-    gabarit = random.Random(f"{e['langage']}/{e['id']}").choice(CONSIGNES)
-    return gabarit.format(langue=banc.NOMS[e["langage"]], bloc=banc.BLOCS[e["langage"]], enonce=e["enonce"].rstrip())
+    alea = random.Random(f"{e['langage']}/{e['id']}")
+    texte = alea.choice(CONSIGNES).format(langue=banc.NOMS[e["langage"]], bloc=banc.BLOCS[e["langage"]], enonce=e["enonce"].rstrip())
+    if e.get("exemple"):
+        texte += alea.choice(["\n\nExemple de test qui doit passer :\n", "\n\nThis test must pass:\n"]) + f"```\n{e['exemple']}\n```"
+    return texte
 
 
 def demander(url, texte, args, graine):
