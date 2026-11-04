@@ -47,9 +47,18 @@ l'a pas relu : relancer alors avec `CODE_DISTANT=1`.
 
 Modèles, données et sorties ne sont jamais suivis par git (`.gitignore`).
 
+## Banc de code (`banc/`, sur le PC de mesure)
+```bash
+podman build -t harn-banc-code:1 banc/                 # une fois : Python, Node+tsc, PHP, Rust, Bash
+banc/servir.sh <modele.gguf> 4760 &                    # carte choisie par son nom (CARTE=R9700)
+python banc/code.py --url http://127.0.0.1:4760 --etiquette <nom>   # --limite 5 pour un essai
+```
+HumanEval+ (Python) et MultiPL-E (TypeScript, JavaScript, PHP, Rust, Bash), pass@1 glouton,
+code exécuté sans réseau dans podman. Une réponse sans bloc de code (vide ou coupée par le
+budget) est ratée. Résultats dans `banc/resultats/` (non suivi).
+
 ## À faire
 - Vérifier sur CUDA que la perte n'est pas NaN dès le premier pas (vu sur ROCm).
 - Données générées par le professeur pour le front (HTML/CSS/SCSS/Svelte/Twig), gardées
   seulement si elles passent une vérification automatique.
-- Banc de code exécuté (MultiPL-E, HumanEval+) avant/après, même banc pour tous les modèles.
 - Export GGUF des modèles entraînés.
