@@ -84,6 +84,8 @@ def main():
     p.add_argument("--pas-max", type=int, default=0)
     p.add_argument("--sauver-tous", type=int, default=500, help="pas entre deux sauvegardes")
     p.add_argument("--optim", choices=["auto", "adamw8bit", "adamw"], default="auto")
+    p.add_argument("--entrainer-embeddings", action="store_true",
+                   help="entraîner aussi la table des tokens (gelée par défaut : ~15 %% des poids, ~2,6 Go économisés)")
     p.add_argument("--code-distant", action="store_true",
                    help="autoriser le code Python livré avec le modèle (trust_remote_code) — le relire avant")
     args = p.parse_args()
@@ -107,6 +109,11 @@ def main():
     print(f"{len(exemples)} exemples gardés, {ecartes} écartés (trop longs / gabarit), {ntok:,} tokens appris", flush=True)
 
     modele = AutoModelForCausalLM.from_pretrained(args.modele, dtype=torch.float32, trust_remote_code=args.code_distant).cuda()
+    if not args.entrainer_embeddings:
+        for module in (modele.get_input_embeddings(), modele.get_output_embeddings()):
+            module.weight.requires_grad_(False)
+    entraines = [p for p in modele.parameters() if p.requires_grad]
+    print(f"{sum(p.numel() for p in entraines) / 1e6:.0f} M paramètres entraînés sur {sum(p.numel() for p in modele.parameters()) / 1e6:.0f} M", flush=True)
     modele.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     modele.config.use_cache = False
     modele.train()
@@ -120,9 +127,9 @@ def main():
             optim = "adamw"
     if optim == "adamw8bit":
         import bitsandbytes as bnb
-        opt = bnb.optim.AdamW8bit(modele.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
+        opt = bnb.optim.AdamW8bit(entraines, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
     else:
-        opt = torch.optim.AdamW(modele.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0, fused=True)
+        opt = torch.optim.AdamW(entraines, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0, fused=True)
     pas_total = math.ceil(len(exemples) * args.epoques / args.accum)
     if args.pas_max:
         pas_total = min(pas_total, args.pas_max)
@@ -145,7 +152,7 @@ def main():
             (total / max(nlot, 1)).backward()
             somme += total.item()
             compte += int(n)
-        norme = torch.nn.utils.clip_grad_norm_(modele.parameters(), 1.0).item()
+        norme = torch.nn.utils.clip_grad_norm_(entraines, 1.0).item()
         opt.step()
         sched.step()
         opt.zero_grad(set_to_none=True)

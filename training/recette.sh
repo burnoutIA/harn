@@ -12,6 +12,7 @@
 # CODE_DISTANT=1 : autorise le code Python livré avec le modèle (trust_remote_code), à relire avant
 set -euo pipefail
 cd "$(dirname "$0")"
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 BASE=${1:?usage : ./recette.sh <org/modele> [nom] [options de sft.py]}
 shift

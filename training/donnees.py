@@ -28,12 +28,14 @@ from datasets import load_dataset
 
 RACINE = Path(__file__).resolve().parent
 
-# nombre d'exemples visés par source/langage (échelle 1.0)
+# nombre d'exemples visés par source/langage (échelle 1.0). Calibré pour ~4 h sur une RTX 3090
+# (~2 700 tokens/s d'entraînement mesurés) : ~40 M tokens. Les sessions d'agent pèsent 10 à 30k
+# tokens chacune, les problèmes Magicoder ~500 : peu de sessions, beaucoup de problèmes.
 DOSAGE = {
     "magicoder": {"typescript": 5000, "python": 8000, "rust": 4000, "php": 3000, "shell": 3000,
                   "cpp": 800, "java": 800, "csharp": 400, "swift": 300},
-    "opencode": {"agent_skills": 12000, "general": 6000, "bash_only_tool": 3000},
-    "swesmith": {"tool": 4000},
+    "opencode": {"agent_skills": 900, "general": 400, "bash_only_tool": 200},
+    "swesmith": {"tool": 400},
 }
 
 

@@ -37,12 +37,12 @@ l'a pas relu : relancer alors avec `CODE_DISTANT=1`.
 
 ## La recette (`recette.sh`)
 1. Modèle de base → `modeles/<nom>/`.
-2. Données (`donnees.py`) → `data/melange.jsonl` : ~50 000 exemples — problèmes/solutions
+2. Données (`donnees.py`) → `data/melange.jsonl` : ~28 000 exemples, ~40 M tokens (~4 h sur une 3090) — problèmes/solutions
    multi-langages (Magicoder OSS-Instruct), sessions d'agent de code avec outils
    (Nemotron-SFT-OpenCode, catégories code), corrections de bugs résolues dans des dépôts
    (SWE-smith). Même mélange pour tous les modèles comparés.
 3. Entraînement (`sft.py`) → `sorties/<nom>-sft/` : tous les poids, perte sur les réponses de
-   l'assistant seulement, 16k tokens, lr 1e-5, AdamW 8 bits, 1 époque. Exemples dont le gabarit
+   l'assistant seulement, 16k tokens, lr 1e-5, AdamW 8 bits, 1 époque, table des tokens gelée (pic mesuré 19 Go à 16k). Exemples dont le gabarit
    de conversation n'est pas stable : écartés et comptés.
 
 Modèles, données et sorties ne sont jamais suivis par git (`.gitignore`).
@@ -58,7 +58,6 @@ code exécuté sans réseau dans podman. Une réponse sans bloc de code (vide ou
 budget) est ratée. Résultats dans `banc/resultats/` (non suivi).
 
 ## À faire
-- Vérifier sur CUDA que la perte n'est pas NaN dès le premier pas (vu sur ROCm).
 - Données générées par le professeur pour le front (HTML/CSS/SCSS/Svelte/Twig), gardées
   seulement si elles passent une vérification automatique.
 - Export GGUF des modèles entraînés.
