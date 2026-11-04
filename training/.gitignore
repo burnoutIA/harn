@@ -1,0 +1,10 @@
+data/
+modeles/
+sorties/
+.venv/
+__pycache__/
+machines.env
+*.safetensors
+*.gguf
+*.bin
+*.pt

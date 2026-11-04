@@ -1,0 +1,8 @@
+# Machine d'entraînement (RTX 3090, CUDA). PyTorch CUDA d'abord :
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+transformers>=5.2
+accelerate
+datasets
+safetensors
+huggingface_hub
+bitsandbytes
