@@ -1203,6 +1203,7 @@ const APPROVAL_WORDS = {
   pi: { label: 'pi agent demande', refuse: 'Refuser', accept: 'Accepter' },
   card: { label: 'Inférence occupée', refuse: 'Pas maintenant', accept: 'Laisser ma place' },
   cleanup: { label: 'Ménage des modèles', refuse: 'Garder', accept: 'Supprimer' },
+  forget: { label: 'Ménage de l’état', refuse: 'Pas maintenant', accept: 'Oublier' },
 };
 function renderApprovals() {
   const pending = (state.approvals ?? []).filter((a) => a.status === 'pending');
@@ -1221,6 +1222,7 @@ approvalsEl.addEventListener('click', async (event) => {
   try {
     const r = await post(`/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
     if (r.kind === 'cleanup') { if (r.status !== 'accepted') toast(r.status === 'refused' ? 'Fichiers gardés : Harn ne les proposera plus' : r.error ?? 'Échec'); }
+    else if (r.kind === 'forget') { if (r.status !== 'accepted' && r.status !== 'refused') toast(r.error ?? 'Échec'); }
     else if (r.kind === 'card') toast(r.status === 'accepted' ? 'Place laissée' : 'Refusé : la personne en est avertie');
     else toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
   } catch (error) {

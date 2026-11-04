@@ -1,6 +1,8 @@
+import { existsSync } from 'node:fs';
 import { readdir, rm, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { requestApproval } from './approvals.mjs';
+import { modelById } from './catalog.mjs';
 import { imagePathsInUse } from './images.mjs';
 import { DIRS } from './paths.mjs';
 import { bus, getState, update } from './state.mjs';
@@ -67,6 +69,37 @@ export async function removeUnusedModelFiles(paths) {
     }
   }
   return { removed: targets.length, freedBytes };
+}
+
+// Les entrées fantômes de l'état : un modèle « installé » que le catalogue ne connaît plus (venu
+// d'une autre branche, ou retiré depuis) ne peut ni se lancer ni se désinstaller par la fenêtre ;
+// un moteur dont le dossier a disparu ne peut plus servir. Les oublier ne supprime aucun fichier :
+// ceux d'un modèle oublié deviennent des fichiers en trop, proposés au ménage suivant.
+export function findStaleEntries() {
+  const state = getState();
+  const models = Object.keys(state.models ?? {}).filter((id) => !modelById(id));
+  const runtimes = Object.entries(state.runtimes ?? {}).filter(([, r]) => r?.dir && !existsSync(r.dir)).map(([key]) => key);
+  return { models, runtimes };
+}
+export function forgetStaleEntries({ models = [], runtimes = [] }) {
+  const stale = findStaleEntries();
+  update((s) => {
+    for (const id of models) if (stale.models.includes(id)) { delete s.models[id]; if (s.profiles) delete s.profiles[id]; }
+    for (const key of runtimes) if (stale.runtimes.includes(key)) delete s.runtimes[key];
+  });
+}
+export function proposeForgetStale() {
+  const stale = findStaleEntries();
+  const count = stale.models.length + stale.runtimes.length;
+  if (!count) return null;
+  const listed = [...stale.models.map((id) => `modèle ${id}`), ...stale.runtimes.map((key) => `moteur ${key}`)].join(' · ');
+  return requestApproval({
+    kind: 'forget',
+    title: `Oublier ${count} entrée${count > 1 ? 's' : ''} qui ne correspond${count > 1 ? 'ent' : ''} plus à rien ?`,
+    detail: `Harn les croit installées, mais le catalogue ne les connaît plus ou leur dossier a disparu : ${listed}. Aucun fichier n’est supprimé.`,
+    run: () => { forgetStaleEntries(stale); bus.emit('toast', `${count} entrée${count > 1 ? 's' : ''} oubliée${count > 1 ? 's' : ''}`); },
+    refuse: () => {},
+  });
 }
 
 export async function proposeCleanup() {

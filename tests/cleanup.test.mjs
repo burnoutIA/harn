@@ -51,3 +51,19 @@ test('accepté : les fichiers en trop partent, les dossiers vidés aussi, le res
   for (const kept of [used, elsewhere, strata, image]) assert.ok(existsSync(kept), kept);
   assert.equal(await proposeCleanup(), null);
 });
+
+test('entrées fantômes : modèle inconnu du catalogue et moteur sans dossier, oubliés sans toucher au reste', async () => {
+  const { findStaleEntries, forgetStaleEntries } = await import('../src/cleanup.mjs');
+  update((s) => {
+    s.models['modele-dune-autre-branche'] = { installedAt: new Date().toISOString(), files: [], paths: {} };
+    s.runtimes['moteur-parti'] = { kind: 'llama', dir: path.join(DIRS.runtime, 'nexiste-pas') };
+    s.runtimes['moteur-present'] = { kind: 'llama', dir: DIRS.models };
+  });
+  const stale = findStaleEntries();
+  assert.ok(stale.models.includes('modele-dune-autre-branche'));
+  assert.deepEqual(stale.runtimes, ['moteur-parti']);
+  forgetStaleEntries(stale);
+  assert.equal(getState().models['modele-dune-autre-branche'], undefined);
+  assert.equal(getState().runtimes['moteur-parti'], undefined);
+  assert.ok(getState().runtimes['moteur-present']);
+});

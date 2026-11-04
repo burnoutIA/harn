@@ -235,11 +235,21 @@ export async function extensionsDigest() {
   return hash.digest('hex').slice(0, 12);
 }
 
-async function installExtensions(piDir) {
+// La liste de ce que Harn a posé est gardée à côté : une extension retirée de Harn (ou propre à une
+// autre branche) est enlevée au passage suivant, sans toucher à celles que l'utilisateur ajoute.
+const EXTENSIONS_MANIFEST = '.harn-extensions.json';
+export async function installExtensions(piDir) {
   const source = fromRoot('src', 'pi-extensions');
-  for (const entry of await readdir(source, { withFileTypes: true }).catch(() => [])) {
-    if (entry.isDirectory()) await cp(path.join(source, entry.name), path.join(piDir, 'extensions', entry.name), { recursive: true, force: true });
+  const target = path.join(piDir, 'extensions');
+  const shipped = (await readdir(source, { withFileTypes: true }).catch(() => [])).filter((e) => e.isDirectory()).map((e) => e.name);
+  const manifest = path.join(target, EXTENSIONS_MANIFEST);
+  const before = JSON.parse(await readFile(manifest, 'utf8').catch(() => '[]'));
+  for (const name of before) {
+    if (!shipped.includes(name) && !name.includes('/') && !name.includes('\\') && name !== '..') await rm(path.join(target, name), { recursive: true, force: true });
   }
+  for (const name of shipped) await cp(path.join(source, name), path.join(target, name), { recursive: true, force: true });
+  await mkdir(target, { recursive: true });
+  await writeFile(manifest, JSON.stringify(shipped));
 }
 
 async function hasWindowsTerminal() {

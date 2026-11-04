@@ -29,7 +29,7 @@ import { deleteImageModel, generateImage, imageModelById, imagesReport, installI
 import { listLoras, loraDirOf } from './loras.mjs';
 import { agentForImages, claimCard, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
-import { proposeCleanup } from './cleanup.mjs';
+import { proposeCleanup, proposeForgetStale } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
 import { checkHub, dismissHub, watchHub } from './watch.mjs';
@@ -560,6 +560,7 @@ async function main() {
       if (last && state.models[last]?.installedAt && !state.active?.unloadedByUser) background(activate(last));
       background(startAgents());
       // Fichiers de models/ qu'aucun modèle ne réclame : proposés à la suppression, jamais supprimés sans clic.
+      background(Promise.resolve().then(proposeForgetStale));
       background(proposeCleanup());
     }
   });
