@@ -7,7 +7,8 @@ JavaScript, PHP, Rust, shell. Exécution dans l'image podman harn-banc-code (Con
 sans réseau, lecture seule hors /travail, mémoire et processus plafonnés, 15 s par épreuve.
 
 Usage : python banc/code.py --url http://127.0.0.1:4760 --etiquette base [--langages py,ts,php]
-        [--limite 20] [--paralleles 4] [--max-tokens 8192]
+        [--limite 20] [--paralleles 4] [--max-tokens 8192] [--sans-reflexion] [--biais mots.json]
+        [--ids liste.txt]
 Sortie : banc/resultats/<etiquette>.json (réponses, code extrait, verdicts) + résumé à l'écran.
 """
 import argparse
@@ -36,16 +37,30 @@ EXECUTER = {  # dans le conteneur, fichier f.<ext>
 }
 
 
-def epreuves(langage, limite):
+def epreuves(langage, limite, famille="humaneval"):
+    """famille « humaneval » : le banc. « mbpp » : autres exercices avec tests (MBPP+ et sa traduction
+    MultiPL-E), réservés à l'entraînement — jamais les épreuves du banc."""
+    if famille == "mbpp" and langage == "py":
+        ds = load_dataset("evalplus/mbppplus", split="test")
+        for ex in list(ds)[: limite or None]:
+            signature = re.search(r"^def \w+\(.*?\).*?:", ex["code"], re.M)
+            if not signature:
+                continue
+            nom = re.match(r"def (\w+)", signature.group(0)).group(1)
+            exemple = ex["test_list"][0] if ex["test_list"] else ""
+            enonce = f'{signature.group(0)}\n    """{ex["prompt"].strip()}\n    {exemple}\n    """\n'
+            yield {"id": f"Mbpp/{ex['task_id']}", "langage": "py", "enonce": enonce, "nom": nom,
+                   "tests": "\n".join(ex["test_imports"]) + "\n" + ex["test"]}
+        return
     if langage == "py":
         ds = load_dataset("evalplus/humanevalplus", split="test")
         for ex in list(ds)[: limite or None]:
             yield {"id": ex["task_id"], "langage": "py", "enonce": ex["prompt"], "nom": ex["entry_point"],
                    "tests": ex["test"] + f"\ncheck({ex['entry_point']})\n"}
     else:
-        ds = load_dataset("nuprl/MultiPL-E", f"humaneval-{langage}", split="test")
+        ds = load_dataset("nuprl/MultiPL-E", f"{famille}-{langage}", split="test")
         for ex in list(ds)[: limite or None]:
-            nom = re.sub(r"^HumanEval_\d+_", "", ex["name"])
+            nom = re.sub(r"^(HumanEval|mbpp)_\d+_", "", ex["name"])
             yield {"id": ex["name"], "langage": langage, "enonce": ex["prompt"], "nom": nom, "tests": ex["tests"]}
 
 
@@ -56,15 +71,17 @@ def consigne(e):
             f"sans exemple d'utilisation ni test.\n\n```{BLOCS[e['langage']]}\n{e['enonce'].rstrip()}\n```")
 
 
-def demander(url, e, max_tokens):
-    corps = {"messages": [{"role": "user", "content": consigne(e)}], "temperature": 0, "max_tokens": max_tokens, "seed": 0}
+def demander(url, e, max_tokens, extra=None):
+    corps = {"messages": [{"role": "user", "content": consigne(e)}], "temperature": 0, "max_tokens": max_tokens, "seed": 0,
+             **(extra or {})}
     req = urllib.request.Request(f"{url}/v1/chat/completions", data=json.dumps(corps).encode(),
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=1800) as r:
         rep = json.load(r)
     choix = rep["choices"][0]
-    return {"reponse": choix["message"].get("content") or "", "coupee": choix.get("finish_reason") == "length",
+    return {"reponse": choix["message"].get("content") or "", "reflexion": choix["message"].get("reasoning_content") or "",
+            "coupee": choix.get("finish_reason") == "length",
             "tokens": rep.get("usage", {}).get("completion_tokens", 0), "secondes": round(time.time() - t0, 1)}
 
 
@@ -125,13 +142,24 @@ def main():
     p.add_argument("--limite", type=int, default=0, help="épreuves par langage (0 = toutes)")
     p.add_argument("--paralleles", type=int, default=4)
     p.add_argument("--max-tokens", type=int, default=8192)
+    p.add_argument("--sans-reflexion", action="store_true", help="enable_thinking=false dans le gabarit")
+    p.add_argument("--biais", help='JSON {"mot": biais} : pénalise (biais < 0) des mots pendant la génération (logit_bias)')
+    p.add_argument("--ids", help="fichier d'identifiants d'épreuves (un par ligne) : ne passer que celles-là")
     args = p.parse_args()
 
+    extra = {}
+    if args.sans_reflexion:
+        extra["chat_template_kwargs"] = {"enable_thinking": False}
+    if args.biais:
+        extra["logit_bias"] = [[mot, b] for mot, b in json.loads(Path(args.biais).read_text()).items()]
     toutes = [e for lang in args.langages.split(",") for e in epreuves(lang, args.limite)]
+    if args.ids:
+        garder = set(Path(args.ids).read_text().split())
+        toutes = [e for e in toutes if e["id"] in garder]
     print(f"{len(toutes)} épreuves", flush=True)
     t0 = time.time()
     with cf.ThreadPoolExecutor(args.paralleles) as pool:
-        reponses = list(pool.map(lambda e: demander(args.url, e, args.max_tokens), toutes))
+        reponses = list(pool.map(lambda e: demander(args.url, e, args.max_tokens, extra), toutes))
     print(f"réponses reçues en {time.time() - t0:.0f} s", flush=True)
     codes = [extraire(e, r["reponse"]) for e, r in zip(toutes, reponses)]
     verdicts = executer([(i, e["langage"], programme(e, c)) for i, (e, c) in enumerate(zip(toutes, codes)) if c is not None])
@@ -149,7 +177,7 @@ def main():
     resume["moyenne"] = round(sum(v["reussite"] for v in resume.values()) / len(resume), 1)
     sortie = ICI / "resultats" / f"{args.etiquette}.json"
     sortie.parent.mkdir(exist_ok=True)
-    sortie.write_text(json.dumps({"etiquette": args.etiquette, "resume": resume, "epreuves": lignes}, indent=1, ensure_ascii=False))
+    sortie.write_text(json.dumps({"etiquette": args.etiquette, "options": extra, "resume": resume, "epreuves": lignes}, indent=1, ensure_ascii=False))
     for lang, v in resume.items():
         print(f"  {NOMS.get(lang, lang):11s} {v}" if lang != "moyenne" else f"  MOYENNE     {v} %")
     print("écrit :", sortie)

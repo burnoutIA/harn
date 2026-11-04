@@ -20,12 +20,16 @@ Essai rapide : --max-exemples 20 --pas-max 3
 import argparse
 import json
 import math
+import re
 import time
 from pathlib import Path
 
 import torch
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+
+
+REFLEXION_VIDE = re.compile(r"\s*(?:<think>)?\s*</think>\s*")
 
 
 def encoder(tok, ex, longueur):
@@ -40,7 +44,10 @@ def encoder(tok, ex, longueur):
         jusque = tok.apply_chat_template(msgs[:k + 1], tools=tools, tokenize=False)
         if not (complet.startswith(avant) and complet.startswith(jusque)):
             return None  # gabarit non stable pour cet exemple : on l'écarte
-        zones.append((len(avant), len(jusque)))
+        # Exemple sans réflexion : le gabarit écrit un bloc vide (<think></think>). On ne l'apprend pas,
+        # sinon le modèle apprend à ne plus réfléchir (mesuré : bien pire en code sans réflexion).
+        vide = REFLEXION_VIDE.match(complet, len(avant))
+        zones.append((vide.end() if vide else len(avant), len(jusque)))
     if not zones:
         return None
     enc = tok(complet, add_special_tokens=False, return_offsets_mapping=True)
