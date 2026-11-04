@@ -21,7 +21,7 @@ distant() {
   : "${ENTRAINEMENT:?renseigner ENTRAINEMENT dans machines.env (copie de machines.env.exemple)}"
 }
 DIST=${DOSSIER_DISTANT:-harn/training}
-EXCLUS=(--exclude .venv --exclude modeles --exclude sorties --exclude __pycache__ --exclude machines.env)
+EXCLUS=(--exclude .venv --exclude modeles --exclude sorties --exclude __pycache__ --exclude machines.env --exclude banc/resultats)
 
 cmd=${1:-aide}
 [ $# -gt 0 ] && shift
