@@ -8,13 +8,17 @@ Sources (téléchargées en streaming depuis Hugging Face) :
                read / bash / edit / glob / grep…), format proche de pi
 - swesmith   : SWE-bench/SWE-smith-trajectories (split « tool ») — corrections de bugs dans des
                dépôts Python, sessions résolues seulement
+- auto       : réponses du modèle lui-même, vérifiées par les tests, réflexion comprise
+               (generer.py → selection.py → data/auto/sft.jsonl), ajoutées telles quelles si présentes
 
 Le dosage par langage suit les projets de l'utilisateur (TS/JS > Python > front > Rust > PHP,
 shell, SQL). Le front (HTML/CSS/SCSS/Svelte/Twig) manque dans ces sources : il viendra des
 données générées par le professeur (Qwen3.8-27B, Radiance) — voir README.
 
-Aucune de ces sources n'a de réflexion séparée : le modèle apprendra à agir sans longue
-réflexion. Choix à réévaluer au banc.
+Seules les données « auto » ont une réflexion. Les autres n'en ont pas : sft.py ne fait pas
+apprendre leur bloc de réflexion vide (sinon le modèle apprend à ne plus réfléchir, ce qui le rend
+nettement moins juste en code). Magicoder est donc réduit : il apporte de la variété de problèmes,
+les données « auto » apportent la façon de raisonner.
 
 Usage : python donnees.py [--echelle 1.0]   (indépendant du modèle de base)
 """
@@ -28,12 +32,12 @@ from datasets import load_dataset
 
 RACINE = Path(__file__).resolve().parent
 
-# nombre d'exemples visés par source/langage (échelle 1.0). Calibré pour ~4 h sur une RTX 3090
-# (~2 700 tokens/s d'entraînement mesurés) : ~40 M tokens. Les sessions d'agent pèsent 10 à 30k
-# tokens chacune, les problèmes Magicoder ~500 : peu de sessions, beaucoup de problèmes.
+# nombre d'exemples visés par source/langage (échelle 1.0), ~3 h sur une RTX 3090 (~2 700 tokens/s
+# d'entraînement mesurés). Les sessions d'agent pèsent 10 à 30k tokens chacune, les problèmes
+# Magicoder ~500.
 DOSAGE = {
-    "magicoder": {"typescript": 5000, "python": 8000, "rust": 4000, "php": 3000, "shell": 3000,
-                  "cpp": 800, "java": 800, "csharp": 400, "swift": 300},
+    "magicoder": {"typescript": 1500, "python": 1500, "rust": 1000, "php": 800, "shell": 800,
+                  "cpp": 200, "java": 200, "csharp": 100, "swift": 100},
     "opencode": {"agent_skills": 900, "general": 400, "bash_only_tool": 200},
     "swesmith": {"tool": 400},
 }
@@ -158,6 +162,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--echelle", type=float, default=1.0, help="multiplie tous les dosages (0.01 pour un essai)")
     p.add_argument("--sortie", default=str(RACINE / "data" / "melange.jsonl"))
+    p.add_argument("--auto", default=str(RACINE / "data" / "auto" / "sft.jsonl"),
+                   help="données vérifiées du modèle lui-même (ajoutées si le fichier existe)")
     args = p.parse_args()
     rng = random.Random(0)
     sources = {"magicoder": magicoder, "opencode": opencode, "swesmith": swesmith}
@@ -168,6 +174,10 @@ def main():
             avant = len(exemples)
             exemples += list(sources[source](part, n, rng))
             print(f"{source}/{part}: {len(exemples) - avant}/{n}", flush=True)
+    if Path(args.auto).exists():
+        auto = [json.loads(l) for l in open(args.auto)]
+        exemples += auto[: max(1, int(len(auto) * args.echelle))]
+        print(f"auto: {len(auto)}", flush=True)
     rng.shuffle(exemples)
     Path(args.sortie).parent.mkdir(parents=True, exist_ok=True)
     with open(args.sortie, "w") as f:

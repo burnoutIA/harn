@@ -35,15 +35,29 @@ d'entraînement depuis Hugging Face.
 Un modèle qui livre son propre code Python (`trust_remote_code`) est refusé tant qu'on ne
 l'a pas relu : relancer alors avec `CODE_DISTANT=1`.
 
-## La recette (`recette.sh`)
+## La recette
+Leçon des premières mesures : le modèle de base réfléchit trop longtemps (la plupart de ses échecs
+au banc sont des réponses coupées), mais **sans réflexion il est bien moins juste**. On lui apprend
+donc à raisonner court, pas à ne plus raisonner.
+
+0. **Générations vérifiées** (`generer.py`, sur n'importe quelle machine qui sert le modèle de base
+   en API OpenAI, par ex. `PARALLELE=128 banc/servir.sh`) : exercices MBPP+ et leur traduction
+   MultiPL-E (Python, TypeScript, JavaScript, PHP, Rust, Bash — jamais les épreuves du banc),
+   4 réponses par exercice avec réflexion, chacune exécutée contre les tests dans podman.
+   `selection.py` → `data/auto/sft.jsonl` (la réponse juste la plus courte de chaque exercice) et
+   `data/auto/dpo.jsonl` (paires : juste et courte ≻ fausse, coupée ou juste mais bien plus longue).
+   `reverifier.py` réexécute les tests si l'extraction change.
 1. Modèle de base → `modeles/<nom>/`.
-2. Données (`donnees.py`) → `data/melange.jsonl` : ~28 000 exemples, ~40 M tokens (~4 h sur une 3090) — problèmes/solutions
-   multi-langages (Magicoder OSS-Instruct), sessions d'agent de code avec outils
-   (Nemotron-SFT-OpenCode, catégories code), corrections de bugs résolues dans des dépôts
-   (SWE-smith). Même mélange pour tous les modèles comparés.
-3. Entraînement (`sft.py`) → `sorties/<nom>-sft/` : tous les poids, perte sur les réponses de
-   l'assistant seulement, 16k tokens, lr 1e-5, AdamW 8 bits, 1 époque, table des tokens gelée (pic mesuré 19 Go à 16k). Exemples dont le gabarit
-   de conversation n'est pas stable : écartés et comptés.
+2. Mélange (`donnees.py`) → `data/melange.jsonl` : les données vérifiées ci-dessus, des sessions
+   d'agent de code avec outils (Nemotron-SFT-OpenCode, catégories code), des corrections de bugs
+   résolues dans des dépôts (SWE-smith) et un peu de problèmes/solutions multi-langages (Magicoder).
+   Même mélange pour tous les modèles comparés.
+3. **SFT** (`sft.py`) → `sorties/<nom>-sft/` : tous les poids, perte sur les réponses de l'assistant
+   seulement, 16k tokens, lr 1e-5, AdamW 8 bits, 1 époque, table des tokens gelée (pic mesuré 19 Go
+   à 16k). Le bloc de réflexion vide des exemples sans réflexion n'est pas appris. Exemples dont le
+   gabarit de conversation n'est pas stable : écartés et comptés.
+4. **DPO** (`dpo.py`) → `sorties/<nom>-dpo/` : sur les paires, β 0,1, lr 1e-6. Référence calculée
+   d'abord (pas de second modèle en mémoire), puis gradient factorisé, une séquence à la fois.
 
 Modèles, données et sorties ne sont jamais suivis par git (`.gitignore`).
 
@@ -61,3 +75,4 @@ budget) est ratée. Résultats dans `banc/resultats/` (non suivi).
 - Données générées par le professeur pour le front (HTML/CSS/SCSS/Svelte/Twig), gardées
   seulement si elles passent une vérification automatique.
 - Export GGUF des modèles entraînés.
+- RLVR (GRPO) : récompense = tests réussis, avec bonus de concision, si SFT + DPO laissent de la marge.
