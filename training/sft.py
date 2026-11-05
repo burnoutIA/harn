@@ -58,6 +58,19 @@ def encoder(tok, ex, longueur):
     return ids, labels
 
 
+def etat_bf16(modele):
+    """Poids à sauvegarder, en bf16. Si la table de sortie est la même que celle d'entrée (tied), on ne
+    l'écrit qu'une fois : sinon la conversion GGUF en fait deux tenseurs (plus gros, quantifiés à part)."""
+    etat = modele.state_dict()
+    sortie, entree = modele.get_output_embeddings(), modele.get_input_embeddings()
+    if sortie is not None and sortie.weight is entree.weight:
+        ptr = entree.weight.data_ptr()
+        memes = [k for k, v in etat.items() if v.data_ptr() == ptr]
+        garder = next((k for k in memes if "embed" in k), memes[0])
+        etat = {k: v for k, v in etat.items() if k == garder or v.data_ptr() != ptr}
+    return {k: v.to(torch.bfloat16) for k, v in etat.items()}
+
+
 def perte_par_tranches(modele, ids, labels, tranche=1024):
     h = modele.get_decoder()(input_ids=ids).last_hidden_state[0]  # [L, d]
     cibles = labels[0, 1:]
@@ -171,7 +184,7 @@ def main():
         if pas % args.sauver_tous == 0 or pas == pas_total:
             # poids maîtres fp32 en mémoire, sauvegarde en bf16 (3,4 Go au lieu de 6,9)
             modele.save_pretrained(sortie / "modele", safe_serialization=True,
-                                   state_dict={k: v.to(torch.bfloat16) for k, v in modele.state_dict().items()})
+                                   state_dict=etat_bf16(modele))
             tok.save_pretrained(sortie / "modele")
     print("terminé :", sortie / "modele")
 

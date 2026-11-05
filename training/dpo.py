@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from sft import encoder, perte_par_tranches
+from sft import encoder, etat_bf16, perte_par_tranches
 
 
 def logp(modele, ids, lab):
@@ -124,7 +124,7 @@ def main():
         journal.flush()
         print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in info.items()), flush=True)
     modele.save_pretrained(sortie / "modele", safe_serialization=True,
-                           state_dict={k: v.to(torch.bfloat16) for k, v in modele.state_dict().items()})
+                           state_dict=etat_bf16(modele))
     tok.save_pretrained(sortie / "modele")
     print("terminé :", sortie / "modele")
 
