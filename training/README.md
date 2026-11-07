@@ -71,6 +71,19 @@ HumanEval+ (Python) et MultiPL-E (TypeScript, JavaScript, PHP, Rust, Bash), pass
 code exécuté sans réseau dans podman. Une réponse sans bloc de code (vide ou coupée par le
 budget) est ratée. Résultats dans `banc/resultats/` (non suivi).
 
+**Savoir vite si une méthode marche.** Le banc complet prend ~75 min. `banc/rapide.txt` garde les
+394 épreuves sur 959 dont le résultat a changé d'un modèle à l'autre (les autres sont toujours
+justes ou toujours fausses : elles ne départagent rien) → ~30 min. La liste est figée : sert à
+comparer des méthodes, pas à annoncer un score. Pendant l'entraînement, `dpo.py --sauver-tous 50`
+écrit des points de contrôle, que le PC de mesure évalue pendant que l'autre continue :
+```bash
+./pc.sh recuperer <nom>
+LLAMA_CPP=<clone de llama.cpp> banc/evaluer.sh sorties/<nom>/pas-50 <nom>-pas50 banc/resultats/<base>.json
+```
+`evaluer.sh` convertit (GGUF Q4_K_M), sert, passe le banc rapide (`COMPLET=1` : complet) et compare
+à la référence avec `banc/comparer.py` : épreuves gagnées / perdues par langage et probabilité que
+l'écart soit du hasard (test du signe). Point de contrôle moins bon que la base → on coupe le run.
+
 ## À faire
 - Données générées par le professeur pour le front (HTML/CSS/SCSS/Svelte/Twig), gardées
   seulement si elles passent une vérification automatique.

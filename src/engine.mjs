@@ -150,7 +150,9 @@ async function killTree(pid) {
   // Un orphelin repris par reapOrphans n'est pas forcément chef de groupe : on vise alors le seul PID.
   const target = alive(-pid) ? -pid : pid;
   try { process.kill(target, 'SIGTERM'); } catch {}
-  for (let i = 0; i < 16 && alive(target); i += 1) await new Promise((resolve) => setTimeout(resolve, 500));
+  // 30 s de politesse : un moteur en conteneur (Radiance) arrête son conteneur sur SIGTERM
+  // (podman stop -t 15). Tué avant, le lanceur laissait vLLM tourner hors de toute trace.
+  for (let i = 0; i < 60 && alive(target); i += 1) await new Promise((resolve) => setTimeout(resolve, 500));
   if (alive(target)) try { process.kill(target, 'SIGKILL'); } catch {}
 }
 
@@ -188,7 +190,15 @@ async function linuxRuntimePids(sparingImages = false) {
     const exe = await readlink(`/proc/${entry}/exe`).catch(() => '');
     const argv0 = (await readFile(`/proc/${entry}/cmdline`, 'utf8').catch(() => '')).split('\0')[0];
     if (sparingImages && (exe.startsWith(images) || argv0.startsWith(images))) continue;
-    if ((exe.startsWith(root) || argv0.startsWith(root)) && path.basename(exe) !== 'ketch') pids.push(Number(entry));
+    if ((exe.startsWith(root) || argv0.startsWith(root)) && path.basename(exe) !== 'ketch') { pids.push(Number(entry)); continue; }
+    // vLLM lancé dans un conteneur (Radiance) : son exécutable n'est pas dans runtime/, mais il
+    // sert un modèle de notre catalogue sous son id. Resté seul, il tenait 29 Go de la carte
+    // sans que Harn l'affiche.
+    if (argv0.endsWith('python3') || argv0.endsWith('vllm')) {
+      const argv = (await readFile(`/proc/${entry}/cmdline`, 'utf8').catch(() => '')).split('\0');
+      const served = argv.find((a) => a.startsWith('--served-model-name='))?.split('=')[1];
+      if (argv.includes('serve') && served && modelById(served)) pids.push(Number(entry));
+    }
   }
   return pids;
 }

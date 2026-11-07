@@ -1,8 +1,9 @@
 // Le format de data/state.json évolue avec Harn. Chaque changement de format a sa migration,
 // appliquée une fois au chargement, plutôt que du code qui devine l'ancien format partout.
 // Ajouter une migration : incrémenter SCHEMA_VERSION et décrire le passage à cette version.
+import { verbosityLabel } from './iq-test.mjs';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const MIGRATIONS = {
   // v2 : `layers` explicite dans chaque réglage. Avant, une cible --fit relevée (> 1 Gio)
@@ -17,6 +18,15 @@ const MIGRATIONS = {
     for (const profile of Object.values(state.profiles ?? {})) {
       const tuning = profile.tuning;
       if (tuning?.layers === 'auto' && (tuning.ubatch ?? 512) < 4096) Object.assign(tuning, { batch: 4096, ubatch: 4096 });
+    }
+  },
+  // v4 : « bavard » ne se déclenche plus sur une seule réponse coupée, mais sur la longueur des
+  // réponses. Les anciens tests n'ont que la moyenne sur tout le test : elle sert d'approximation
+  // jusqu'au prochain passage (qui mesurera `replyTokens` au palier difficile).
+  4: (state) => {
+    for (const profile of Object.values(state.profiles ?? {})) {
+      const v = profile.iq?.verbosity;
+      if (v && v.replyTokens === undefined && v.avgTokens !== undefined) v.label = verbosityLabel(v.avgTokens);
     }
   },
 };

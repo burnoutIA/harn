@@ -11,6 +11,9 @@ desktop.ini
 .vscode/
 .idea/
 
+#training
+training/
+
 # Réglages locaux de Claude Code (permissions propres à la machine)
 .claude/settings.local.json
 

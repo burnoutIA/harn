@@ -1,8 +1,10 @@
 import { IQ_VERSION } from './iq-test.mjs';
 
 // La note globale d'un modèle installé : ce qu'il vaut vraiment sur cette machine. Le banc
-// d'intelligence dit jusqu'où il répond juste (100 est rare : il faut réussir les paliers limite) ;
-// la note globale y ajoute sa taille, sa vitesse mesurée et son contexte.
+// d'intelligence dit jusqu'où il répond juste (100 : tous les paliers limite réussis ; jusqu'à 125
+// avec le palier expert) ; la note globale y ajoute sa taille, son temps de réponse et son contexte.
+// L'intelligence compte iq / 100 : un modèle au-delà de 100 gagne jusqu'à 10 points de plus, la
+// note globale peut donc dépasser 100 pour les meilleurs.
 
 export const RATING_WEIGHTS = { intelligence: 40, taille: 25, vitesse: 20, contexte: 15 };
 
@@ -16,8 +18,14 @@ const isMoe = (model) => Boolean(model?.sparse || model?.moe || /-A\d/i.test(mod
 // Échelles logarithmiques : doubler compte autant en bas qu'en haut de l'échelle.
 // Taille : 1B → 0, 128B → 1 (4B 0,29 · 9B 0,45 · 27B 0,68 · 35B 0,73 · 125B 0,99).
 const sizeRatio = (paramsB) => clamp(Math.log2(paramsB) / 7);
-// Vitesse : 20 tok/s → 0, 160 tok/s → 1 (40 → 0,33 · 90 → 0,72).
-const speedRatio = (tps) => clamp(Math.log2(tps / 20) / 3);
+// Vitesse : ce que l'on attend vraiment, le temps d'une réponse = tokens par réponse ÷ tok/s.
+// Un modèle à 130 tok/s qui réfléchit 2000 tokens répond moins vite qu'un 65 tok/s qui en écrit 500.
+// 32 s → 0, 4 s → 1 (8 s → 0,67 · 16 s → 0,33). Tokens par réponse : ceux du banc d'intelligence
+// (palier difficile, commun à tous) ; sans mesure, 640, ce qui redonne l'ancienne échelle en
+// tok/s (20 tok/s → 0, 160 tok/s → 1).
+export const TYPICAL_REPLY_TOKENS = 640;
+export const replySeconds = (tps, tokens = TYPICAL_REPLY_TOKENS) => tokens / tps;
+const speedRatio = (seconds) => clamp(Math.log2(32 / seconds) / 3);
 // Contexte : 32k → 0, 128k → 1 (64k → 0,5).
 const contextRatio = (tokens) => clamp(Math.log2(tokens / 32768) / 2);
 
@@ -34,20 +42,23 @@ export function paramsOf(model) {
 
 // Note sur 100 à partir d'une intelligence (sur 100), d'une vitesse et d'un contexte : mesurés
 // (globalRating) ou estimés par le planificateur pour un modèle pas encore installé.
-export function ratingFrom(model, { iq, tps, context }) {
+export function ratingFrom(model, { iq, tps, context, replyTokens }) {
   const paramsB = paramsOf(model);
+  const seconds = tps ? replySeconds(tps, replyTokens || TYPICAL_REPLY_TOKENS) : null;
   const parts = {
     intelligence: (iq ?? 0) / 100,
     taille: paramsB ? sizeRatio(paramsB * (isMoe(model) ? MOE_FACTOR : 1)) : 0,
-    vitesse: tps ? speedRatio(tps) : 0,
+    vitesse: seconds ? speedRatio(seconds) : 0,
     contexte: contextRatio(context ?? 0),
   };
   const score = Math.round(Object.entries(RATING_WEIGHTS).reduce((sum, [name, weight]) => sum + parts[name] * weight, 0));
-  return { score, parts, paramsB, moe: isMoe(model) };
+  return { score, parts, paramsB, moe: isMoe(model), replySeconds: seconds === null ? null : +seconds.toFixed(1) };
 }
 
 // La note mesurée, ou null tant que le banc d'intelligence et le banc de vitesse n'ont pas tourné.
 export function globalRating(model, profile) {
   if (profile?.iq?.version !== IQ_VERSION || !profile.bench?.winner?.tps) return null;
-  return ratingFrom(model, { iq: profile.iq.score, tps: profile.bench.winner.tps, context: profile.tuning?.context });
+  // replyTokens au palier difficile ; un test plus ancien n'a que la moyenne sur tout le test.
+  const v = profile.iq.verbosity ?? {};
+  return ratingFrom(model, { iq: profile.iq.score, tps: profile.bench.winner.tps, context: profile.tuning?.context, replyTokens: v.replyTokens ?? v.avgTokens });
 }

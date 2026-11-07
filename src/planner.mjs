@@ -93,6 +93,9 @@ function sharedTps(model, profile, weightsGiB, gpuShare) {
   return 1 / (gpuShare * onGpu + (1 - gpuShare) * onRam);
 }
 
+// Cartes AMD que le moteur HIP de Strata couvre (docs/AMD_HIP.md, v0.2.11) : gfx1100/1101
+// (RX 7900, 7800, 7700 XT), gfx1200/1201 (RX 9060 XT, 9070, AI PRO R9700). Reconnues au nom.
+const STRATA_AMD = /R9700|RX 9060|RX 9070|RX 7[789]00/i;
 // Strata : RTX 5070 (672 Go/s, 12 Go) à 128k : IQ2_XS 63, IQ3_XXS 49 tok/s (README Strata).
 // Coder IQ1_M : 55 tok/s à 4k sur la même carte, ramenés à 128k comme l'IQ2_XS (63 / 79) : 44.
 // Plus de VRAM = plus d'experts en cache. 3090 : 49 × 1,22 × 1,41 = 85 (mesuré 86 à 100k).
@@ -144,7 +147,9 @@ export function assess(model, hardware) {
       const need = strataRamNeeded(model, hardware.vramGiB);
       reasons.push(`il faut ${need ?? model.needs.ramGiB} Go de RAM avec cette carte (${Math.round(hardware.ramGiB)} ici)`);
     }
-    if (gpu?.vendor !== 'nvidia') reasons.push('Strata demande une carte NVIDIA');
+    if (gpu?.vendor === 'amd') {
+      if (!STRATA_AMD.test(gpu.name ?? '')) reasons.push('Strata demande une Radeon RX 7700 à 7900, RX 9060/9070 ou AI PRO R9700');
+    } else if (gpu?.vendor !== 'nvidia') reasons.push('Strata demande une carte NVIDIA ou une Radeon récente');
     else if (gpu.computeCapability < model.needs.nvidiaCc) reasons.push('Strata demande une RTX série 20 ou plus récente');
     if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
     if (hardware.python?.ok === false) reasons.push(PYTHON_MISSING);
@@ -281,6 +286,7 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
     const rating = measured ?? ratingFrom(model, { iq: entry.intelligence, tps: entry.tps, context: entry.context });
     entry.rating = rating.score;
     entry.ratingParts = rating.parts;
+    entry.replySeconds = rating.replySeconds;
     entry.ratingMeasured = Boolean(measured);
   }
   const r = (model) => verdict(model.id).rating;
@@ -341,7 +347,8 @@ function explainTarget(target, candidates, verdict, q, profiles) {
   const gains = Object.keys(RATING_LABELS).map((k) => [k, (parts(target)[k] - parts(smartest)[k]) * RATING_WEIGHTS[k]]).sort((a, b) => b[1] - a[1]);
   const [winner] = gains[0];
   const tps = (m) => Math.round(profiles[m.id]?.bench?.winner?.tps ?? verdict(m.id).tps ?? 0);
-  const detail = { vitesse: `${tps(target)} tok/s contre ${tps(smartest)}`, contexte: `${Math.round(verdict(target.id).context / 1024)}k contre ${Math.round(verdict(smartest.id).context / 1024)}k`, taille: 'un modèle plus gros' }[winner];
+  const reply = (m) => `${String(verdict(m.id).replySeconds ?? '?').replace('.', ',')} s`;
+  const detail = { vitesse: `${reply(target)} par réponse contre ${reply(smartest)}, à ${tps(target)} et ${tps(smartest)} tok/s`, contexte: `${Math.round(verdict(target.id).context / 1024)}k contre ${Math.round(verdict(smartest.id).context / 1024)}k`, taille: 'un modèle plus gros' }[winner];
   return `Note globale ${verdict(target.id).rating} contre ${verdict(smartest.id).rating} pour ${smartest.name} · ${smartest.variant}, plus intelligent (${q(smartest)} contre ${q(target)}) : la note privilégie ici ${RATING_LABELS[winner]} (${detail}).`;
 }
 

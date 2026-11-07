@@ -6,7 +6,7 @@ Exercices : MBPP+ (Python) et sa traduction MultiPL-E (TypeScript, JavaScript, P
 Jamais les épreuves du banc (HumanEval). La consigne varie d'un exercice à l'autre (FR/EN, formulations)
 pour ne pas apprendre une seule formulation, mais reste la même pour toutes les réponses d'un exercice.
 
-Usage (sur le PC de mesure, modèle servi par banc/servir.sh avec PARALLELE=16) :
+Usage (sur le PC de mesure, modèle servi par banc/servir.sh avec PARALLELE=128) :
   python generer.py --url http://127.0.0.1:4760 --sortie data/auto/generations.jsonl [--k 4]
 Reprend là où il s'était arrêté (exercices déjà présents dans la sortie sautés).
 Une ligne par exercice : {id, langage, consigne, reponses: [{reponse, reflexion, tokens, coupee, ok, code}]}
@@ -64,8 +64,8 @@ def main():
     p.add_argument("--k", type=int, default=4, help="réponses par exercice")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--max-tokens", type=int, default=8192)
-    p.add_argument("--paralleles", type=int, default=16)
-    p.add_argument("--lot", type=int, default=48, help="exercices générés puis exécutés ensemble")
+    p.add_argument("--paralleles", type=int, default=128)
+    p.add_argument("--lot", type=int, default=256, help="exercices générés puis exécutés ensemble (gros lots : sinon la carte attend la réponse la plus longue de chaque lot)")
     p.add_argument("--limite", type=int, default=0, help="exercices par langage (0 = tous)")
     args = p.parse_args()
 

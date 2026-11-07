@@ -246,10 +246,16 @@ const superseded = () => new Error('Chargement remplacé par celui d’un autre 
 // d'un Ryzen apparaît en Vulkan comme en HIP, avec la RAM pour mémoire. llama.cpp l'écarte
 // aujourd'hui de lui-même ; on ne dépend pas de ce choix. Rien si le nom n'est pas reconnu.
 // Un brouillon chargé à part (DFlash2) se voit désigner la même carte.
+// Une puce intégrée telle que les moteurs la nomment (Vulkan : nom du processeur ou du cœur
+// graphique ; HIP : « AMD Radeon Graphics », gfx1036…) : jamais désignée, même si son nom croise
+// celui de la carte.
+export const INTEGRATED_DEVICE = /\bProcessor\b|\bRyzen\b|RAPHAEL|MENDOCINO|PHOENIX|STRIX|\bAMD Radeon(\(TM\))? Graphics\b|gfx10(3[5-6])|gfx11(0[3-4]|5[0-1])|Intel.*(UHD|Iris|Arc\(TM\) Graphics)/i;
 export function deviceArgs(devices, hardware, { draft = false } = {}) {
   const name = hardware?.primary?.name?.replace(/^(NVIDIA|AMD)\s+/i, '');
-  if (!name || !devices || devices.length < 2) return [];
-  const matching = devices.filter((device) => device.name.includes(name));
+  if (!devices || devices.length < 2) return [];
+  const discrete = devices.filter((device) => !INTEGRATED_DEVICE.test(device.name));
+  // Carte principale non nommée : la seule carte dédiée que voit le moteur, s'il n'y en a qu'une.
+  const matching = name ? discrete.filter((device) => device.name.includes(name)) : discrete;
   if (matching.length !== 1) return [];
   return ['--device', matching[0].id, ...(draft ? ['--device-draft', matching[0].id] : [])];
 }
@@ -261,10 +267,12 @@ export async function loadWithHeadroom(model, tuning) {
   // télécharge plutôt que d'échouer. Les forks compilés, eux, passent par leur fiche moteur.
   const kind = runtimeKind(model, current);
   if (!ownLauncher(model) && current.backend && ['llama', 'prism'].includes(kind) && !getState().runtimes[`${kind}-${current.backend}`]) await installLlama(kind, current.backend);
-  // Un moteur installé avant qu'on relève ses cartes : relevé une fois, gardé avec lui.
+  // Cartes relevées à chaque chargement : la numérotation Vulkan change d'un démarrage à l'autre
+  // (puce intégrée en Vulkan0 un jour, en Vulkan1 le lendemain). Une liste gardée d'un ancien
+  // démarrage envoyait le modèle sur la puce intégrée : 20 tok/s au lieu de 450.
   const runtimeId = `${kind}-${current.backend}`;
   const runtime = getState().runtimes[runtimeId];
-  if (!ownLauncher(model) && runtime?.serverPath && runtime.devices === undefined) {
+  if (!ownLauncher(model) && runtime?.serverPath) {
     const devices = await listDevices(runtime.serverPath, runtime.dir);
     update((s) => { if (s.runtimes[runtimeId]) s.runtimes[runtimeId].devices = devices; });
   }

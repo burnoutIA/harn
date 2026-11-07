@@ -51,7 +51,7 @@ const helperFor = (failedId) => Object.entries(state.profiles ?? {})
   .filter(([id, p]) => id !== failedId && state.models[id]?.installedAt && p.iq?.version === IQ_VERSION && p.iq.categories.outils.ratio >= 0.4)
   .sort(([a], [b]) => ratingOf(b) - ratingOf(a))[0]?.[0] ?? null;
 // Même version que src/iq-test.mjs : les résultats d'un ancien banc sont à refaire.
-const IQ_VERSION = 3;
+const IQ_VERSION = 4; // = IQ_VERSION de src/iq-test.mjs (vérifié par tests/iq-test.test.mjs)
 const iqResult = (id) => (state.profiles[id]?.iq?.version === IQ_VERSION ? state.profiles[id].iq : null);
 // Les cinq domaines du banc d'intelligence : [clé, nom, poids dans la note].
 const CATS = [['outils', 'Outils', 35], ['code', 'Code', 25], ['raisonnement', 'Raisonnement', 20], ['contexte', 'Long contexte', 10], ['honnetete', 'Honnêteté', 10]];
@@ -72,7 +72,7 @@ function domainStrip(id) {
   if (!iq) return '';
   return `<div class="domains" title="Banc d’intelligence par domaine (le poids dans la note entre parenthèses)">${CATS.map(([key, label, weight]) => {
     const points = iq.categories[key]?.points ?? 0;
-    return `<div class="dom" title="${label} (${weight} %) : ${points}/100"><div class="top"><span>${label}</span><b>${points}</b></div><div class="bar"><i style="width:${points}%"></i></div></div>`;
+    return `<div class="dom" title="${label} (${weight} %) : ${points}/125${points > 100 ? ' (palier expert)' : ''}"><div class="top"><span>${label}</span><b>${points}</b></div><div class="bar"><i style="width:${points / 1.25}%"></i></div></div>`;
   }).join('')}</div>`;
 }
 const clientOf = (ua = '') => (/^pi/i.test(ua) ? 'pi agent' : ua.includes('harn') ? 'Harn' : ua.split(/[/ (]/)[0] || 'client');
@@ -515,6 +515,26 @@ function renderHero() {
     ${note ? `<p class="note">${note}</p>` : ''}`);
 }
 
+// Petite jauge de la note globale sur les cartes des modèles, dans le style du compteur de l'accueil.
+// L'échelle va jusqu'à 110 (intelligence 125 au palier expert) ; le repère marque 100.
+const RATING_MAX = 110;
+function ratingGauge(verdict) {
+  if (verdict.rating == null) return '';
+  const pct = Math.max(0, Math.min(100, (verdict.rating / RATING_MAX) * 100));
+  const at = 100 / RATING_MAX;
+  const [x1, y1] = polar(G.start + G.sweep * at, G.r - 15);
+  const [x2, y2] = polar(G.start + G.sweep * at, G.r + 15);
+  const est = !verdict.ratingMeasured;
+  return `<div class="rating-gauge ${est ? 'est' : ''}" title="Note globale${est ? ' estimée' : ''} : intelligence 40 % · taille 25 % · temps de réponse 20 % · contexte 15 %">
+    <svg viewBox="0 0 200 190" aria-hidden="true">
+      <path class="track" d="${arc(0, 1)}"/>
+      <path class="value" d="${arc(0, 1)}" pathLength="100" stroke-dasharray="100" stroke-dashoffset="${(100 - pct).toFixed(1)}"/>
+      <line class="tick" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"/>
+    </svg>
+    <div class="center"><b>${est ? '~' : ''}${verdict.rating}</b><span>${est ? 'estimée' : 'note'}</span></div>
+  </div>`;
+}
+
 function renderGauge() {
   const active = state.active;
   const request = live?.request;
@@ -591,9 +611,10 @@ function renderTiles() {
       label: 'Intelligence',
       ok: (best.value ?? 0) <= (mine.value ?? 0),
       value: mine.value ?? '—',
-      unit: mine.tested ? '/100' : '/100 estimée',
+      unit: mine.tested ? '/125' : '/125 estimée',
       sub: (best.value ?? 0) > (mine.value ?? 0) ? `Jusqu’à ${best.value} possible sur cette machine` : 'Le plus fort possible sur cette machine',
-      meter: `<div class="meter"><i style="width:${mine.value ?? 0}%"></i>${(best.value ?? 0) > (mine.value ?? 0) ? `<b style="left:${best.value}%"></b>` : ''}</div>`,
+      // Échelle de 125 (palier expert) : la barre et le repère du meilleur possible restent dans le cadre.
+      meter: `<div class="meter"><i style="width:${Math.min(100, (mine.value ?? 0) / 1.25)}%"></i>${(best.value ?? 0) > (mine.value ?? 0) ? `<b style="left:${Math.min(100, best.value / 1.25)}%"></b>` : ''}</div>`,
       target: mine.tested ? 'Banc d’intelligence Harn' : 'À confirmer par le banc d’intelligence (Réglages)',
     }),
   ].join(''));
@@ -813,15 +834,14 @@ function modelCard(model) {
 
   return `<article class="card model ${isActive ? 'active' : ''} ${isUpgrade ? 'upgrade' : ''} ${off ? 'off' : ''}">
     ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
-    <div class="title-row"><div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div>${model.repo ? `<a class="repo" href="https://huggingface.co/${esc(model.repo)}" target="_blank" rel="noopener" title="Voir le dépôt sur Hugging Face">${esc(model.repo)} ↗</a>` : ''}${entry.installedAt ? `<button class="model-id" data-action="copy-text" data-text="${esc(model.id)}" title="Le nom à mettre dans le champ « model » de votre application · cliquer pour copier">${icon.copy}<span>${esc(model.id)}</span></button>` : ''}</div>${entry.installedAt ? `<button class="heart ${state.favorite === model.id ? 'on' : ''}" data-action="favorite" data-id="${model.id}" title="${state.favorite === model.id ? 'Modèle par défaut · cliquer pour retirer' : 'En faire le modèle par défaut'}" aria-pressed="${state.favorite === model.id}">${icon.heart}</button>` : ''}</div>
+    <div class="title-row"><div><h3>${esc(model.name)}</h3><div class="variant">${esc(model.variant)}</div>${model.repo ? `<a class="repo" href="https://huggingface.co/${esc(model.repo)}" target="_blank" rel="noopener" title="Voir le dépôt sur Hugging Face">${esc(model.repo)} ↗</a>` : ''}${entry.installedAt ? `<button class="model-id" data-action="copy-text" data-text="${esc(model.id)}" title="Le nom à mettre dans le champ « model » de votre application · cliquer pour copier">${icon.copy}<span>${esc(model.id)}</span></button>` : ''}</div><div class="title-side">${ratingGauge(verdict)}${entry.installedAt ? `<button class="heart ${state.favorite === model.id ? 'on' : ''}" data-action="favorite" data-id="${model.id}" title="${state.favorite === model.id ? 'Modèle par défaut · cliquer pour retirer' : 'En faire le modèle par défaut'}" aria-pressed="${state.favorite === model.id}">${icon.heart}</button>` : ''}</div></div>
     <p class="tagline">${esc(model.tagline)}</p>
     <div class="facts">
       <div title="Nombre de paramètres${moeOf(model) ? ' (tous les experts du MoE)' : ''}"><div class="k">Taille</div>${model.paramsB ? `<div class="v">${fr(model.paramsB, model.paramsB % 1 ? 1 : 0)}B${moeOf(model) ? '<small>MoE</small>' : ''}</div>` : '<div class="v est">—</div>'}</div>
-      <div><div class="k">Intelligence</div>${iqOf(model.id).value != null ? `<div class="v ${iqOf(model.id).tested ? '' : 'est'}">${iqOf(model.id).tested ? '' : '~'}${iqOf(model.id).value}<small>${iqOf(model.id).tested ? '/100' : 'estimée'}</small></div>` : '<div class="v est">à tester</div>'}</div>
+      <div><div class="k">Intelligence</div>${iqOf(model.id).value != null ? `<div class="v ${iqOf(model.id).tested ? '' : 'est'}">${iqOf(model.id).tested ? '' : '~'}${iqOf(model.id).value}<small>${iqOf(model.id).tested ? '/125' : 'estimée'}</small></div>` : '<div class="v est">à tester</div>'}</div>
       <div><div class="k">Vitesse ici</div>${speed}</div>
       <div><div class="k">Contexte ici</div><div class="v ${verdict.context && verdict.context < 102400 ? 'bad' : ''}">${verdict.context ? kTokens(verdict.context) : '—'}</div></div>
-      <div title="Intelligence 40 % · taille 25 % · vitesse 20 % · contexte 15 %"><div class="k">Note globale</div>${verdict.rating != null ? `<div class="v ${verdict.ratingMeasured ? '' : 'est'}">${verdict.ratingMeasured ? '' : '~'}${verdict.rating}<small>${verdict.ratingMeasured ? '/100' : 'estimée'}</small></div>` : '<div class="v est">—</div>'}</div>
-    </div>
+          </div>
     ${domainStrip(model.id)}
     ${isTarget ? whyTarget(model.id) : ''}
     ${off ? `<p class="why">Pas pour cette machine : ${esc(verdict.reasons.join(', '))}.</p>` : ''}
@@ -952,6 +972,40 @@ function renderImageModels() {
     ${suggestions.length ? suggestions.map(imageSuggestionRow).join('') : `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de plus à proposer pour cette machine : les familles qui tiennent sur votre carte sont déjà dans la liste.' : 'Harn regarde une fois par jour les modèles d’images les plus appréciés sur Hugging Face, et ne garde que ceux qui tournent sur cette machine.'}</p>`}`);
 }
 
+// ── Tri des modèles ─────────────────────────────────────────
+// « Récents » : le modèle chargé, puis la dernière utilisation par un client (pi, un agent, une
+// clé ; pas les bancs de Harn). Les autres critères dans les deux sens. Un modèle sans valeur
+// (jamais utilisé, vitesse inconnue) passe toujours en fin de liste. Choix gardé dans ce navigateur.
+const SORTS = [
+  ['recent', 'Récents', (m) => (state.active?.modelId === m.id ? Infinity : Date.parse(state.profiles[m.id]?.lastUsedAt ?? '') || null)],
+  ['size', 'Taille', (m) => m.paramsB ?? null],
+  ['iq', 'Intelligence', (m) => iqOf(m.id).value],
+  ['speed', 'Vitesse', (m) => state.profiles[m.id]?.bench?.winner?.tps ?? verdictOf(m.id)?.tps ?? null],
+  ['rating', 'Note globale', (m) => verdictOf(m.id)?.rating ?? m.rating?.score ?? null],
+];
+let modelSort = { key: 'recent', dir: 'desc' };
+try { modelSort = { ...modelSort, ...JSON.parse(localStorage.getItem('harn.model-sort') ?? '{}') }; } catch {}
+if (!SORTS.some(([key]) => key === modelSort.key)) modelSort.key = 'recent';
+function sortModels(list, fallback) {
+  const value = SORTS.find(([key]) => key === modelSort.key)[2];
+  const sign = modelSort.dir === 'asc' ? 1 : -1;
+  return [...list].sort((a, b) => {
+    const va = value(a); const vb = value(b);
+    if (va === null || vb === null) return (va === null) - (vb === null) || fallback(a, b);
+    return (va - vb) * sign || fallback(a, b);
+  });
+}
+function sortBar() {
+  const recent = modelSort.key === 'recent';
+  return `<div class="sort-bar" role="group" aria-label="Trier les modèles">
+    <span>Trier par</span>
+    <div class="modes">${SORTS.map(([key, label]) => `<button type="button" data-action="model-sort" data-id="${key}" class="${modelSort.key === key ? 'on' : ''}" aria-pressed="${modelSort.key === key}">${label}</button>`).join('')}</div>
+    <button type="button" class="btn small ghost" data-action="model-sort-dir" title="Inverser l’ordre">${recent
+      ? (modelSort.dir === 'desc' ? '↓ Plus récent d’abord' : '↑ Plus ancien d’abord')
+      : (modelSort.dir === 'desc' ? '↓ Décroissant' : '↑ Croissant')}</button>
+  </div>`;
+}
+
 function renderModels() {
   mount('models', `<div class="view">
     <div class="view-head"><div><h1>Modèles</h1><p>Pour chacun, ce que votre machine en tire : contexte qui tient sur la carte, vitesse attendue à 100k, intelligence.</p></div></div>
@@ -983,14 +1037,18 @@ function renderModels() {
   </div>`);
   renderImageModels();
   paint('gpu-banner', gpuBanner());
-  const mine = catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id);
+  const byQuality = (a, b) => (b.quality ?? 0) - (a.quality ?? 0);
+  const mine = sortModels(catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id), byQuality);
   const upgrade = catalog.filter((m) => !mine.includes(m) && state.plan?.upgradeModel === m.id);
-  const rest = catalog.filter((m) => !mine.includes(m) && !upgrade.includes(m)).sort((a, b) => b.quality - a.quality);
+  // Les modèles non installés n'ont pas d'historique : « Récents » les laisse par intelligence.
+  const others = catalog.filter((m) => !mine.includes(m) && !upgrade.includes(m));
+  const rest = modelSort.key === 'recent' ? others.sort(byQuality) : sortModels(others, byQuality);
   const ok = rest.filter((m) => verdictOf(m.id)?.fit !== 'no');
   const no = rest.filter((m) => verdictOf(m.id)?.fit === 'no');
   const featured = [...mine.map((m) => ['Sur votre machine', m]), ...upgrade.map((m) => ['Recommandé pour vous', m])];
   const group = (title, hint, list) => (list.length ? `<div class="group-title"><h2>${title}</h2><span>${hint}</span></div><div class="models">${list.map(modelCard).join('')}</div>` : '');
   paint('models-body', `<div style="display:grid;gap:20px">
+    ${sortBar()}
     <div class="models featured">${featured.map(([title, m]) => `<div class="feature"><div class="group-title"><h2>${title}</h2></div>${modelCard(m)}</div>`).join('')}</div>
     ${hubSection()}
     ${group('Compatibles', `${ok.length} modèles`, ok)}
@@ -1065,16 +1123,16 @@ function renderTuning() {
   }
   const profileIq = state.profiles[id] ?? {};
   const iq = iqResult(id);
-  const LEVEL = { aucun: 'aucun palier', plancher: 'plancher', difficile: 'palier difficile', limite: 'palier limite' };
+  const LEVEL = { aucun: 'aucun palier', plancher: 'plancher', difficile: 'palier difficile', limite: 'palier limite', expert: 'palier expert' };
   const VERB = { concis: 'Réflexion concise', normal: 'Réflexion normale', bavard: 'Réflexion trop longue' };
   paint('tune-iq', `<div class="view-head" style="margin-bottom:6px"><div><div class="label">Banc d’intelligence</div>
-      <p style="margin-top:6px;font-size:calc(13.5px * var(--fs))">Épreuves corrigées automatiquement en cinq domaines : outils, code, raisonnement, long contexte, honnêteté. Chaque domaine commence au palier difficile, monte au palier limite s’il le réussit, redescend au plancher sinon. Une seule note sur 100 pour comparer tous les modèles : 100 est rare.</p></div>
+      <p style="margin-top:6px;font-size:calc(13.5px * var(--fs))">Épreuves corrigées automatiquement en cinq domaines : outils, code, raisonnement, long contexte, honnêteté. Chaque domaine commence au palier difficile, monte au palier limite s’il le réussit, redescend au plancher sinon ; un domaine réussi en entier (100) passe au palier expert, jusqu’à 125. Une seule note pour comparer tous les modèles.</p></div>
       ${id ? `<button class="btn" data-action="iq" data-id="${id}" ${profileIq.iqRunning || state.active?.status !== 'ready' ? 'disabled' : ''}>${iq ? 'Relancer' : 'Lancer le banc'}</button>` : ''}</div>
     ${profileIq.iqRunning ? `<span class="pill prefill"><span class="dot"></span>${esc(profileIq.iqRunning)}</span>` : ''}
-    ${iq ? `<div class="iq-score"><span class="num">${iq.score}<small>/100</small></span><span>${iq.seconds} s · ${clock(iq.at)}</span>
-        ${modelOf(id)?.rating ? `<span class="badge" title="Intelligence 40 % · taille ${modelOf(id).rating.paramsB ?? '?'}B${modelOf(id).rating.moe ? ' MoE' : ''} 25 % · vitesse mesurée 20 % · contexte 15 %">Note globale ${modelOf(id).rating.score}/100</span>` : ''}
-        <span class="badge ${iq.verbosity.label === 'bavard' ? 'warn' : ''}" title="${iq.verbosity.avgTokens} tokens par réponse en moyenne${iq.verbosity.truncated ? ` · ${iq.verbosity.truncated} réponse(s) coupée(s) faute de budget` : ''}">${VERB[iq.verbosity.label]} · ${fr(iq.verbosity.avgTokens)} tokens/réponse</span></div>
-      <div class="iq-cats">${CATS.map(([key, label, weight]) => { const c = iq.categories[key]; return `<div class="iq-cat"><div class="top"><span>${label} <small>${weight} %</small></span><b>${c.points}/100</b></div><div class="bar"><i style="width:${c.points}%"></i></div><div class="iq-mini">${LEVEL[c.level]}${c.tiers.plancher.played ? '' : ' · plancher acquis'}</div></div>`; }).join('')}</div>
+    ${iq ? `<div class="iq-score"><span class="num">${iq.score}<small>/125</small></span><span>${iq.seconds} s · ${clock(iq.at)}</span>
+        ${modelOf(id)?.rating ? `<span class="badge" title="Intelligence 40 % · taille ${modelOf(id).rating.paramsB ?? '?'}B${modelOf(id).rating.moe ? ' MoE' : ''} 25 % · temps de réponse 20 %${modelOf(id).rating.replySeconds ? ` (${fr(modelOf(id).rating.replySeconds, 1)} s par réponse)` : ''} · contexte 15 %">Note globale ${modelOf(id).rating.score}</span>` : ''}
+        <span class="badge ${iq.verbosity.label === 'bavard' ? 'warn' : ''}" title="${iq.verbosity.replyTokens !== undefined ? 'Tokens par réponse au palier difficile, commun à tous les modèles' : 'Moyenne sur tout le test (ancien test : relancer pour la mesure au palier difficile)'}${iq.verbosity.truncated ? ` · ${iq.verbosity.truncated} réponse(s) coupée(s) faute de budget` : ''}">${VERB[iq.verbosity.label]} · ${fr(iq.verbosity.replyTokens ?? iq.verbosity.avgTokens)} tokens/réponse${iq.verbosity.truncated ? ` · ${iq.verbosity.truncated} coupée${iq.verbosity.truncated > 1 ? 's' : ''}` : ''}</span></div>
+      <div class="iq-cats">${CATS.map(([key, label, weight]) => { const c = iq.categories[key]; return `<div class="iq-cat"><div class="top"><span>${label} <small>${weight} %</small></span><b>${c.points}/125</b></div><div class="bar"><i style="width:${c.points / 1.25}%"></i></div><div class="iq-mini">${LEVEL[c.level]}${c.tiers.plancher.played ? '' : ' · plancher acquis'}${c.tiers.expert?.played ? ` · expert ${Math.round(c.tiers.expert.ratio * 25)}/25` : ''}</div></div>`; }).join('')}</div>
       <div class="iq-grid">${iq.answers.map((x) => {
         const cls = x.score >= 1 ? 'ok' : x.long ? 'long' : x.score > 0 ? 'part' : 'ko';
         const mark = x.score >= 1 ? '✓' : x.long ? '…' : x.score > 0 ? '½' : '✗';
@@ -1604,6 +1662,13 @@ app.addEventListener('click', async (event) => {
     if (action === 'retry') { await post(`/api/models/${id}/retry`); toast('Nouvelle tentative'); }
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }
     if (action === 'iq') { await post(`/api/models/${id}/iq`); toast('Test d’intelligence lancé'); }
+    if (action === 'model-sort' || action === 'model-sort-dir') {
+      if (action === 'model-sort-dir') modelSort.dir = modelSort.dir === 'desc' ? 'asc' : 'desc';
+      // Nouveau critère : du plus grand au plus petit (le plus récent, le plus gros…) d'abord.
+      else if (modelSort.key !== id) modelSort = { key: id, dir: 'desc' };
+      try { localStorage.setItem('harn.model-sort', JSON.stringify(modelSort)); } catch {}
+      return render();
+    }
     if (action === 'usage') {
       const r = await post('/api/prefs', { usage: id });
       state.prefs = r.prefs;

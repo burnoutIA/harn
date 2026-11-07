@@ -44,6 +44,8 @@ def main():
     p.add_argument("--echauffement", type=float, default=0.05)
     p.add_argument("--max-paires", type=int, default=0)
     p.add_argument("--pas-max", type=int, default=0)
+    p.add_argument("--sauver-tous", type=int, default=0,
+                   help="sauver un point de contrôle tous les N pas (sortie/pas-N) pour le banc rapide en cours de route")
     p.add_argument("--entrainer-embeddings", action="store_true")
     p.add_argument("--code-distant", action="store_true")
     args = p.parse_args()
@@ -123,6 +125,11 @@ def main():
         journal.write(json.dumps(info) + "\n")
         journal.flush()
         print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in info.items()), flush=True)
+        if args.sauver_tous and pas % args.sauver_tous == 0 and pas < pas_total:
+            point = sortie / f"pas-{pas}"
+            modele.save_pretrained(point, safe_serialization=True, state_dict=etat_bf16(modele))
+            tok.save_pretrained(point)
+            print("point de contrôle :", point, flush=True)
     modele.save_pretrained(sortie / "modele", safe_serialization=True,
                            state_dict=etat_bf16(modele))
     tok.save_pretrained(sortie / "modele")

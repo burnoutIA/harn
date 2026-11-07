@@ -71,6 +71,19 @@ export async function systemChecks(hardware, { vramBaselineMiB = null } = {}) {
       });
     }
   }
+  // Ce que les autres applications occupent avant qu'on charge quoi que ce soit (toutes les
+  // plates-formes : sous Linux aussi, un jeu ou un vLLM resté seul peut tenir la carte).
+  if (hardware.primary?.freeMiB != null && !hardware.primary.integrated) {
+    const used = vramBaselineMiB ?? (hardware.primary.vramMiB - hardware.primary.freeMiB);
+    if (used > 2500) {
+      checks.push({
+        id: 'vram-busy',
+        level: 'warn',
+        title: `${(used / 1024).toFixed(1).replace('.', ',')} Go de mémoire graphique déjà pris`,
+        text: 'Un jeu, une autre IA ou un navigateur occupe la carte. Le modèle aura moins de contexte et ira moins vite.',
+      });
+    }
+  }
   if (process.platform !== 'win32') return checks;
 
   const scheme = (await quiet('powercfg', ['/getactivescheme'])).match(/[0-9a-f-]{36}/i)?.[0]?.toLowerCase();
@@ -106,16 +119,6 @@ export async function systemChecks(hardware, { vramBaselineMiB = null } = {}) {
       text: 'Évite que la carte se mette en économie d’énergie entre deux tokens.',
       how: 'Panneau de configuration NVIDIA → Gérer les paramètres 3D → « Mode de gestion de l’alimentation » → « Privilégier les performances maximales ».',
     });
-    // Ce que les autres applications occupent avant qu'on charge quoi que ce soit.
-    const used = vramBaselineMiB ?? (hardware.primary.vramMiB - hardware.primary.freeMiB);
-    if (used > 2500) {
-      checks.push({
-        id: 'vram-busy',
-        level: 'warn',
-        title: `${(used / 1024).toFixed(1).replace('.', ',')} Go de mémoire graphique déjà pris`,
-        text: 'Un jeu, une autre IA ou un navigateur occupe la carte. Le modèle aura moins de contexte et ira moins vite.',
-      });
-    }
   }
   if (!hardware.gitBash) checks.push({ id: 'git-bash', level: 'warn', title: 'Git pour Windows manquant', text: 'pi agent en a besoin pour exécuter des commandes.', how: 'Installer Git pour Windows depuis git-scm.com.' });
   return checks;

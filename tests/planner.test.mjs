@@ -22,6 +22,12 @@ test('sous Linux : Strata proposé comme sous Windows', () => {
   assert.ok(linux.verdicts.some((v) => /strata/.test(v.id) && v.fit !== 'no'));
 });
 
+test('Strata sur Radeon : la R9700 oui, une RX 6600 non', () => {
+  const amd = (name) => makePlan({ ...machine(32, 128), os: { platform: 'linux' }, primary: { vendor: 'amd', name, vramMiB: 32 * 1024 } });
+  assert.ok(amd('AMD Radeon AI PRO R9700').verdicts.some((v) => /strata/.test(v.id) && v.fit !== 'no'));
+  assert.ok(amd('AMD Radeon RX 6600').verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));
+});
+
 test('sous Linux sans Python venv : Strata hors de portée, avec la commande à lancer', () => {
   const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' }, python: { ok: false } });
   const strata = plan.verdicts.filter((v) => /strata/.test(v.id));

@@ -5,11 +5,15 @@
 #   ./recette.sh <org/modele-hugging-face> [nom] [options de sft.py…]
 #
 # 0. (avant, à part) générations vérifiées du modèle de base : generer.py puis selection.py
-#    → data/auto/sft.jsonl et data/auto/dpo.jsonl (voir README)
+#    → data/auto/dpo.jsonl (et data/auto/sft.jsonl) — voir README
 # 1. télécharge le modèle de base dans modeles/<nom> (s'il n'y est pas)
-# 2. construit data/melange.jsonl (s'il n'existe pas : on le régénère en le supprimant)
-# 3. SFT → sorties/<nom>-sft/ , journal dans sorties/<nom>-sft.log
-# 4. DPO sur le résultat, si data/auto/dpo.jsonl existe → sorties/<nom>-dpo/
+# 2. DPO sur le modèle de base → sorties/<nom>-dpo/ , points de contrôle tous les 50 pas
+#    (à passer au banc rapide pendant que l'entraînement continue : banc/evaluer.sh)
+#
+# SORTIE_DPO=<nom> : dossier de sortie du DPO (défaut <nom>-dpo), par ex. pour un 2e tour de boucle
+# SFT=1 : SFT avant le DPO (mélange data/melange.jsonl → sorties/<nom>-sft/). Mesuré nuisible sur
+#         le premier modèle (63,6 → 47,0 %, et 61,2 après DPO, contre 66,8 pour le DPO seul) : gardé
+#         pour d'autres données ou d'autres modèles.
 #
 # ESSAI=1        : 100 exemples, 3 pas — vérifie la chaîne (et que la perte n'est pas NaN)
 # CODE_DISTANT=1 : autorise le code Python livré avec le modèle (trust_remote_code), à relire avant
@@ -41,14 +45,17 @@ if compgen -G "modeles/$NOM/*.py" > /dev/null; then
   fi
 fi
 
-[ -f data/auto/sft.jsonl ] || echo "Attention : pas de data/auto/sft.jsonl (réponses vérifiées avec réflexion) : SFT sans elles." >&2
+[ -f data/auto/dpo.jsonl ] || { echo "Pas de data/auto/dpo.jsonl : faire l'étape 0 (generer.py puis selection.py)." >&2; exit 1; }
+DEPART=modeles/$NOM
 DPO_OPTIONS=()
+[ "${ESSAI:-}" = 1 ] && DPO_OPTIONS+=(--max-paires 8 --pas-max 1 --accum 4)
+if [ "${SFT:-}" = 1 ]; then
+[ -f data/auto/sft.jsonl ] || echo "Attention : pas de data/auto/sft.jsonl (réponses vérifiées avec réflexion) : SFT sans elles." >&2
 if [ "${ESSAI:-}" = 1 ]; then
   DONNEES=data/essai.jsonl
   [ -f "$DONNEES" ] || "$PY" donnees.py --echelle 0.002 --sortie "$DONNEES"
   SORTIE=sorties/$NOM-essai
   OPTIONS+=(--max-exemples 40 --pas-max 3 --accum 4 --sauver-tous 3)
-  DPO_OPTIONS+=(--max-paires 8 --pas-max 1 --accum 4)
 else
   DONNEES=data/melange.jsonl
   [ -f "$DONNEES" ] || "$PY" donnees.py --sortie "$DONNEES"
@@ -59,12 +66,13 @@ if [ ! -f "$SORTIE/modele/model.safetensors" ] || [ -n "${REFAIRE_SFT:-}" ]; the
   echo "== $(date -Is) SFT $BASE → $SORTIE" | tee -a "$SORTIE.log"
   "$PY" sft.py --modele "modeles/$NOM" --donnees "$DONNEES" --sortie "$SORTIE" "${OPTIONS[@]}" "$@" 2>&1 | tee -a "$SORTIE.log"
 fi
-
-if [ -f data/auto/dpo.jsonl ]; then
-  DPO=${SORTIE%-sft}-dpo
-  [ "${ESSAI:-}" = 1 ] && DPO=$SORTIE-dpo
-  CODE=()
-  [ "${CODE_DISTANT:-}" = 1 ] && CODE=(--code-distant)
-  echo "== $(date -Is) DPO $SORTIE → $DPO" | tee -a "$DPO.log"
-  "$PY" dpo.py --modele "$SORTIE/modele" --donnees data/auto/dpo.jsonl --sortie "$DPO" "${CODE[@]}" "${DPO_OPTIONS[@]}" 2>&1 | tee -a "$DPO.log"
+DEPART=$SORTIE/modele
 fi
+
+DPO=sorties/${SORTIE_DPO:-$NOM-dpo}
+[ "${ESSAI:-}" = 1 ] && DPO=sorties/$NOM-essai-dpo
+[ "${SFT:-}" = 1 ] && DPO=$DPO-apres-sft
+CODE=()
+[ "${CODE_DISTANT:-}" = 1 ] && CODE=(--code-distant)
+echo "== $(date -Is) DPO $DEPART → $DPO" | tee -a "$DPO.log"
+"$PY" dpo.py --modele "$DEPART" --donnees data/auto/dpo.jsonl --sortie "$DPO" --sauver-tous "${SAUVER_TOUS:-50}" "${CODE[@]}" "${DPO_OPTIONS[@]}" 2>&1 | tee -a "$DPO.log"

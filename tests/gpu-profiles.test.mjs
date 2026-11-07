@@ -59,4 +59,10 @@ test('moteur qui voit aussi la puce intégrée : la carte retenue lui est désig
   assert.deepEqual(deviceArgs([vulkan[1]], hardware), []);
   assert.deepEqual(deviceArgs(null, hardware), []);
   assert.deepEqual(deviceArgs(vulkan, { primary: { name: 'NVIDIA GeForce RTX 3090' } }), []);
+  // La numérotation Vulkan change d'un démarrage à l'autre : la carte suit son nom, pas son numéro.
+  assert.deepEqual(deviceArgs([vulkan[1], vulkan[0]].map((d, i) => ({ ...d, id: `Vulkan${i}` })), hardware), ['--device', 'Vulkan0']);
+  // Puce intégrée jamais choisie ; sans nom de carte principale, la seule carte dédiée.
+  const hip = [{ id: 'ROCm0', name: 'AMD Radeon AI PRO R9700 (gfx1201)' }, { id: 'ROCm1', name: 'AMD Radeon Graphics (gfx1036)' }];
+  assert.deepEqual(deviceArgs(hip, {}), ['--device', 'ROCm0']);
+  assert.deepEqual(deviceArgs(hip, { primary: { name: 'AMD Radeon Graphics' } }), []);
 });

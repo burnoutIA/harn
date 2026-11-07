@@ -144,6 +144,9 @@ export async function endRequest(request, { timings, usage, error, finish = null
   live.emit('live', snapshot);
   live.emit('request', record);
 
+  // Dernière utilisation (tri « récemment utilisés ») : les vraies requêtes, pas les bancs de Harn.
+  if (!error && isUse(record)) update((s) => { (s.profiles[record.model] ??= {}).lastUsedAt = record.at; });
+
   // Le débit réel d'usage, par modèle : c'est lui qu'on affiche à côté du banc.
   if (record.tps && !error && generated >= 64) {
     update((s) => {
@@ -159,11 +162,22 @@ export async function endRequest(request, { timings, usage, error, finish = null
   await appendFile(HISTORY_FILE, `${JSON.stringify(record)}\n`).catch(() => {});
 }
 
+// Une requête compte comme une utilisation si elle vient d'un client (pi, un agent, une clé),
+// pas des bancs et tests internes de Harn (clients « harn-… »).
+const isUse = (record) => Boolean(record?.model) && !/^harn-/.test(record.client ?? '');
+
 export async function loadRecent() {
   const text = await readFile(HISTORY_FILE, 'utf8').catch(() => '');
-  snapshot.recent = text.trim().split('\n').filter(Boolean).slice(-30).reverse().map((line) => {
+  const records = text.trim().split('\n').filter(Boolean).map((line) => {
     try { return JSON.parse(line); } catch { return null; }
   }).filter(Boolean);
+  snapshot.recent = records.slice(-30).reverse();
+  // Dernière utilisation de chaque modèle, retrouvée dans l'historique (installations d'avant ce
+  // suivi, ou état remis à zéro). Ne recule jamais une date déjà connue.
+  const last = {};
+  for (const r of records) if (!r.error && isUse(r) && !(last[r.model] >= r.at)) last[r.model] = r.at;
+  const stale = Object.entries(last).filter(([id, at]) => !(getState().profiles?.[id]?.lastUsedAt >= at));
+  if (stale.length) update((s) => { for (const [id, at] of stale) (s.profiles[id] ??= {}).lastUsedAt = at; });
 }
 
 export const activeModel = () => getState().active;

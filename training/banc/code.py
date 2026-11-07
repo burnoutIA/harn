@@ -9,6 +9,7 @@ sans réseau, lecture seule hors /travail, mémoire et processus plafonnés, 15 
 Usage : python banc/code.py --url http://127.0.0.1:4760 --etiquette base [--langages py,ts,php]
         [--limite 20] [--paralleles 4] [--max-tokens 8192] [--sans-reflexion] [--biais mots.json]
         [--ids liste.txt]
+Banc rapide (≈ 30 min au lieu de 75) : --ids banc/rapide.txt, puis banc/comparer.py contre la base.
 Sortie : banc/resultats/<etiquette>.json (réponses, code extrait, verdicts) + résumé à l'écran.
 """
 import argparse
@@ -171,8 +172,10 @@ def main():
         extra["logit_bias"] = [[mot, b] for mot, b in json.loads(Path(args.biais).read_text()).items()]
     toutes = [e for lang in args.langages.split(",") for e in epreuves(lang, args.limite)]
     if args.ids:
-        garder = set(Path(args.ids).read_text().split())
-        toutes = [e for e in toutes if e["id"] in garder]
+        # une épreuve par ligne : « langage:id » (les id MultiPL-E sont les mêmes d'un langage à
+        # l'autre) ou « id » seul ; lignes « # » ignorées
+        garder = {l.strip() for l in Path(args.ids).read_text().splitlines() if l.strip() and not l.startswith("#")}
+        toutes = [e for e in toutes if e["id"] in garder or f"{e['langage']}:{e['id']}" in garder]
     print(f"{len(toutes)} épreuves", flush=True)
     t0 = time.time()
     with cf.ThreadPoolExecutor(args.paralleles) as pool:

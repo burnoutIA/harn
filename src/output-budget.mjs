@@ -18,8 +18,8 @@ const round = (tokens) => Math.ceil(tokens / 1024) * 1024;
 export function thinkingStyle(model, iq = null) {
   if (model.thinking) return model.thinking;
   if (!model.reasoning) return 'short';
-  // Le test d'intelligence a vu des réponses coupées faute de budget : il pense long.
-  if (iq?.verbosity?.label === 'bavard') return 'long';
+  // Le test d'intelligence l'a vu réfléchir longtemps, ou couper des réponses faute de budget : il pense long.
+  if (iq?.verbosity?.label === 'bavard' || iq?.verbosity?.truncated > 0) return 'long';
   const text = `${model.repo ?? ''} ${model.name ?? ''} ${model.profile?.arch ?? ''}`;
   if (/ukisai|swift/i.test(text)) return 'normal';      // réflexion raccourcie à l'entraînement
   if (/qwen3|qwen35/i.test(text)) return 'long';

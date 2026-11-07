@@ -72,6 +72,7 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
 - Une architecture trop récente peut ne pas se charger avec le moteur installé : l'erreur du banc
   le dira. Signale-le plutôt que de réessayer.
 - Le banc d'intelligence (test adaptatif par paliers : plancher, difficile, limite, en cinq domaines)
-  donne une note sur 100 commune à tous les modèles. 100 est rare : il faut réussir les paliers
-  limite. Ce n'est pas un benchmark public, mais il départage bien.
+  donne une note commune à tous les modèles. 100 : tous les paliers limite réussis ; un domaine
+  réussi en entier passe au palier expert, jusqu'à 125. Ce n'est pas un benchmark public, mais il
+  départage bien.
   Signale aussi le marqueur de réflexion : un modèle « bavard » répond plus lentement à l'usage.

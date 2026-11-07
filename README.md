@@ -132,9 +132,9 @@ Sans Strata, le modèle s'installe sous llama.cpp, avec sa tête MTP à part si 
 
 ## Intelligence et note globale
 
-Chaque modèle installé passe le **banc d'intelligence** de Harn : une note sur 100, commune à
-tous les modèles, corrigée automatiquement (réponses uniques, appels d'outils contrôlés, numéros
-de ligne des erreurs), sans modèle juge.
+Chaque modèle installé passe le **banc d'intelligence** de Harn : une note jusqu'à 125, commune
+à tous les modèles, corrigée automatiquement (réponses uniques, appels d'outils contrôlés, numéros
+de ligne des erreurs, code exécuté contre des tests dans une bulle bubblewrap), sans modèle juge.
 
 | Domaine | Poids |
 |---|---|
@@ -146,12 +146,19 @@ de ligne des erreurs), sans modèle juge.
 
 Le test est adaptatif : chaque domaine commence au palier difficile ; réussi, il monte au palier
 limite, raté, il redescend au plancher. 100 n'est atteint qu'en réussissant les paliers limite.
-La longueur de réflexion n'entre pas dans la note : un modèle qui réfléchit longuement porte le
-marqueur « Bavard » (il est plus lent à l'usage, pas moins juste). « Retester l'intelligence »
+Un domaine réussi en entier passe au **palier expert** (25 points de plus, d'où 125) : écrire du
+Python, du Node et du Rust exécutés contre des tests, déboguer du React et du Twig, la cascade
+CSS, des outils paginés ou à données incohérentes, un journal deux fois plus long. Les petits
+modèles ne le jouent jamais : il ne sert qu'à départager les gros.
+La longueur de réflexion n'entre pas dans la note : un modèle qui écrit plus de 1800 tokens par
+réponse au palier difficile (le seul que tous jouent) porte le marqueur « Bavard » (il est plus
+lent à l'usage, pas moins juste). « Retester l'intelligence »
 relance le banc.
 
 La **note globale** dit ce que vaut un modèle sur cette machine : intelligence 40 %, taille 25 %
-(un MoE compte pour 75 % de ses paramètres), vitesse mesurée 20 %, contexte 15 %. C'est elle qui
+(un MoE compte pour 75 % de ses paramètres), temps de réponse 20 % (tokens par réponse ÷ tok/s
+mesurés : un modèle rapide mais bavard répond moins vite), contexte 15 %. Au-delà de 100 au banc
+d'intelligence, la note globale peut dépasser 100. C'est elle qui
 désigne le « Meilleur choix ici » (parmi les modèles qui tiennent 100k de contexte à 40 tok/s)
 et qui fait proposer, sur l'accueil, un modèle installé mieux
 noté que le modèle actuel.
@@ -348,7 +355,7 @@ signale dans ses vérifications ceux qui manquent.
 
 | Paquet | Pour quoi |
 |---|---|
-| `python3-venv` | Strata (grands MoE Flash-Next, NVIDIA 12 Go et plus, RTX 20 ou plus récente). Ubuntu et Debian livrent Python sans venv ; Fedora et Arch l'ont déjà. `Harn-install.sh` le propose. |
+| `python3-venv` | Strata (grands MoE Flash-Next, NVIDIA 12 Go et plus, RTX 20 ou plus récente, ou Radeon RX 7700 à 7900, RX 9060/9070, AI PRO R9700). Ubuntu et Debian livrent Python sans venv ; Fedora et Arch l'ont déjà. `Harn-install.sh` le propose. |
 | `nvidia-cuda-toolkit cmake build-essential` | compiler [llamAmpere](https://github.com/JakeATX/llamAmpere) sur une RTX 30 (voir ci-dessous) |
 | `tmux` | agents sans fenêtre, qui survivent à la fermeture du terminal (voir « Agents ») |
 | `wl-clipboard` (Wayland) ou `xclip` (X11) | copier du texte depuis pi (sélection à la souris, `/copy`) |

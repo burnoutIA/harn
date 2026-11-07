@@ -364,7 +364,11 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
 // main les yeux fermés. Monter de version = changer ce commit après l'avoir relu et essayé.
 // (Pas d'empreinte de l'archive : GitHub ne garantit pas qu'un zip régénéré reste identique ;
 // l'identifiant de commit, lui, désigne un contenu unique.)
-const STRATA_COMMIT = '6f32ec070f23ced9f50e704d854d775da52591ab';
+// v0.2.11 : moteur HIP pour les Radeon (gfx1100/1101/1200/1201), compilé par setup.sh avec la ROCm
+// des wheels TheRock d'AMD posée dans son .venv (sans sudo).
+const STRATA_COMMIT = 'c3b3f5035506f3e966f1b4b7b188aeaabae92f1d';
+// Le commit déplié dans Strata-main : un autre (installation antérieure) est remplacé en entier.
+const strataMark = (repoDir) => path.join(repoDir, '.harn-commit');
 
 export async function installStrata(model, contextSize, onLog = () => {}, { ggufDir = null } = {}) {
   const dir = path.join(DIRS.runtime, 'strata');
@@ -373,7 +377,8 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
   // le tar GNU ne sait pas ouvrir un zip.
   const script = LINUX ? 'setup.sh' : 'START-HERE.bat';
   const ext = LINUX ? 'tar.gz' : 'zip';
-  if (!(await stat(path.join(repoDir, script)).catch(() => null))) {
+  const current = (await readFile(strataMark(repoDir), 'utf8').catch(() => '')).trim();
+  if (current !== STRATA_COMMIT || !(await stat(path.join(repoDir, script)).catch(() => null))) {
     const zip = await download({
       id: 'runtime:strata',
       label: `Strata (runtime MoE, ${STRATA_COMMIT.slice(0, 7)})`,
@@ -386,6 +391,7 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
     await rm(unpacked, { recursive: true, force: true });
     await extract(zip, dir);
     await rename(unpacked, repoDir);
+    await writeFile(strataMark(repoDir), `${STRATA_COMMIT}\n`);
   }
   const args = [
     '--setup', '--family', model.strataFamily ?? 'swift', '--model', model.strataModel, '--context', String(contextSize),

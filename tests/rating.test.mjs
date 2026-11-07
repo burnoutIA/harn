@@ -1,9 +1,10 @@
 import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { IQ_VERSION } from '../src/iq-test.mjs';
 import { globalRating, paramsOf } from '../src/rating.mjs';
 
-const profile = (score, tps, context) => ({ iq: { version: 3, score }, bench: { winner: { tps } }, tuning: { context } });
+const profile = (score, tps, context) => ({ iq: { version: IQ_VERSION, score }, bench: { winner: { tps } }, tuning: { context } });
 
 test('taille lue dans le catalogue, l’étiquette GGUF ou le nom', () => {
   assert.equal(paramsOf({ paramsB: 125 }), 125);
@@ -20,11 +21,22 @@ test('à intelligence égale, le plus gros modèle passe devant', () => {
 });
 
 test('pas de note globale sans banc de vitesse', () => {
-  assert.equal(globalRating({ paramsB: 27 }, { iq: { version: 3, score: 100 } }), null);
+  assert.equal(globalRating({ paramsB: 27 }, { iq: { version: IQ_VERSION, score: 100 } }), null);
 });
 
 test('un MoE de 35B pèse un peu moins qu’un 27B dense', () => {
   const dense = globalRating({ paramsB: 27 }, profile(100, 90, 131072)).parts.taille;
   const moe = globalRating({ paramsB: 35, moe: { experts: 128, used: 8 } }, profile(100, 90, 131072)).parts.taille;
   assert.ok(moe < dense && moe > dense - 0.05);
+});
+
+test('vitesse : à intelligence égale, le modèle qui répond en moins de temps passe devant', () => {
+  const p = (tps, replyTokens) => ({ ...profile(100, tps, 131072), iq: { version: IQ_VERSION, score: 100, verbosity: { replyTokens } } });
+  const fastButVerbose = globalRating({ paramsB: 27 }, p(130, 2000));
+  const slowButConcise = globalRating({ paramsB: 27 }, p(65, 500));
+  assert.equal(fastButVerbose.replySeconds, 15.4);
+  assert.ok(slowButConcise.score > fastButVerbose.score);
+  // Sans mesure des tokens, l'ancienne échelle en tok/s : 20 tok/s → 0, 160 tok/s → 1.
+  assert.equal(globalRating({ paramsB: 27 }, profile(100, 20, 131072)).parts.vitesse, 0);
+  assert.equal(globalRating({ paramsB: 27 }, profile(100, 160, 131072)).parts.vitesse, 1);
 });
