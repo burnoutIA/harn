@@ -2,9 +2,11 @@ import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from
 import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders, setEngine } from './engine.mjs';
 import { engineInUse, inFlightOf } from './idle.mjs';
-import { followDemand } from './placement.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
-import { peerModels, peerRoute } from './peers.mjs';
+import { peerModels, peerRoute, peersWith } from './peers.mjs';
+import { freeVram } from './loading.mjs';
+import { followDemand, needMiB } from './placement.mjs';
+import { HEADROOM_MIN_MIB } from './tuner.mjs';
 import { getState } from './state.mjs';
 
 // L'endpoint OpenAI unique (/v1) que pi agent et toute autre application utilisent. Il relaie
@@ -48,7 +50,9 @@ export function modelsList() {
       object: 'model',
       owned_by: 'harn',
       created: Math.floor(new Date(state.models[id].installedAt).getTime() / 1000),
-      meta: { name: displayName(model), context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision, reasoning: Boolean(model.reasoning) },
+      // loaded, free : ce qu'une autre machine Harn regarde pour choisir où envoyer une requête.
+      meta: { name: displayName(model), context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision, reasoning: Boolean(model.reasoning),
+        loaded: state.engines?.[id]?.status === 'ready', free: state.engines?.[id]?.status === 'ready' && inFlightOf(id) < (state.engines[id].slots ?? 1) },
     };
   });
   // Les modèles des autres machines (peers.mjs) suivent, sous le nom « modele@machine ».
@@ -69,6 +73,30 @@ function sendJson(res, status, payload, headers = {}) {
 // lan : la requête arrive par le port ouvert au réseau. Là seulement, les pages web d'une autre
 // origine sont admises (CORS) : une clé y est toujours exigée, une page ne peut pas la deviner.
 // Sur la boucle locale, pas de CORS : une page web ne lit jamais une réponse de /v1.
+// Le même modèle ici et sur une autre machine (ou seulement là-bas) : la requête va là où elle sera
+// servie le plus tôt. Ici s'il y est chargé avec une session libre ; sinon sur une machine qui l'a
+// chargé et libre ; sinon ici s'il tient sans rien décharger ; sinon sur une machine joignable.
+// null : servi ici.
+async function bestMachine(modelId) {
+  if (!modelId || String(modelId).includes('@')) return null;
+  const remotes = peersWith(modelId);
+  if (!remotes.length) return null;
+  const state = getState();
+  const local = Boolean(state.models[modelId]?.installedAt && modelById(modelId));
+  const pick = (peer) => peerRoute(`${modelId}@${peer}`);
+  if (!local) return pick((remotes.find((r) => r.free) ?? remotes.find((r) => r.loaded) ?? remotes[0]).peer);
+  const engine = state.engines?.[modelId];
+  if (engine?.status === 'ready' && inFlightOf(modelId) < (engine.slots ?? 1)) return null;
+  const freeThere = remotes.find((r) => r.free);
+  if (freeThere) return pick(freeThere.peer);
+  if (!engine) {
+    const free = await freeVram();
+    if (free === null || free - needMiB(modelById(modelId), state.profiles[modelId]?.tuning ?? {}) >= HEADROOM_MIN_MIB) return null;
+    return pick((remotes.find((r) => r.loaded) ?? remotes[0]).peer);
+  }
+  return null;
+}
+
 // Réponses déjà relayées au moteur de chaque modèle (les autres attendent un chargement).
 const relayed = new Map();
 const relayedOf = (modelId) => relayed.get(modelId) ?? 0;
@@ -113,13 +141,15 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   // Un modèle d'une autre machine (« modele@pc2 ») : relayé tel quel, elle le charge elle-même.
   // Rien ne bouge ici : ni la carte, ni le modèle actif.
   const generative = body && /\/(chat\/)?completions$/.test(url.pathname);
-  const route = peerRoute(body?.model);
+  // Venue d'une autre machine Harn : servie ici, jamais renvoyée (pas d'aller-retour).
+  const hopped = Boolean(req.headers['x-harn-hop']);
+  const route = peerRoute(body?.model) ?? (hopped ? null : await bestMachine(body?.model));
   if (route) {
     return relay(req, res, {
       target: `${route.peer.url}${url.pathname.slice('/v1'.length)}${url.search}`,
-      headers: route.headers,
+      headers: { ...route.headers, 'X-Harn-Hop': '1' },
       payload: Buffer.from(JSON.stringify({ ...body, model: route.remoteId })),
-      measure: generative ? { model: body.model, endpoint: route.peer.url, engine: 'peer' } : null,
+      measure: generative ? { model: `${route.remoteId}@${route.peer.id}`, endpoint: route.peer.url, engine: 'peer' } : null,
       unreachable: `Machine « ${route.peer.name} » injoignable`,
       decision, cors,
     });

@@ -24,7 +24,7 @@ async function fakeHarn(key) {
     }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)) });
+    received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), hop: req.headers['x-harn-hop'] ?? null });
     res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '42' });
     res.end(JSON.stringify({ error: { message: 'carte occupée' } }));
   });
@@ -68,7 +68,16 @@ test('une machine ajoutée prête ses modèles, et la passerelle relaie vers ell
   const reply = await fetch(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'qwen-27b@pc2', messages: [{ role: 'user', content: 'salut' }] }) });
   assert.equal(reply.status, 503, 'l’erreur de l’autre machine remonte telle quelle');
   assert.equal(reply.headers.get('retry-after'), '42');
-  assert.deepEqual(received.at(-1), { url: '/v1/chat/completions', body: { model: 'qwen-27b', messages: [{ role: 'user', content: 'salut' }] } });
+  assert.deepEqual(received.at(-1), { url: '/v1/chat/completions', body: { model: 'qwen-27b', messages: [{ role: 'user', content: 'salut' }] }, hop: '1' });
+
+  // Sans @ : installé seulement sur l'autre machine, il y part tout seul.
+  const post = (body, headers = {}) => fetch(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const count = received.length;
+  assert.equal((await post({ model: 'qwen-27b', messages: [] })).status, 503);
+  assert.equal(received.length, count + 1, 'requête sans @ envoyée à la machine qui a le modèle');
+  // Venue d'une autre machine : jamais renvoyée (pas d'aller-retour entre deux Harn).
+  await post({ model: 'qwen-27b', messages: [] }, { 'X-Harn-Hop': '1' });
+  assert.equal(received.length, count + 1, 'requête déjà relayée renvoyée à une autre machine');
 
   // Un agent peut prendre un modèle de l'autre machine, et ne demande pas la carte d'ici.
   assert.deepEqual(remoteModels(), [{ id: 'qwen-27b@pc2', name: 'Qwen 27B · PC2', peer: 'pc2' }]);

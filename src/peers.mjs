@@ -128,6 +128,15 @@ export function peerModels() {
   })));
 }
 
+// Les machines joignables qui ont ce modèle (nom sans @), avec ce qu'elles en disaient au dernier
+// relevé : chargé, et avec une session libre.
+export function peersWith(modelId) {
+  return peers.flatMap((peer) => {
+    const m = seen.get(peer.id)?.ok ? seen.get(peer.id).models.find((x) => x.id === modelId) : null;
+    return m ? [{ peer: peer.id, loaded: Boolean(m.meta?.loaded), free: Boolean(m.meta?.free) }] : [];
+  });
+}
+
 // « modele@pc2 » → la machine et le nom du modèle chez elle ; null pour un modèle d'ici.
 export function peerRoute(modelId) {
   const at = String(modelId ?? '').lastIndexOf(SEPARATOR);
