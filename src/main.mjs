@@ -27,7 +27,7 @@ import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
 import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel, loraTargets } from './images.mjs';
 import { listLoras, loraDirOf } from './loras.mjs';
-import { agentForImages, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
+import { agentForImages, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, stopAgent, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
@@ -324,6 +324,7 @@ async function api(req, res, url) {
       if (parts[2] === '_overview') return json(res, 200, await openOverview());
       if (!parts[3]) return json(res, 200, await updateAgent(parts[2], body));
       if (parts[3] === 'launch') return json(res, 200, await launchAgent(parts[2]));
+      if (parts[3] === 'stop') return json(res, 200, await stopAgent(parts[2]));
       if (parts[3] === 'delete') return json(res, 200, await deleteAgent(parts[2]));
       if (parts[3] === 'loras' && parts[4] && parts[5] === 'delete') return json(res, 200, await deleteAgentLora(parts[2], decodeURIComponent(parts[4])));
     } catch (error) {

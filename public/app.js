@@ -1369,7 +1369,7 @@ function agentCard(agent) {
   ].join('');
   return `<section class="card agent"><form data-form="agent-edit" data-id="${esc(agent.id)}">
       <div class="head"><h3>${esc(agent.name)}${agent.running ? ' <span class="live" title="Son pi tourne : il répond sur Telegram, et « Ouvrir » rouvre son terminal">en marche</span>' : ''}</h3>
-        <div class="acts"><button class="btn small ghost" type="button" data-action="agent-delete" data-id="${esc(agent.id)}" title="Supprimer cet agent" aria-label="Supprimer cet agent">${icon.trash}</button><button class="btn small primary" type="button" data-action="agent-launch" data-id="${esc(agent.id)}">${icon.terminal} Ouvrir</button></div></div>
+        <div class="acts"><button class="btn small ghost" type="button" data-action="agent-delete" data-id="${esc(agent.id)}" title="Supprimer cet agent" aria-label="Supprimer cet agent">${icon.trash}</button>${agent.running ? `<button class="btn small ghost" type="button" data-action="agent-stop" data-id="${esc(agent.id)}" title="Arrête son pi et son bot Telegram ; « Ouvrir » reprend la conversation">${icon.power} Arrêter</button>` : ''}<button class="btn small primary" type="button" data-action="agent-launch" data-id="${esc(agent.id)}">${icon.terminal} Ouvrir</button></div></div>
       <label class="field"><span>Nom</span><input type="text" name="name" maxlength="60" value="${esc(agent.name)}" autocomplete="off" spellcheck="false"></label>
       <label class="field"><span>Modèle</span><select name="model">${models}</select></label>
       <div class="opts">${AGENT_OPTIONS.map(([key, label, help]) => `<label class="opt"><input type="checkbox" name="${key}" ${agent.options[key] ? 'checked' : ''}><span>${label}<small>${help}</small></span></label>`).join('')}</div>
@@ -1772,6 +1772,12 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       // Avec tmux, Harn sait qu'il tourne : la fiche le montre tout de suite.
       if (r.session) { agents = agents.map((a) => (a.id === id ? { ...a, running: true } : a)); renderAgents(); }
       toast(r.restarted || saved.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
+    }
+    if (action === 'agent-stop') {
+      const r = await post(`/api/agents/${id}/stop`);
+      agents = agents.map((a) => (a.id === id ? { ...a, running: false } : a));
+      renderAgents();
+      toast(`${r.name} est arrêté`);
     }
     if (action === 'agents-overview') {
       const r = await post('/api/agents/_overview');

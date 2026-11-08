@@ -199,6 +199,14 @@ export async function deleteAgent(id) {
   return agent;
 }
 
+// Son pi s'arrête, et son bot Telegram avec ; rien n'est effacé. « Ouvrir » reprend la conversation.
+// Coché « Lancer avec Harn », il repartira au prochain démarrage de Harn.
+export async function stopAgent(id) {
+  const agent = await readAgent(id);
+  await closePiSession(sessionOf(id));
+  return { name: agent.name };
+}
+
 // Le dossier pi de l'agent est réécrit à chaque lancement : modèles installés, options cochées.
 // Son modèle se charge à sa première requête, comme pour toute application branchée sur /v1.
 export async function launchAgent(id, { window = true } = {}) {
