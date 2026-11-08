@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { modelById, ownLauncher } from './catalog.mjs';
-import { describe, startEngine } from './engine.mjs';
+import { describe, startEngine, stopOthers } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
@@ -58,6 +58,8 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   const state = getState();
   const hardware = state.hardware;
   const profile = gpuProfile(hardware);
+  // Le banc mesure le modèle seul sur la carte : vitesse et marge VRAM ne valent qu'ainsi.
+  await stopOthers(modelId);
   // engine : le moteur imposé quand l'officiel ne sait pas charger ce modèle ({ fork, backend }).
   const initial = startFrom ?? await loadWithHeadroom(model, { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) });
 

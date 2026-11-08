@@ -1,6 +1,6 @@
 import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
-import { engineHeaders } from './engine.mjs';
+import { engineHeaders, setEngine } from './engine.mjs';
 import { engineInUse } from './idle.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { peerModels, peerRoute } from './peers.mjs';
@@ -131,12 +131,17 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (busy && busy !== modelId) {
     return sendJson(res, 503, { error: { message: `Harn mesure le modèle « ${busy} » : la carte graphique est occupée. Réessayez dans quelques minutes.` } }, { ...cors, 'Retry-After': '60' });
   }
-  // Le moteur sert jusqu'à la fin de la réponse : pas de déchargement pour inactivité d'ici là.
-  res.once('close', engineInUse());
-  if (state.active?.modelId !== modelId || state.active?.status !== 'ready') {
-    try { await activate(modelId); } catch (error) { return sendJson(res, 503, { error: { message: error.message } }, cors); }
+  // Le moteur sert jusqu'à la fin de la réponse : pas de déchargement (inactivité, place pour un
+  // autre modèle) d'ici là.
+  res.once('close', engineInUse(modelId));
+  // Pas chargé : on le charge, à côté des autres s'il tient (placement.mjs).
+  if (getState().engines?.[modelId]?.status !== 'ready') {
+    try { await activate(modelId); } catch (error) { return sendJson(res, error.status ?? 503, { error: { message: error.message } }, { ...cors, ...(error.status === 503 ? { 'Retry-After': '30' } : {}) }); }
   }
-  const active = getState().active;
+  const active = getState().engines[modelId];
+  if (active?.status !== 'ready') return sendJson(res, 503, { error: { message: 'Le moteur de ce modèle vient de s’arrêter : réessayez' } }, { ...cors, 'Retry-After': '5' });
+  // Le dernier modèle servi devient celui affiché comme actif.
+  if (getState().active?.modelId !== modelId) setEngine(modelId, { lastUse: Date.now() }, { focus: true });
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
   const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';

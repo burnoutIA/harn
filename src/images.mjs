@@ -350,8 +350,9 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
       // Une réponse en cours pour quelqu'un d'autre se termine d'abord (l'agent qui demande l'image,
       // lui, attend déjà son outil).
       for (let waited = 0; getLive().request && waited < 120_000; waited += 500) await new Promise((resolve) => setTimeout(resolve, 500));
-      const active = getState().active;
-      if (active?.status === 'ready' || active?.status === 'loading') textToRestore = active.modelId;
+      // Tous les modèles de texte chargés libèrent la carte ; ils reviennent après l'image.
+      const loaded = Object.entries(getState().engines ?? {}).filter(([, e]) => ['ready', 'loading'].includes(e.status)).map(([id]) => id);
+      if (loaded.length) textToRestore = loaded;
       await stopEngine();
       report = await runCli(engine, args);
       if (!(await stat(output).catch(() => null))) throw new Error('Le moteur d’images s’est terminé sans écrire d’image');
@@ -362,9 +363,10 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
     // qu'une autre image attend : il serait rechargé pour rien, et son chargement croiserait
     // celui du moteur d'images.
     imagesWaiting -= 1;
-    if (!imagesWaiting && textToRestore) {
-      activate(textToRestore).catch(() => {});
+    if (!imagesWaiting && textToRestore?.length) {
+      const restore = textToRestore;
       textToRestore = null;
+      (async () => { for (const id of restore) await activate(id).catch(() => {}); })();
     }
   }
   const seconds = +((Date.now() - started) / 1000).toFixed(1);

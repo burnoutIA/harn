@@ -125,7 +125,7 @@ function compactStatus() {
     return { id: m.id, name: displayName(m), installed: Boolean(s.models[m.id]?.installedAt), installing: Boolean(s.models[m.id]?.installing), tuning: s.models[m.id]?.tuneDetail ?? null, benchTps: p.bench?.winner?.tps ?? null, setting: p.bench?.winner?.label ?? null, reglagesEssayes: tried.length ? tried : null, context: p.tuning?.context ?? null, paramsB: paramsOf(m), noteGlobale: globalRating(m, p)?.score ?? null, intelligence: p.iq?.version === IQ_VERSION ? { score: p.iq.score, ...Object.fromEntries(Object.entries(p.iq.categories).map(([k, c]) => [k, `${c.points}/125, palier ${c.level}`])), reflexion: p.iq.verbosity.label } : null, iqRunning: p.iqRunning ?? null, quality: m.quality, error: s.models[m.id]?.error ?? null };
   });
   const engines = Object.entries(s.runtimes ?? {}).map(([id, r]) => `${id} ${r.tag ?? r.commit?.slice(0, 7) ?? ''}`.trim());
-  return { machine: s.plan?.summary?.machine, engines, objective: '100k-150k de contexte, 40 tok/s minimum, le modèle le plus intelligent possible', active: s.active ? { model: s.active.modelId, status: s.active.status } : null, busyWith: busyWith(), downloads, models };
+  return { machine: s.plan?.summary?.machine, engines, objective: '100k-150k de contexte, 40 tok/s minimum, le modèle le plus intelligent possible', active: s.active ? { model: s.active.modelId, status: s.active.status } : null, charges: Object.entries(s.engines ?? {}).map(([id, e]) => ({ model: id, status: e.status, vramMiB: s.profiles[id]?.vram?.mib ?? null })), busyWith: busyWith(), downloads, models };
 }
 
 function events(req, res) {
@@ -168,7 +168,7 @@ function activity() {
   for (const [id, p] of Object.entries(s.profiles ?? {})) if (p.iqRunning) out.push(`Test d’intelligence de ${name(id)} (${p.iqRunning})`);
   for (const [, d] of Object.entries(s.downloads ?? {})) if (!d.done) out.push(`Téléchargement de ${d.label}`);
   if (s.machineDoc?.analysing) out.push('Analyse de la machine par pi');
-  if (s.active?.status === 'loading') out.push(`Chargement de ${name(s.active.modelId)}`);
+  for (const [id, e] of Object.entries(s.engines ?? {})) if (e.status === 'loading') out.push(`Chargement de ${name(id)}`);
   if (getLive().request) out.push('Une réponse est en cours de génération');
   return out;
 }
@@ -427,6 +427,11 @@ async function api(req, res, url) {
     const file = (await writeMachineFacts()) ?? machineDocPath(getState().hardware);
     spawn('cmd.exe', ['/c', 'start', '""', file], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     return json(res, 200, { file });
+  }
+  // Décharger un seul modèle : les autres restent chargés.
+  if (parts[1] === 'models' && parts[2] && parts[3] === 'unload') {
+    await stopEngine(parts[2]);
+    return json(res, 200, { ok: true });
   }
   if (url.pathname === '/api/engine/stop') {
     // Libérer la carte : le moteur s'arrête et Harn s'en souvient (pas de rechargement au

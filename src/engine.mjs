@@ -18,7 +18,7 @@ const run = promisify(execFile);
 // Le moteur n'écoute que la boucle locale, mais llama-server répond aux pages web de toute
 // origine (CORS ouvert) : sans clé, n'importe quel site ouvert dans le navigateur pourrait s'en
 // servir et lire /slots. Une clé neuve à chaque lancement de Harn, connue de lui seul, passée par
-// fichier pour ne paraître ni dans la ligne de commande, ni dans l'état, ni dans engine.log.
+// fichier pour ne paraître ni dans la ligne de commande, ni dans l'état, ni dans les journaux.
 const ENGINE_KEY = randomBytes(32).toString('base64url');
 export const ENGINE_KEY_FILE = path.join(DIRS.data, 'engine.key');
 export const engineHeaders = () => ({ Authorization: `Bearer ${ENGINE_KEY}` });
@@ -131,13 +131,47 @@ export function llamaArgs(model, files, tuning, hardware) {
   return args;
 }
 
-let child = null;
-let stopping = false;
+// Les moteurs chargés, un par modèle. Plusieurs modèles peuvent tenir ensemble sur la carte
+// (placement.mjs décide) : chacun a son processus, son port, son relais et son propre arrêt.
+// state.engines les décrit pour l'interface ; state.active reste le dernier utilisé, pour tout ce
+// qui ne parle que d'« un » modèle (interface, carnet, pi).
+const running = new Map(); // id du modèle → { child, relay, stopping, stopInFlight }
+const slotOf = (modelId) => {
+  if (!running.has(modelId)) running.set(modelId, { child: null, relay: null, stopping: false, stopInFlight: null });
+  return running.get(modelId);
+};
+export const loadedModels = () => Object.keys(getState().engines ?? {});
 
-export function engineEndpoint() {
-  const active = getState().active;
-  if (!active || active.status !== 'ready') return null;
-  return active.endpoint;
+// Met à jour la fiche d'un moteur ; focus : il devient le modèle « actif » affiché. null : retiré.
+// Le modèle actif qui s'arrête laisse la place au plus récemment utilisé des autres ; s'il n'en
+// reste aucun, il reste affiché « arrêté » (reprise au démarrage, « En pause »).
+export function setEngine(modelId, patch, { focus = false } = {}) {
+  update((s) => {
+    s.engines ??= {};
+    if (patch === null) {
+      delete s.engines[modelId];
+      if (s.active?.modelId !== modelId) return;
+      const next = Object.values(s.engines).sort((a, b) => (b.lastUse ?? b.since ?? 0) - (a.lastUse ?? a.since ?? 0))[0];
+      s.active = next ? { ...next } : { ...s.active, status: 'stopped' };
+      return;
+    }
+    s.engines[modelId] = { ...(s.engines[modelId] ?? {}), ...patch };
+    if (focus || s.active?.modelId === modelId) s.active = { ...s.engines[modelId] };
+  });
+}
+
+export function engineEndpoint(modelId = getState().active?.modelId) {
+  const engine = getState().engines?.[modelId];
+  return engine?.status === 'ready' ? engine.endpoint : null;
+}
+
+// Un port libre pour un moteur de plus : le système en donne un, on le rend aussitôt.
+export function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
+  });
 }
 
 // Un moteur peut lancer ses propres processus : Strata (Python) démarre un moteur natif qui tient
@@ -162,9 +196,19 @@ async function killTree(pid) {
 // texte rechargé à ce moment-là le tuait en plein travail.
 export async function reapOrphans() {
   const sparing = isImageJob(busyWith());
-  const pids = (process.platform === 'win32' ? await windowsRuntimePids(sparing) : await linuxRuntimePids(sparing)).filter((pid) => pid !== child?.pid);
-  for (const pid of pids) await killTree(pid);
-  return pids;
+  // Les moteurs vivants et leurs enfants (même groupe de processus) ne sont pas des orphelins.
+  const ours = new Set([...running.values()].map((r) => r.child?.pid).filter(Boolean));
+  const pids = (process.platform === 'win32' ? await windowsRuntimePids(sparing) : await linuxRuntimePids(sparing));
+  const orphans = [];
+  for (const pid of pids) if (!ours.has(pid) && !ours.has(await groupOf(pid))) orphans.push(pid);
+  for (const pid of orphans) await killTree(pid);
+  return orphans;
+}
+// Le groupe de processus (5e champ de /proc/<pid>/stat, après le nom entre parenthèses).
+async function groupOf(pid) {
+  if (process.platform !== 'linux') return null;
+  const stat = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '');
+  return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]) || null;
 }
 
 async function windowsRuntimePids(sparingImages = false) {
@@ -203,10 +247,10 @@ async function linuxRuntimePids(sparingImages = false) {
   return pids;
 }
 
-async function waitReady(url, timeoutMs, exited) {
+async function waitReady(url, timeoutMs, exited, logFile = engineLog('moteur')) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (exited()) throw new Error('Le moteur s’est arrêté pendant le chargement (voir data/logs/engine.log)');
+    if (exited()) throw new Error(`Le moteur s’est arrêté pendant le chargement (voir data/logs/${path.basename(logFile)})`);
     // Avec la clé : la santé de la pile du Gemma Challenge passe par /v1/models, gardée par vLLM.
     const ok = await fetch(url, { headers: engineHeaders() }).then((response) => response.ok).catch(() => false);
     if (ok) return;
@@ -228,7 +272,6 @@ export function loadFailure(tail, label = 'ce modèle') {
 
 // Un moteur isolé (sandbox.mjs) n'a pas de réseau : il écoute sur un socket Unix, et ce relais
 // le rend joignable au port habituel. Le reste de Harn ne voit pas la différence.
-let relay = null;
 // Le relais garde ses connexions : à l'arrêt, il les coupe. server.close() seul attend la fin de
 // chacune, sans limite : une seule restée à moitié ouverte (moteur tué en pleine réponse) suffisait
 // à bloquer l'arrêt du moteur pour toujours, et avec lui tout chargement et toute relance de Harn.
@@ -249,9 +292,9 @@ export function startRelay(endpoint, socket) {
     server.listen(port, '127.0.0.1', () => resolve(server));
   });
 }
-function stopRelay() {
-  const server = relay;
-  relay = null;
+function stopRelay(slot) {
+  const server = slot.relay;
+  slot.relay = null;
   return closeRelay(server);
 }
 export function closeRelay(server) {
@@ -263,22 +306,28 @@ export function closeRelay(server) {
   });
 }
 
-export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null }) {
-  await stopEngine();
+// Lance le moteur d'un modèle. Seul un moteur du même modèle est remplacé : les autres restent
+// (placement.mjs a fait la place avant). alone : la carte pour lui seul (banc, premier démarrage).
+export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null }, { alone = false } = {}) {
+  if (alone) await stopEngine();
+  else await stopEngine(modelId);
+  const slot = slotOf(modelId);
   if (socket) {
     await rm(socket, { force: true });
-    relay = await startRelay(endpoint, socket);
+    slot.relay = await startRelay(endpoint, socket);
   }
   await reapOrphans();
   await mkdir(DIRS.logs, { recursive: true });
   await writeFile(ENGINE_KEY_FILE, `${ENGINE_KEY}\n`);
-  const log = createWriteStream(path.join(DIRS.logs, 'engine.log'), { flags: 'w' });
+  // Un journal par modèle : plusieurs moteurs tournent ensemble.
+  const logFile = engineLog(modelId);
+  const log = createWriteStream(logFile, { flags: 'w' });
   log.write(`# ${new Date().toISOString()}\n# ${command} ${args.join(' ')}\n\n`);
 
-  update((s) => { s.active = { modelId, label, status: 'loading', since: Date.now(), endpoint, command, args, cwd, error: null }; });
+  setEngine(modelId, { modelId, label, status: 'loading', since: Date.now(), endpoint, command, args, cwd, error: null, log: logFile }, { focus: true });
   let exited = false;
   const process_ = spawn(command, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, detached: process.platform !== 'win32' });
-  child = process_;
+  slot.child = process_;
   process_.stdout.pipe(log, { end: false });
   process_.stderr.pipe(log, { end: false });
   // La fin du journal, pour dire pourquoi un chargement a échoué.
@@ -291,53 +340,69 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   process_.on('error', (error) => {
     spawnError = error;
     exited = true;
-    if (child === process_) child = null;
+    if (slot.child === process_) slot.child = null;
   });
   process_.on('exit', (code) => {
     exited = true;
-    if (child === process_) child = null;
-    if (!stopping && getState().active?.modelId === modelId) {
-      update((s) => { s.active = { ...s.active, status: 'crashed', error: `Le moteur s’est arrêté (code ${code})` }; });
+    if (slot.child !== process_) return;
+    slot.child = null;
+    // Un moteur mort sans qu'on l'arrête : l'état le dit, et son relais est fermé (sinon une
+    // requête attendrait un moteur disparu). La prochaine requête le recharge.
+    if (!slot.stopping && getState().engines?.[modelId]) {
+      setEngine(modelId, { status: 'crashed', error: `Le moteur s’est arrêté (code ${code})` });
+      stopRelay(slot);
     }
   });
 
   try {
-    await waitReady(health, 900_000, () => exited);
+    await waitReady(health, 900_000, () => exited, logFile);
   } catch (error) {
     await killTree(process_.pid);
-    await stopRelay();
+    await stopRelay(slot);
     const cause = loadFailure(tail, label);
     // tensors : le fichier ne contient pas les tenseurs (ou la tête MTP) que ses métadonnées annoncent.
     const failure = spawnError ? Object.assign(new Error(`Le moteur n’a pas pu être lancé : ${spawnError.message}`), { fatal: true })
       : cause ? Object.assign(new Error(cause), { fatal: true, tensors: /wrong number of tensors|doesn't contain MTP layers/.test(tail) }) : error;
-    update((s) => { s.active = { ...s.active, status: 'error', error: failure.message }; });
+    setEngine(modelId, { status: 'error', error: failure.message });
     throw failure;
   }
-  update((s) => { s.active = { ...s.active, status: 'ready', readyAt: Date.now(), loadSeconds: (Date.now() - s.active.since) / 1000 }; });
-  return getState().active;
+  const now = Date.now();
+  setEngine(modelId, { status: 'ready', readyAt: now, lastUse: now, loadSeconds: (now - getState().engines[modelId].since) / 1000 });
+  return getState().engines[modelId];
+}
+export const engineLog = (modelId) => path.join(DIRS.logs, `engine-${String(modelId).replace(/[^\w.-]/g, '_')}.log`);
+
+// Arrête le moteur d'un modèle, ou tous sans argument (libérer la carte, image, arrêt de Harn).
+// Deux arrêts demandés ensemble (inactivité, puis une requête qui recharge) n'en font qu'un : le
+// second ne doit pas reprendre comme orphelin le moteur que le premier vient de laisser lancer.
+export function stopEngine(modelId) {
+  if (modelId === undefined) return Promise.all([...new Set([...running.keys(), ...loadedModels()])].map((id) => stopEngine(id))).then(() => {});
+  const slot = slotOf(modelId);
+  slot.stopInFlight ??= stopNow(modelId, slot).finally(() => { slot.stopInFlight = null; });
+  return slot.stopInFlight;
 }
 
-// Deux arrêts demandés ensemble (inactivité, puis une requête qui recharge) n'en font qu'un :
-// le second ne doit pas reprendre comme orphelin le moteur que le premier vient de laisser lancer.
-let stopInFlight = null;
-export function stopEngine() {
-  stopInFlight ??= stopNow().finally(() => { stopInFlight = null; });
-  return stopInFlight;
-}
+// Tous les moteurs sauf celui de keep (banc : le modèle mesuré seul sur la carte).
+export const stopOthers = (keep) => Promise.all(loadedModels().filter((id) => id !== keep).map((id) => stopEngine(id))).then(() => {});
 
-async function stopNow() {
-  if (!child) return stopRelay();
-  stopping = true;
-  const pid = child.pid;
-  await killTree(pid);
+async function stopNow(modelId, slot) {
+  if (!slot.child) {
+    await stopRelay(slot);
+    if (getState().engines?.[modelId]) setEngine(modelId, null);
+    return;
+  }
+  slot.stopping = true;
+  const child = slot.child;
+  await killTree(child.pid);
   await new Promise((resolve) => {
-    if (!child) return resolve();
+    if (slot.child !== child) return resolve();
     child.once('exit', resolve);
     setTimeout(resolve, 10_000);
   });
-  child = null;
-  stopping = false;
-  await stopRelay();
+  slot.child = null;
+  slot.stopping = false;
+  await stopRelay(slot);
+  setEngine(modelId, null);
   // Ce qui aurait échappé au groupe (processus détaché de son parent) : repris par son chemin.
   await reapOrphans();
   // Le pilote rend la VRAM avec un temps de retard : on attend qu'elle se stabilise, sinon le
@@ -349,7 +414,6 @@ async function stopNow() {
     previous = free;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  update((s) => { if (s.active) s.active.status = 'stopped'; });
 }
 
 export function modelFiles(modelId) {

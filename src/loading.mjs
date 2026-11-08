@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { displayName, ownLauncher } from './catalog.mjs';
-import { ENGINE_KEY_FILE, defaultTuning, engineKey, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
+import { ENGINE_KEY_FILE, defaultTuning, engineKey, freePort, layersOf, llamaArgs, modelFiles, startEngine } from './engine.mjs';
 import { engineSheet } from './engines.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -120,7 +120,7 @@ function nameStrataConfig(file, modelId) {
 // ~5 % (R9700, Qwen3.8-27B : 45,7 → 43,7 ms en code, 50,1 → 48,1 ms vers 32k), sans rien coûter
 // à la lecture des prompts.
 export const radeonVulkanEnv = (runtime, hardware) => (runtime?.backend === 'vulkan' && hardware?.primary?.vendor === 'amd' ? { GGML_VK_ALLOW_GRAPHICS_QUEUE: '1' } : {});
-export function recipeFor(model, tuning) {
+export function recipeFor(model, tuning, { port = PORTS.engine } = {}) {
   const state = getState();
   if (model.engine === 'strata') {
     const runtime = state.runtimes[`strata-${model.strataModel}`];
@@ -193,15 +193,17 @@ export function recipeFor(model, tuning) {
   const runtime = state.runtimes[`${runtimeKind(model, tuning)}-${tuning.backend}`];
   if (!runtime) throw new Error(`Moteur ${runtimeKind(model, tuning)} ${tuning.backend} non installé`);
   const files = modelFiles(model.id);
+  const serverArgs = llamaArgs(model, files, tuning, state.hardware);
+  serverArgs[serverArgs.indexOf('--port') + 1] = String(port);
   const recipe = {
     modelId: model.id,
     label: displayName(model),
     command: runtime.serverPath,
-    args: [...(runtime.serverArgs ?? []), ...llamaArgs(model, files, tuning, state.hardware), ...deviceArgs(runtime.devices, state.hardware, { draft: tuning.spec?.type === 'dflash' })],
+    args: [...(runtime.serverArgs ?? []), ...serverArgs, ...deviceArgs(runtime.devices, state.hardware, { draft: tuning.spec?.type === 'dflash' })],
     cwd: runtime.dir,
     env: { ...engineEnv(runtime.dir, runtime.libs), ...radeonVulkanEnv(runtime, state.hardware), ...(engineSheet(tuning.fork)?.env ?? {}) },
-    endpoint: `http://127.0.0.1:${PORTS.engine}`,
-    health: `http://127.0.0.1:${PORTS.engine}/health`,
+    endpoint: `http://127.0.0.1:${port}`,
+    health: `http://127.0.0.1:${port}/health`,
   };
   // Moteur ajouté avec l'accord de l'utilisateur (PR, fork) : il tourne dans la bulle, sans
   // réseau, et ne voit que ses fichiers, ceux du modèle et la clé du moteur (sandbox.mjs).
@@ -209,7 +211,7 @@ export function recipeFor(model, tuning) {
   if (!sandboxReady()) throw new Error(`${engineSheet(tuning.fork).label} doit tourner isolé, et bubblewrap ne répond plus : ${SANDBOX_INSTALL}`);
   const socketDir = path.join(DIRS.runtime, tuning.fork, 'run');
   mkdirSync(socketDir, { recursive: true });
-  const socket = path.join(socketDir, 'engine.sock');
+  const socket = path.join(socketDir, `engine-${port}.sock`);
   const args = [...recipe.args];
   args[args.indexOf('--host') + 1] = socket;
   // Tous les fichiers du modèle (un GGUF découpé en parties compris), là où ils sont vraiment ;
@@ -238,10 +240,23 @@ function smaller(tuning) {
 }
 // Plus rien à céder : plancher de contexte atteint et couches déjà partagées.
 const exhausted = (tuning) => tuning.context <= OBJECTIVE.floorContext && layersOf(tuning) === 'auto';
-// Chaque chargement prend un numéro : si un autre modèle est demandé entre-temps, celui-ci
-// abandonne au lieu de réessayer (sinon les deux se tueraient le moteur à tour de rôle).
-let loadTicket = 0;
-const superseded = () => new Error('Chargement remplacé par celui d’un autre modèle');
+// Chaque chargement d'un modèle prend un numéro : relancé entre-temps (autre réglage), l'ancien
+// abandonne au lieu de réessayer. Deux modèles différents, eux, se chargent l'un après l'autre
+// (placement.mjs) sans s'annuler.
+const loadTickets = new Map();
+const superseded = () => new Error('Chargement remplacé par un autre chargement de ce modèle');
+// Le port d'un moteur llama.cpp : l'habituel s'il est libre, sinon un autre (plusieurs modèles
+// chargés ensemble). Un modèle rechargé garde le sien.
+export async function portFor(modelId) {
+  const engines = getState().engines ?? {};
+  const used = new Set(Object.entries(engines).filter(([id]) => id !== modelId).map(([, e]) => Number(new URL(e.endpoint ?? 'http://x:0').port)));
+  const own = Number(new URL(engines[modelId]?.endpoint ?? 'http://x:0').port);
+  if (own && !used.has(own)) return own;
+  if (!used.has(PORTS.engine)) return PORTS.engine;
+  let port;
+  do port = await freePort(); while (used.has(port));
+  return port;
+}
 // La carte retenue par Harn, désignée au moteur quand il en voit plusieurs : la puce intégrée
 // d'un Ryzen apparaît en Vulkan comme en HIP, avec la RAM pour mémoire. llama.cpp l'écarte
 // aujourd'hui de lui-même ; on ne dépend pas de ce choix. Rien si le nom n'est pas reconnu.
@@ -260,8 +275,12 @@ export function deviceArgs(devices, hardware, { draft = false } = {}) {
   return ['--device', matching[0].id, ...(draft ? ['--device-draft', matching[0].id] : [])];
 }
 
-export async function loadWithHeadroom(model, tuning) {
-  const ticket = ++loadTicket;
+// alone : la carte pour ce modèle seul (banc, premier démarrage) ; sinon il rejoint ceux déjà
+// chargés, à qui placement.mjs a fait la place.
+export async function loadWithHeadroom(model, tuning, { alone = true, freeMore = null } = {}) {
+  const ticket = (loadTickets.get(model.id) ?? 0) + 1;
+  loadTickets.set(model.id, ticket);
+  const current_ = () => loadTickets.get(model.id);
   let current = { ...tuning };
   // Le build publié pour ce backend manque encore (nouvelle carte : Vulkan après CUDA) : on le
   // télécharge plutôt que d'échouer. Les forks compilés, eux, passent par leur fiche moteur.
@@ -277,12 +296,12 @@ export async function loadWithHeadroom(model, tuning) {
     update((s) => { if (s.runtimes[runtimeId]) s.runtimes[runtimeId].devices = devices; });
   }
   for (let attempt = 0; attempt < 14; attempt += 1) {
-    if (ticket !== loadTicket) throw superseded();
+    if (ticket !== current_()) throw superseded();
     let active;
     try {
-      active = await startEngine(recipeFor(model, current));
+      active = await startEngine(recipeFor(model, current, { port: alone ? PORTS.engine : await portFor(model.id) }), { alone });
     } catch (error) {
-      if (ticket !== loadTicket) throw superseded();
+      if (ticket !== current_()) throw superseded();
       // Un fichier qui annonce une couche MTP qu'il ne contient pas (convertisseur d'une autre
       // version) : on recharge en ignorant cette annonce avant de conclure à l'échec.
       if (error.tensors && model.profile?.mtp && !current.noNextn) { current = { ...current, noNextn: true, spec: { type: 'none' } }; continue; }
@@ -290,7 +309,9 @@ export async function loadWithHeadroom(model, tuning) {
       current = smaller(current);
       continue;
     }
-    const headroomMiB = await freeVram();
+    let headroomMiB = await freeVram();
+    // À côté d'autres modèles : un modèle inactif part avant que le contexte ne cède.
+    while (freeMore && headroomMiB !== null && headroomMiB < HEADROOM_MIN_MIB && await freeMore()) headroomMiB = await freeVram();
     if (headroomMiB === null || headroomMiB >= HEADROOM_MIN_MIB || exhausted(current) || ownLauncher(model)) {
       return { active, tuning: current, headroomMiB };
     }

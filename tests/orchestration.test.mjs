@@ -11,6 +11,7 @@ import { IDLE_MS, engineInUse, unloadIfIdle } from '../src/idle.mjs';
 import { DIRS, PORTS } from '../src/paths.mjs';
 import { makePlan } from '../src/planner.mjs';
 import { loadWithHeadroom, tuneModel } from '../src/setup.mjs';
+import { activate } from '../src/activation.mjs';
 import { getState, update } from '../src/state.mjs';
 
 // Les scénarios qui ont cassé sur une vraie machine, rejoués avec un faux llama-server
@@ -26,16 +27,16 @@ const HARDWARE = {
 };
 const weights = new Map(); // modèle → Mio de poids sur la carte
 
-// Carte simulée : bureau 1 Gio + poids + KV du contexte chargé.
+// Carte simulée : bureau 1 Gio + poids + KV du contexte de chaque modèle chargé.
 function sampler() {
-  const active = getState().active;
   let used = 1000;
-  if (active?.status === 'ready' || active?.status === 'loading') {
-    const args = active.args ?? [];
+  for (const engine of Object.values(getState().engines ?? {})) {
+    if (engine.status !== 'ready' && engine.status !== 'loading') continue;
+    const args = engine.args ?? [];
     const context = Number(args[args.indexOf('-c') + 1]) || 0;
     const kv = args[args.indexOf('--cache-type-k') + 1] ?? 'f16';
-    const model = modelById(active.modelId);
-    used += (weights.get(active.modelId) ?? 12000) + context * (model?.kvBytesPerToken?.[kv] ?? 35_000) / MiB;
+    const model = modelById(engine.modelId);
+    used += (weights.get(engine.modelId) ?? 12000) + context * (model?.kvBytesPerToken?.[kv] ?? 35_000) / MiB;
   }
   return { util: 0, usedMiB: used, freeMiB: Math.round(24576 - used), totalMiB: 24576, powerW: 100, tempC: 40, pstate: 'P2', smMHz: 1800 };
 }
@@ -129,4 +130,47 @@ test('inactivité : le modèle est déchargé après dix minutes sans requête, 
   assert.equal(await unloadIfIdle(Date.now() + IDLE_MS + 60_000), true);
   assert.equal(getState().active.status, 'stopped');
   assert.ok(!getState().active.unloadedByUser, 'un déchargement automatique ne vaut pas un choix de l’utilisateur');
+});
+
+// ── Plusieurs modèles sur la carte (placement.mjs) ──────────────
+// Un modèle « placé » : réglage de banc à 32k, et une taille de fichier qui dit ses poids.
+function placed(id, weightsMiB) {
+  const model = addModel(id, { tps: 80 }, { weightsMiB, files: [{ name: 'm.gguf', bytes: weightsMiB * MiB }] });
+  update((s) => { (s.profiles[id] ??= {}).tuning = { ...defaultTuning(model, 32768, HARDWARE), backend: 'cuda12' }; });
+  return model;
+}
+
+test('placement : deux petits modèles cohabitent, un gros fait partir le plus ancien des inactifs', LIMIT, async () => {
+  await stopEngine();
+  const a = placed('t-place-a', 4000);
+  const b = placed('t-place-b', 4000);
+  const big = placed('t-place-big', 14000);
+  await activate(a.id);
+  await activate(b.id);
+  const engines = getState().engines;
+  assert.deepEqual(Object.keys(engines).sort(), [a.id, b.id].sort(), 'les deux tiennent ensemble');
+  assert.notEqual(engines[a.id].endpoint, engines[b.id].endpoint, 'un port chacun');
+  // a a servi en dernier : b, le plus ancien, part pour le gros.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const release = engineInUse(a.id);
+  release();
+  await activate(big.id);
+  assert.deepEqual(Object.keys(getState().engines).sort(), [a.id, big.id].sort());
+  assert.ok(getState().profiles[big.id].vram?.mib > 10_000, 'mémoire réellement prise notée au chargement');
+});
+
+test('placement : un modèle qui répond n’est pas déchargé, le nouveau attend la fin', LIMIT, async () => {
+  await stopEngine();
+  const a = placed('t-busy-a', 9000);
+  const b = placed('t-busy-b', 12000);
+  await activate(a.id);
+  const release = engineInUse(a.id);
+  let loaded = false;
+  const loading = activate(b.id).then(() => { loaded = true; });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(loaded, false, 'chargé en déchargeant un modèle en pleine réponse');
+  assert.equal(getState().engines[a.id]?.status, 'ready');
+  release();
+  await loading;
+  assert.deepEqual(Object.keys(getState().engines), [b.id]);
 });

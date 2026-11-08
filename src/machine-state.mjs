@@ -10,7 +10,7 @@ export async function refreshHardware() {
   const hardware = await detectHardware();
   // Nouvelle carte : ses réglages à elle (ou aucun) avant de faire le plan.
   update((s) => { switchCard(s, hardware); });
-  const ours = getState().active?.status === 'ready' || getState().active?.status === 'loading';
+  const ours = Object.values(getState().engines ?? {}).some((e) => ['ready', 'loading'].includes(e.status));
   hardware.vramBaselineMiB = ours ? getState().vramBaselineMiB ?? null : (hardware.primary?.freeMiB != null ? hardware.primary.vramMiB - hardware.primary.freeMiB : null);
   const plan = makePlan(hardware, iqScores(), getState().profiles);
   // La VRAM prise par les autres applications se lit avant qu'on charge quoi que ce soit.

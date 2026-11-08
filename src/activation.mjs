@@ -2,7 +2,8 @@ import { modelById } from './catalog.mjs';
 import { setModelQuality } from './custom-models.mjs';
 import { activationBlocker, withGpu } from './gpu-queue.mjs';
 import { runIqTest } from './iq-test.mjs';
-import { loadWithHeadroom, startingTuning } from './loading.mjs';
+import { startingTuning } from './loading.mjs';
+import { placeAndLoad } from './placement.mjs';
 import { writeMachineFacts } from './machine-doc.mjs';
 import { configurePi } from './pi.mjs';
 import { makePlan } from './planner.mjs';
@@ -23,7 +24,8 @@ export function activate(modelId) {
       // Un réglage d'une version précédente (sans backend) est refait à partir des a priori.
       // HyperQwen n'a pas de backend : son réglage gagnant (MTP ou DFlash2) est repris tel quel.
       const tuning = saved?.backend || model.engine === 'strata' || (['hyperqwen', 'radiance'].includes(model.engine) && saved) ? saved : startingTuning(model, state.hardware);
-      const loaded = await loadWithHeadroom(model, tuning ?? {});
+      // À côté des modèles déjà chargés s'il tient, sinon à la place des inactifs (placement.mjs).
+      const loaded = await placeAndLoad(model, tuning ?? {});
       // Une réduction faite au chargement reste ponctuelle : seul le banc fixe les réglages.
       if (getState().pi.installed) await configurePi().catch(() => {});
       return loaded.active;
@@ -39,9 +41,9 @@ export function runIq(modelId) {
     iqRuns.set(modelId, withGpu(modelId, async () => {
       update((s) => { (s.profiles[modelId] ??= {}).iqRunning = 'Préparation'; });
       try {
-        if (getState().active?.modelId !== modelId || getState().active?.status !== 'ready') await activate(modelId);
+        if (getState().engines?.[modelId]?.status !== 'ready') await activate(modelId);
         // Le contexte réellement chargé (argument -c du moteur) borne la taille du journal du banc.
-        const engineArgs = getState().active?.args ?? [];
+        const engineArgs = getState().engines?.[modelId]?.args ?? [];
         const loaded = engineArgs.includes('-c') ? Number(engineArgs[engineArgs.indexOf('-c') + 1]) : null;
         const context = loaded || getState().profiles[modelId]?.tuning?.context || 32768;
         const result = await runIqTest(modelId, { context, onProgress: (detail) => update((s) => { s.profiles[modelId].iqRunning = detail; }) });

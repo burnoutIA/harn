@@ -157,10 +157,8 @@ export async function deleteModel(modelId) {
     || (customJob && jobState?.result?.id === modelId);
   if (busyNow) throw new Error('Ce modèle est en cours d’installation, de réglage ou de test : attendez la fin');
 
-  if (state.active?.modelId === modelId) {
-    await stopEngine();
-    update((s) => { s.active = null; });
-  }
+  if (state.engines?.[modelId]) await stopEngine(modelId);
+  if (getState().active?.modelId === modelId) update((s) => { s.active = null; });
 
   let freed = 0;
   const remove = async (target) => {

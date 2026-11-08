@@ -449,7 +449,12 @@ function renderShell() {
   if (state.setup.phase === 'running') { dot = 'busy'; text = '<b>Installation</b>en cours'; }
   else if (!active) text = '<b>Aucun modèle</b>chargé';
   else if (active.status === 'loading') { dot = 'busy'; text = `<b>Chargement</b>${esc(nameOf(active.modelId))}`; }
-  else if (active.status === 'ready') { dot = 'ready'; text = `<b>${esc(nameOf(active.modelId))}</b>prêt · ${esc(modelOf(active.modelId)?.variant ?? '')}`; }
+  else if (active.status === 'ready') {
+    dot = 'ready';
+    // Plusieurs modèles chargés ensemble : le dernier servi, et combien d'autres partagent la carte.
+    const others = Object.keys(state.engines ?? {}).filter((id) => id !== active.modelId).length;
+    text = `<b>${esc(nameOf(active.modelId))}</b>prêt · ${esc(modelOf(active.modelId)?.variant ?? '')}${others ? ` · +${others} chargé${others > 1 ? 's' : ''}` : ''}`;
+  }
   else if (['crashed', 'error'].includes(active.status)) { dot = 'error'; text = `<b>Moteur arrêté</b>${esc(active.error ?? '')}`; }
   else text = `<b>${esc(nameOf(active.modelId))}</b>en pause · carte libérée`;
   const html = `<span class="dot ${dot}"></span><span>${text}</span>`;
@@ -782,8 +787,11 @@ function gpuBanner() {
 function modelCard(model) {
   const verdict = verdictOf(model.id) ?? { fit: 'no', reasons: [] };
   const entry = state.models[model.id] ?? {};
-  const isActive = state.active?.modelId === model.id;
-  const loading = isActive && state.active.status === 'loading';
+  // Chargé : son moteur tourne (plusieurs modèles peuvent l'être ensemble). Actif : le dernier servi.
+  const engine = state.engines?.[model.id];
+  const isActive = state.active?.modelId === model.id || Boolean(engine);
+  const live_ = engine ?? (state.active?.modelId === model.id ? state.active : null);
+  const loading = isActive && live_?.status === 'loading';
   const profile = state.profiles[model.id] ?? {};
   const measured = profile.bench?.winner?.tps;
   const isUpgrade = state.plan?.upgradeModel === model.id && !entry.installedAt;
@@ -792,7 +800,7 @@ function modelCard(model) {
   const minTps = state.plan?.objective?.minTps ?? 40;
 
   const badges = [];
-  if (isActive) badges.push(state.active.status === 'ready' || loading ? `<span class="badge active">${loading ? 'Chargement…' : 'Actif'}</span>` : '<span class="badge">En pause</span>');
+  if (isActive) badges.push(live_?.status === 'ready' || loading ? `<span class="badge active">${loading ? 'Chargement…' : Object.keys(state.engines ?? {}).length > 1 ? 'Chargé' : 'Actif'}</span>` : '<span class="badge">En pause</span>');
   else if (entry.installedAt) badges.push('<span class="badge">Installé</span>');
   const unusableHere = entry.installedAt && verdict.fit === 'no';
   const toMeasureHere = entry.installedAt && !unusableHere && !profile.bench;
@@ -819,7 +827,9 @@ function modelCard(model) {
 
   let action = '';
   if (entry.phase || entry.installing || entry.tuning || pending.has(model.id)) action = `<div style="width:100%">${phaseBlock(model.id)}</div>`;
-  else if (isActive && state.active.status === 'ready') action = `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
+  else if (isActive && live_?.status === 'ready') action = Object.keys(state.engines ?? {}).length > 1
+    ? `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload-one" data-id="${model.id}" title="Décharger ce modèle seulement : les autres restent chargés">${icon.power} Décharger</button>`
+    : `<button class="btn" data-action="view" data-id="tuning">Voir le réglage</button><button class="btn ghost" data-action="unload">${icon.power} Libérer la carte</button>`;
   else if (isActive && !loading) action = `<button class="btn primary" data-action="activate" data-id="${model.id}">${icon.power} Recharger</button>`;
   else if (unusableHere) action = `<p class="why">Ne tourne pas sur cette carte : ${esc(verdict.reasons.join(', '))}. Ses fichiers restent là si vous remettez l’ancienne.</p>`;
   else if (entry.installedAt && archWithoutEngine(model)) action = `<p class="why">Architecture « ${esc(archWithoutEngine(model))} » : aucun moteur installé ne sait la charger.</p><button class="btn" data-action="engine-find" data-id="${model.id}">Chercher un moteur</button>`;
@@ -1697,6 +1707,7 @@ app.addEventListener('click', async (event) => {
     }
     if (action === 'activate') { await post(`/api/models/${id}/activate`); toast('Chargement…'); }
     if (action === 'unload') { await post('/api/engine/stop'); toast('Carte graphique libérée'); }
+    if (action === 'unload-one') { await post(`/api/models/${id}/unload`); toast(`${nameOf(id)} déchargé`); }
     if (action === 'open-log') { await post(`/api/models/${id}/log`); toast('Journal ouvert'); }
     if (action === 'retry') { await post(`/api/models/${id}/retry`); toast('Nouvelle tentative'); }
     if (action === 'ask-pi') { const r = await post(`/api/models/${id}/ask-pi`); toast(`pi s’ouvre avec ${nameOf(r.helper)} pour dépanner`); }

@@ -21,7 +21,8 @@ const initial = () => ({
   models: {},     // id → { files: [...], installedAt, bytes }
   downloads: {},  // id → { label, received, total, speed, done, error }
   profiles: {},   // id du modèle → { recipe, bench: { arms: [...], winner, at }, measured }
-  active: null,   // { modelId, engine, status, since, error }
+  active: null,   // le dernier modèle servi : { modelId, status, since, endpoint, error… }
+  engines: {},    // les modèles chargés, un moteur chacun (engine.mjs)
   pi: { installed: false, version: null, lastLaunch: null },
   lan: false,     // API ouverte au réseau local (port à part, clé exigée)
   approvals: [],  // demandes de pi en attente d'un clic de l'utilisateur (approvals.mjs)
@@ -41,6 +42,8 @@ export async function loadState() {
   }
   // Ce qui tournait au dernier arrêt ne tourne plus : on repart d'un état honnête.
   if (state.active) state.active = { ...state.active, status: 'stopped' };
+  // Les moteurs ne survivent pas à Harn : aucun n'est chargé au démarrage.
+  state.engines = {};
   for (const download of Object.values(state.downloads)) if (!download.done) download.paused = true;
   if (state.setup.phase === 'running') state.setup.phase = 'interrupted';
   // Une demande restée sans réponse ne vaut plus rien : pi qui l'attendait n'est plus là.
