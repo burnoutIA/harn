@@ -572,7 +572,13 @@ async function main() {
   });
 }
 
+// Un arrêt qui se bloquerait (moteur, relais, disque) laisserait un Harn à moitié éteint : réseau
+// local fermé, plus de moteur, et une relance qui attend pour rien. Au bout d'une minute, on sort.
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  setTimeout(() => { console.error('[harn] arrêt bloqué depuis 60 s : sortie forcée'); process.exit(1); }, 60_000).unref();
   await stopLan().catch(() => {});
   await flushKeys().catch(() => {});
   await stopEngine().catch(() => {});

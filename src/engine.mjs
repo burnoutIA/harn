@@ -229,15 +229,22 @@ export function loadFailure(tail, label = 'ce modèle') {
 // Un moteur isolé (sandbox.mjs) n'a pas de réseau : il écoute sur un socket Unix, et ce relais
 // le rend joignable au port habituel. Le reste de Harn ne voit pas la différence.
 let relay = null;
-function startRelay(endpoint, socket) {
+// Le relais garde ses connexions : à l'arrêt, il les coupe. server.close() seul attend la fin de
+// chacune, sans limite : une seule restée à moitié ouverte (moteur tué en pleine réponse) suffisait
+// à bloquer l'arrêt du moteur pour toujours, et avec lui tout chargement et toute relance de Harn.
+export function startRelay(endpoint, socket) {
   const port = Number(new URL(endpoint).port);
+  const sockets = new Set();
   return new Promise((resolve, reject) => {
     const server = net.createServer((client) => {
       const upstream = net.connect(socket);
+      sockets.add(client).add(upstream);
       client.pipe(upstream).pipe(client);
-      upstream.on('error', () => client.destroy());
-      client.on('error', () => upstream.destroy());
+      // Un côté fermé ou en erreur ferme l'autre : pas de demi-connexion qui traîne.
+      const drop = () => { client.destroy(); upstream.destroy(); sockets.delete(client); sockets.delete(upstream); };
+      for (const end of [client, upstream]) { end.on('error', drop); end.on('close', drop); }
     });
+    server.sockets = sockets;
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => resolve(server));
   });
@@ -245,7 +252,15 @@ function startRelay(endpoint, socket) {
 function stopRelay() {
   const server = relay;
   relay = null;
-  return server ? new Promise((resolve) => server.close(() => resolve())) : Promise.resolve();
+  return closeRelay(server);
+}
+export function closeRelay(server) {
+  if (!server) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 2_000);
+    server.close(() => { clearTimeout(timer); resolve(); });
+    for (const socket of server.sockets ?? []) socket.destroy();
+  });
 }
 
 export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null }) {
