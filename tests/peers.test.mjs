@@ -2,6 +2,7 @@ import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
+import { claimCard, createAgent, deleteAgent, remoteModels } from '../src/agents.mjs';
 import { handleV1 } from '../src/gateway.mjs';
 import { addPeer, normalizeUrl, peerModels, peerRoute, peersReport, removePeer, slug } from '../src/peers.mjs';
 
@@ -68,6 +69,15 @@ test('une machine ajoutée prête ses modèles, et la passerelle relaie vers ell
   assert.equal(reply.status, 503, 'l’erreur de l’autre machine remonte telle quelle');
   assert.equal(reply.headers.get('retry-after'), '42');
   assert.deepEqual(received.at(-1), { url: '/v1/chat/completions', body: { model: 'qwen-27b', messages: [{ role: 'user', content: 'salut' }] } });
+
+  // Un agent peut prendre un modèle de l'autre machine, et ne demande pas la carte d'ici.
+  assert.deepEqual(remoteModels(), [{ id: 'qwen-27b@pc2', name: 'Qwen 27B · PC2', peer: 'pc2' }]);
+  const agent = await createAgent({ name: 'Distant', model: 'qwen-27b@pc2' });
+  assert.equal(agent.model, 'qwen-27b@pc2');
+  assert.equal(agent.modelInstalled, true);
+  assert.deepEqual(await claimCard(agent.id), { status: 'free' });
+  await assert.rejects(createAgent({ name: 'Fantôme', model: 'absent@pc2' }), { status: 409 });
+  await deleteAgent(agent.id);
 
   await removePeer('pc2');
   assert.equal(peerModels().length, 0);

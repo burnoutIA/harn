@@ -8,6 +8,7 @@ import { imageModelById } from './images.mjs';
 import { deleteLora, listLoras } from './loras.mjs';
 import { closePiSession, configurePiDir, extensionsDigest, joinPiOverview, openPiOverview, openPiTerminal, piSessions } from './pi.mjs';
 import { DIRS, PORTS } from './paths.mjs';
+import { peerModels, peerRoute, peersReady } from './peers.mjs';
 import { bus, getState } from './state.mjs';
 
 // Les agents : un par personne, chacun dans data/agents/<id> (hors dépôt). Sa fiche (agent.json),
@@ -52,6 +53,11 @@ function checkImageModel(id) {
   return String(id);
 }
 const installed = (modelId) => Boolean(getState().models[modelId]?.installedAt && modelById(modelId));
+// Un modèle d'une autre machine (« modele@pc2 », peers.mjs) : choisi s'il est dans sa liste ; au
+// lancement, il suffit que la machine soit déclarée (éteinte un moment, l'agent attend qu'elle revienne).
+const remote = (modelId) => peerModels().some((m) => m.id === modelId);
+const available = (modelId) => installed(modelId) || remote(modelId);
+export const remoteModels = () => peerModels().map((m) => ({ id: m.id, name: m.meta?.name ?? m.id, peer: m.meta?.peer ?? null }));
 
 const defaultPrompt = (name) => `# Consignes de ${name}
 
@@ -87,7 +93,7 @@ async function describe(agent) {
     memoryMax: MAX_MEMORY,
     workspace: workspaceOf(agent.id),
     loras: await listLoras(workspaceOf(agent.id), agent.loraNotes ?? {}),
-    modelInstalled: agent.model ? installed(agent.model) : true,
+    modelInstalled: agent.model ? available(agent.model) : true,
     // Son pi tourne (session tmux vivante). Sans tmux, Harn ne le sait pas : toujours faux.
     running: (await piSessions()).includes(sessionOf(agent.id)),
   };
@@ -103,7 +109,7 @@ function checkName(value) {
 // null : pas de modèle attaché, l'agent prend le modèle par défaut de Harn.
 function checkModel(value) {
   if (!value) return null;
-  if (!installed(value)) throw failure(409, 'Seul un modèle installé peut être attaché à un agent');
+  if (!available(value)) throw failure(409, 'Seul un modèle installé ici ou sur une autre machine joignable peut être attaché à un agent');
   return value;
 }
 
@@ -198,7 +204,8 @@ export async function deleteAgent(id) {
 export async function launchAgent(id, { window = true } = {}) {
   const agent = await readAgent(id);
   if (!getState().pi.installed) throw failure(409, 'pi agent n’est pas encore installé');
-  if (agent.model && !installed(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
+  await peersReady();
+  if (agent.model && !installed(agent.model) && !peerRoute(agent.model)) throw failure(409, 'Le modèle de cet agent n’est plus installé : choisissez-en un autre');
   const { defaultModel } = await configurePiDir(piDirOf(id), { preferredModel: agent.model, options: agent.options, agent: id, imageModel: agent.imageModel ?? null });
   if (!defaultModel) throw failure(409, 'Aucun modèle installé pour l’instant');
   // Les agents d'avant ce dossier le reçoivent à leur prochain lancement.
@@ -277,12 +284,13 @@ export async function claimCard(id) {
   const pending = claims.get(id);
   if (pending && approvalOf(pending)?.status === 'pending') return { status: 'pending', approval: pending };
   const current = getLive().request;
-  if (!current) {
+  const state = getState();
+  const wanted = agent.model ?? (installed(state.favorite) ? state.favorite : state.active?.modelId);
+  // Sur une autre machine, ou la carte d'ici ne sert qu'à une autre machine : rien à interrompre ici.
+  if (!current || peerRoute(wanted) || current.engine === 'peer') {
     bus.emit('toast', `${agent.name} utilise l’IA`);
     return { status: 'free' };
   }
-  const state = getState();
-  const wanted = agent.model ?? (installed(state.favorite) ? state.favorite : state.active?.modelId);
   const busyModel = modelById(current.model);
   const effect = wanted === current.model ? 'Même modèle : rien n’est interrompu, sa demande passe à la suite.' : 'Son modèle est différent : accepter interrompt la réponse en cours.';
   const approval = requestApproval({

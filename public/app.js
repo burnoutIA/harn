@@ -1321,6 +1321,7 @@ window.addEventListener('focus', () => { if (view === 'machine') loadAccess(); i
 // Un agent par personne : ses consignes, son modèle, ses outils, son dossier de travail. La liste
 // vient de /api/agents (pas de l'état diffusé : elle portera des secrets).
 let agents = null;
+let remoteModels = []; // modèles des autres machines Harn (« modele@pc2 »)
 const AGENT_OPTIONS = [
   ['shell', 'Shell', 'Exécuter des commandes sur cette machine.'],
   ['harnTools', 'Outils de Harn', 'Installer, mesurer et tester des modèles, lire le carnet de la machine.'],
@@ -1354,8 +1355,10 @@ function agentCard(agent) {
   const installed = Object.keys(state.models).filter((id) => state.models[id].installedAt && modelOf(id));
   const models = [
     '<option value="">Modèle par défaut de Harn</option>',
-    ...(agent.modelInstalled ? [] : [`<option value="${esc(agent.model)}" selected>${esc(agent.model)} (désinstallé)</option>`]),
+    ...(agent.modelInstalled ? [] : [`<option value="${esc(agent.model)}" selected>${esc(agent.model)} (${agent.model.includes('@') ? 'machine injoignable' : 'désinstallé'})</option>`]),
     ...installed.map((id) => `<option value="${esc(id)}" ${id === agent.model ? 'selected' : ''}>${esc(nameOf(id))} · ${esc(modelOf(id).variant)}</option>`),
+    // Les autres machines : un groupe par machine, c'est elle qui charge le modèle sur sa carte.
+    ...[...new Set(remoteModels.map((m) => m.peer))].map((peer) => `<optgroup label="Sur ${esc(peer)}">${remoteModels.filter((m) => m.peer === peer).map((m) => `<option value="${esc(m.id)}" ${m.id === agent.model ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</optgroup>`),
   ].join('');
   // Les modèles d'images installés (lus avec la vue Modèles) ; celui choisi reste affiché s'il a
   // été désinstallé depuis.
@@ -1408,6 +1411,7 @@ async function loadAgents() {
   const next = await fetch('/api/agents').then((r) => r.json()).catch(() => null);
   if (!next?.agents) return;
   agents = next.agents;
+  remoteModels = next.remoteModels ?? [];
   if (view === 'agents') renderAgents();
 }
 

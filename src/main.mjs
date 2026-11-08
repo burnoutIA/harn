@@ -27,7 +27,7 @@ import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
 import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel, loraTargets } from './images.mjs';
 import { listLoras, loraDirOf } from './loras.mjs';
-import { agentForImages, claimCard, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
+import { agentForImages, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
@@ -213,7 +213,7 @@ async function api(req, res, url) {
     return json(res, 200, { modelId: active.modelId, label: active.label, status: active.status, command: active.command, args: active.args, cwd: active.cwd ?? null, config, configName: config ? configArg : null });
   }
   if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
-  if (req.method === 'GET' && url.pathname === '/api/agents') return json(res, 200, { agents: await listAgents() });
+  if (req.method === 'GET' && url.pathname === '/api/agents') return json(res, 200, { agents: await listAgents(), remoteModels: remoteModels() });
   if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
     const entry = approvalOf(parts[2]);
     return entry ? json(res, 200, entry) : json(res, 404, { error: 'Demande inconnue ou expirée (Harn a-t-il redémarré ?)' });

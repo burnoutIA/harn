@@ -72,9 +72,13 @@ async function poll(peer) {
 
 export const refreshPeers = () => Promise.all(peers.map(poll));
 
+// Le premier relevé : ceux qui ont besoin de la liste (lancement d'un agent) l'attendent.
+let ready = null;
+export const peersReady = () => ready ?? Promise.resolve();
+
 export async function startPeers() {
-  await load();
-  await refreshPeers();
+  ready = load().then(refreshPeers);
+  await ready;
   clearInterval(timer);
   timer = setInterval(() => { refreshPeers().catch(() => {}); }, POLL_MS);
   timer.unref?.();
