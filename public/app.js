@@ -1245,7 +1245,29 @@ function accessCard() {
       <div class="row"><span>Réseau local</span>${lanBody}</div>
       <button class="btn small" data-action="lan" data-on="${lan.enabled ? '' : '1'}" ${!lan.enabled && !access.enforced ? 'disabled title="Créez d’abord une clé"' : ''}>${lan.enabled ? 'Fermer au réseau local' : 'Ouvrir au réseau local'}</button>
       <button class="btn" data-action="copy-api">${icon.copy} Copier l’adresse</button>
+      ${peersBlock(access.peers ?? [])}
     </div>`;
+}
+
+// Les autres machines Harn : leurs modèles s'utilisent d'ici sous le nom « modele@machine ».
+function peersBlock(peers) {
+  const rows = peers.map((p) => {
+    const status = p.ok === false ? `<small class="access-warn" style="margin:0">${esc(p.error ?? 'injoignable')}</small>`
+      : p.ok ? `<small>${p.models.length ? `${p.models.length} modèle${p.models.length > 1 ? 's' : ''}` : 'aucun modèle installé'} · ${esc(p.url)}</small>` : '<small>Vérification…</small>';
+    const models = (p.models ?? []).map((m) => `<button class="model-id" data-action="copy-text" data-text="${esc(m.id)}" title="${esc(m.name)}${m.context ? ` · ${kTokens(m.context)} de contexte` : ''} · cliquer pour copier">${icon.copy}<span>${esc(m.id)}</span></button>`).join('');
+    return `<div class="key-row"><div><b>${esc(p.name)}</b>${status}${models ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${models}</div>` : ''}</div><button class="btn small ghost" data-action="peer-remove" data-id="${esc(p.id)}" data-label="${esc(p.name)}">Retirer</button></div>`;
+  }).join('');
+  return `<div class="row"><span>Autres machines Harn</span><div>
+      <p style="margin:0">Les modèles d’une autre machine s’utilisent ici, à la même adresse, sous le nom <code style="display:inline;padding:1px 5px">modele@machine</code>. C’est elle qui les charge, sur sa carte. Sur l’autre machine : ouvrez l’API au réseau local et créez une clé pour celle-ci.</p>
+      ${rows ? `<div class="keys" style="margin-top:10px">${rows}</div>` : ''}
+      <form class="add-form" data-form="peer" style="flex-wrap:wrap;margin-top:10px">
+        <input id="peer-name" type="text" maxlength="40" placeholder="pc2" autocomplete="off" spellcheck="false" aria-label="Nom de la machine" style="flex:0 1 110px">
+        <input id="peer-url" type="text" placeholder="http://192.168.1.20:4748/v1" autocomplete="off" spellcheck="false" aria-label="Adresse réseau local de l’autre machine" style="flex:1 1 220px">
+        <input id="peer-key" type="password" placeholder="Clé créée sur l’autre machine" autocomplete="off" spellcheck="false" aria-label="Clé API de l’autre machine" style="flex:1 1 200px">
+        <button class="btn small" type="submit">Ajouter</button>
+      </form>
+      ${peers.length ? '<button class="btn small ghost" data-action="peer-refresh" style="margin-top:8px">Revérifier</button>' : ''}
+    </div></div>`;
 }
 
 async function loadAccess() {
@@ -1543,6 +1565,19 @@ app.addEventListener('submit', async (event) => {
     } catch (error) { toast(error.message); } finally { button.disabled = false; }
     return;
   }
+  const peerForm = event.target.closest('[data-form="peer"]');
+  if (peerForm) {
+    event.preventDefault();
+    const button = peerForm.querySelector('button');
+    button.disabled = true;
+    const value = (id) => peerForm.querySelector(id).value;
+    try {
+      access = await post('/api/access/peers', { name: value('#peer-name'), url: value('#peer-url'), key: value('#peer-key') });
+      renderMachine();
+      toast('Machine ajoutée : ses modèles sont disponibles ici');
+    } catch (error) { toast(error.message); } finally { button.disabled = false; }
+    return;
+  }
   const agentForm = event.target.closest('[data-form="agent-new"], [data-form="agent-edit"]');
   if (agentForm) {
     event.preventDefault();
@@ -1710,6 +1745,16 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       access = r.access;
       renderMachine();
       toast(`Clé « ${r.revoked.label} » révoquée`);
+    }
+    if (action === 'peer-remove') {
+      if (!confirm(`Retirer « ${button.dataset.label} » ?\n\nSes modèles ne seront plus proposés ici. Pensez à révoquer sa clé sur l’autre machine.`)) return;
+      access = await post(`/api/access/peers/${id}/remove`);
+      renderMachine();
+      toast(`« ${button.dataset.label} » retirée`);
+    }
+    if (action === 'peer-refresh') {
+      access = await post('/api/access/peers/refresh');
+      renderMachine();
     }
     if (action === 'lan') {
       access = await post('/api/access/lan', { enabled: Boolean(button.dataset.on) });

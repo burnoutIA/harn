@@ -8,6 +8,7 @@ import { internalKey } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { agentInstructions } from './machine-doc.mjs';
 import { outputBudget, outputUsage } from './output-budget.mjs';
+import { peerModels } from './peers.mjs';
 import { DIRS, PORTS, fromRoot } from './paths.mjs';
 import { getState, update } from './state.mjs';
 
@@ -76,6 +77,13 @@ export async function configurePiDir(dir, { preferredModel = null, options = EVE
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
   });
+  // Les modèles des autres machines (« modele@pc2 ») passent par la même adresse : Harn relaie.
+  // Leur budget de sortie n'est pas mesuré ici : une part prudente du contexte.
+  for (const remote of peerModels()) {
+    const context = remote.meta?.context ?? 32768;
+    models.push({ id: remote.id, name: remote.meta.name, reasoning: Boolean(remote.meta?.reasoning), input: remote.meta?.vision ? ['text', 'image'] : ['text'], contextWindow: context, maxTokens: Math.min(32768, Math.round(context / 2)), cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    budgets[remote.id] = { reserve: Math.min(16384, Math.round(context / 4)) };
+  }
   const modelsFile = path.join(dir, 'models.json');
   const existing = await readJson(modelsFile);
   existing.providers = {

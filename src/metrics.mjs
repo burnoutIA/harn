@@ -89,7 +89,8 @@ export function beginRequest({ model, client, key = null, endpoint, engine }) {
   inflight.set(request, { decoded: 0, at: Date.now(), resync: false });
   snapshot.request = request;
   snapshot.running = inflight.size;
-  if (!gpuTimer) gpuTimer = setInterval(tick, 1000);
+  // unref : ce relevé ne garde pas à lui seul le processus en vie (tests, arrêt).
+  if (!gpuTimer) { gpuTimer = setInterval(tick, 1000); gpuTimer.unref?.(); }
   if (engine === 'llama' && !slotTimer) slotTimer = setInterval(() => pollSlots(endpoint), 400);
   live.emit('live', snapshot);
   return request;
@@ -145,10 +146,12 @@ export async function endRequest(request, { timings, usage, error, finish = null
   live.emit('request', record);
 
   // Dernière utilisation (tri « récemment utilisés ») : les vraies requêtes, pas les bancs de Harn.
-  if (!error && isUse(record)) update((s) => { (s.profiles[record.model] ??= {}).lastUsedAt = record.at; });
+  // Un modèle d'une autre machine (« modele@pc2 ») n'a pas de profil ici : seul l'historique le garde.
+  const local = request.engine !== 'peer';
+  if (local && !error && isUse(record)) update((s) => { (s.profiles[record.model] ??= {}).lastUsedAt = record.at; });
 
   // Le débit réel d'usage, par modèle : c'est lui qu'on affiche à côté du banc.
-  if (record.tps && !error && generated >= 64) {
+  if (local && record.tps && !error && generated >= 64) {
     update((s) => {
       const profile = (s.profiles[record.model] ??= {});
       const usageStats = (profile.usage ??= { requests: 0, tokens: 0, seconds: 0 });

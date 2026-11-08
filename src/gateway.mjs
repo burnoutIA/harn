@@ -3,6 +3,7 @@ import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders } from './engine.mjs';
 import { engineInUse } from './idle.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
+import { peerModels, peerRoute } from './peers.mjs';
 import { getState } from './state.mjs';
 
 // L'endpoint OpenAI unique (/v1) que pi agent et toute autre application utilisent. Il relaie
@@ -46,10 +47,11 @@ export function modelsList() {
       object: 'model',
       owned_by: 'harn',
       created: Math.floor(new Date(state.models[id].installedAt).getTime() / 1000),
-      meta: { name: displayName(model), context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision },
+      meta: { name: displayName(model), context: state.profiles[id]?.tuning?.context ?? null, vision: model.vision, reasoning: Boolean(model.reasoning) },
     };
   });
-  return { object: 'list', data };
+  // Les modèles des autres machines (peers.mjs) suivent, sous le nom « modele@machine ».
+  return { object: 'list', data: [...data, ...peerModels()] };
 }
 
 async function readBody(req) {
@@ -103,6 +105,21 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
     try { body = JSON.parse(raw); } catch { return sendJson(res, 400, { error: { message: 'JSON invalide' } }, cors); }
   }
 
+  // Un modèle d'une autre machine (« modele@pc2 ») : relayé tel quel, elle le charge elle-même.
+  // Rien ne bouge ici : ni la carte, ni le modèle actif.
+  const generative = body && /\/(chat\/)?completions$/.test(url.pathname);
+  const route = peerRoute(body?.model);
+  if (route) {
+    return relay(req, res, {
+      target: `${route.peer.url}${url.pathname.slice('/v1'.length)}${url.search}`,
+      headers: route.headers,
+      payload: Buffer.from(JSON.stringify({ ...body, model: route.remoteId })),
+      measure: generative ? { model: body.model, endpoint: route.peer.url, engine: 'peer' } : null,
+      unreachable: `Machine « ${route.peer.name} » injoignable`,
+      decision, cors,
+    });
+  }
+
   // Le modèle demandé : s'il est installé mais pas chargé, on le charge (une requête suffit
   // à basculer). Un nom inconnu tombe sur le modèle actif, comme un serveur mono-modèle.
   const state = getState();
@@ -123,11 +140,20 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
   const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';
-  const target = `${active.endpoint}${url.pathname}${url.search}`;
+  return relay(req, res, {
+    target: `${active.endpoint}${url.pathname}${url.search}`,
+    headers: engineHeaders(),
+    payload: generative ? Buffer.from(JSON.stringify(shapeRequest(body, model))) : raw,
+    measure: generative ? { model: modelId, endpoint: active.endpoint, engine } : null,
+    unreachable: 'Moteur injoignable',
+    decision, cors,
+  });
+}
 
-  const generative = body && /\/(chat\/)?completions$/.test(url.pathname);
-  const payload = generative ? Buffer.from(JSON.stringify(shapeRequest(body, model))) : raw;
-  const request = generative ? beginRequest({ model: modelId, client: req.headers['user-agent'] ?? 'client', key: decision.key?.label ?? null, endpoint: active.endpoint, engine }) : null;
+// Relaie la requête vers target (le moteur d'ici ou une autre machine) octet pour octet, en
+// lisant au passage les compteurs pour le direct et l'historique.
+async function relay(req, res, { target, headers, payload, measure, unreachable, decision, cors }) {
+  const request = measure ? beginRequest({ ...measure, client: req.headers['user-agent'] ?? 'client', key: decision.key?.label ?? null }) : null;
 
   const controller = new AbortController();
   res.on('close', () => { if (!res.writableFinished) controller.abort(); });
@@ -136,18 +162,20 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   try {
     upstream = await fetch(target, {
       method: req.method,
-      headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', ...engineHeaders() },
+      headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', ...headers },
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : payload,
       signal: controller.signal,
     });
   } catch (error) {
     if (request) await endRequest(request, { error: error.message });
-    return sendJson(res, 502, { error: { message: `Moteur injoignable : ${error.message}` } }, cors);
+    return sendJson(res, 502, { error: { message: `${unreachable} : ${error.message}` } }, cors);
   }
 
   res.writeHead(upstream.status, {
     'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
     'Cache-Control': 'no-cache',
+    // « Carte occupée » chez l'autre machine : le client sait quand réessayer.
+    ...(upstream.headers.get('retry-after') ? { 'Retry-After': upstream.headers.get('retry-after') } : {}),
     ...cors,
   });
 

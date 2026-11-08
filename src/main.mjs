@@ -31,6 +31,7 @@ import { agentForImages, claimCard, createAgent, deleteAgent, deleteAgentLora, l
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
+import { addPeer, peersReport, refreshPeers, removePeer, startPeers } from './peers.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
 import { checkHub, dismissHub, watchHub } from './watch.mjs';
 
@@ -69,7 +70,7 @@ function localHost(req) {
 }
 
 function accessReport(keys) {
-  return { ...keys, localUrl: `${ORIGIN}/v1`, lan: { enabled: Boolean(getState().lan), ...lanDetails() } };
+  return { ...keys, localUrl: `${ORIGIN}/v1`, lan: { enabled: Boolean(getState().lan), ...lanDetails() }, peers: peersReport() };
 }
 
 // Le port réseau ne sert que /v1 (et /k/<clé>/v1) ; tout le reste n'existe pas pour lui.
@@ -234,6 +235,10 @@ async function api(req, res, url) {
         await setLan(body.enabled === true);
         return json(res, 200, accessReport(await listKeys()));
       }
+      // Les autres machines Harn dont on utilise les modèles (peers.mjs).
+      if (url.pathname === '/api/access/peers') { await addPeer(body); return json(res, 200, accessReport(await listKeys())); }
+      if (url.pathname === '/api/access/peers/refresh') { await refreshPeers(); return json(res, 200, accessReport(await listKeys())); }
+      if (parts[2] === 'peers' && parts[3] && parts[4] === 'remove') { await removePeer(parts[3]); return json(res, 200, accessReport(await listKeys())); }
       if (parts[1] === 'approvals' && parts[2] && ['accept', 'refuse'].includes(parts[3])) return json(res, 200, decideApproval(parts[2], parts[3] === 'accept'));
     } catch (error) {
       return json(res, error.status ?? 500, { error: error.message });
@@ -542,6 +547,7 @@ async function main() {
     watchIdle();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
+    startPeers().catch((error) => console.error(`[harn] autres machines : ${error.message}`));
     if (state.lan) {
       setLan(true).then(() => console.log(`Harn · API réseau local sur le port ${PORTS.lan}`))
         .catch((error) => { console.error(`[harn] réseau local non rouvert : ${error.message}`); update((s) => { s.lan = false; }); });
