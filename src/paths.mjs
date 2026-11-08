@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const fromRoot = (...parts) => path.join(ROOT, ...parts);
 
+// Les réglages propres à une machine (ports, HARN_HOME…) vivent dans .env à la racine, ignoré
+// par git : on ne modifie plus ce fichier, et les mises à jour passent sans conflit. Une variable
+// déjà posée dans l'environnement garde la priorité.
+try { process.loadEnvFile(fromRoot('.env')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+
 // HARN_HOME : l'installation (état, modèles, moteurs) ailleurs que dans le dépôt. Les tests s'en
 // servent pour ne jamais toucher à la vraie installation ; le code et l'interface restent ici.
 export const HOME = process.env.HARN_HOME ? path.resolve(process.env.HARN_HOME) : ROOT;
