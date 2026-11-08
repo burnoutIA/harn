@@ -80,8 +80,10 @@ export function llamaArgs(model, files, tuning, hardware) {
     '--alias', model.id,
     '--api-key-file', ENGINE_KEY_FILE,
     '--jinja', '--metrics', '--slots', '--no-webui',
-    '-c', String(tuning.context),
-    '--parallel', '1',
+    // slots : sessions servies en même temps, chacune avec tout le contexte du banc (pas de réserve
+    // commune --kv-unified : deux longues sessions s'y mangeaient le contexte annoncé).
+    '-c', String(tuning.context * (tuning.slots ?? 1)),
+    '--parallel', String(tuning.slots ?? 1),
     '-t', String(threads),
     '-b', String(tuning.batch), '-ub', String(tuning.ubatch),
     // K et V du même type, sauf les paires prévues par un fork (llamAmpere : tq5_0/turbo4, noyau fusionné).
@@ -308,7 +310,7 @@ export function closeRelay(server) {
 
 // Lance le moteur d'un modèle. Seul un moteur du même modèle est remplacé : les autres restent
 // (placement.mjs a fait la place avant). alone : la carte pour lui seul (banc, premier démarrage).
-export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null }, { alone = false } = {}) {
+export async function startEngine({ modelId, command, args, cwd, health, endpoint, env = {}, label, socket = null, slots = 1, context = null }, { alone = false } = {}) {
   if (alone) await stopEngine();
   else await stopEngine(modelId);
   const slot = slotOf(modelId);
@@ -324,7 +326,7 @@ export async function startEngine({ modelId, command, args, cwd, health, endpoin
   const log = createWriteStream(logFile, { flags: 'w' });
   log.write(`# ${new Date().toISOString()}\n# ${command} ${args.join(' ')}\n\n`);
 
-  setEngine(modelId, { modelId, label, status: 'loading', since: Date.now(), endpoint, command, args, cwd, error: null, log: logFile }, { focus: true });
+  setEngine(modelId, { modelId, label, status: 'loading', since: Date.now(), endpoint, command, args, cwd, error: null, log: logFile, slots, context }, { focus: true });
   let exited = false;
   const process_ = spawn(command, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, detached: process.platform !== 'win32' });
   slot.child = process_;

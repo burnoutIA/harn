@@ -1,7 +1,8 @@
 import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders, setEngine } from './engine.mjs';
-import { engineInUse } from './idle.mjs';
+import { engineInUse, inFlightOf } from './idle.mjs';
+import { followDemand } from './placement.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { peerModels, peerRoute } from './peers.mjs';
 import { getState } from './state.mjs';
@@ -68,6 +69,10 @@ function sendJson(res, status, payload, headers = {}) {
 // lan : la requête arrive par le port ouvert au réseau. Là seulement, les pages web d'une autre
 // origine sont admises (CORS) : une clé y est toujours exigée, une page ne peut pas la deviner.
 // Sur la boucle locale, pas de CORS : une page web ne lit jamais une réponse de /v1.
+// Réponses déjà relayées au moteur de chaque modèle (les autres attendent un chargement).
+const relayed = new Map();
+const relayedOf = (modelId) => relayed.get(modelId) ?? 0;
+
 export async function handleV1(req, res, url, { lan = false } = {}) {
   const cors = lan ? { 'Access-Control-Allow-Origin': '*' } : {};
   if (lan && req.method === 'OPTIONS') {
@@ -134,10 +139,17 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   // Le moteur sert jusqu'à la fin de la réponse : pas de déchargement (inactivité, place pour un
   // autre modèle) d'ici là.
   res.once('close', engineInUse(modelId));
+  // Plus de demandes en même temps que de sessions : le moteur en reçoit plus, à un moment où il
+  // ne répond à personne (placement.mjs). Sinon la requête attend son tour dans le moteur.
+  const resize = followDemand(modelId, inFlightOf(modelId), relayedOf(modelId), activate);
+  if (resize) await resize.catch(() => {});
   // Pas chargé : on le charge, à côté des autres s'il tient (placement.mjs).
   if (getState().engines?.[modelId]?.status !== 'ready') {
     try { await activate(modelId); } catch (error) { return sendJson(res, error.status ?? 503, { error: { message: error.message } }, { ...cors, ...(error.status === 503 ? { 'Retry-After': '30' } : {}) }); }
   }
+  // Partie au moteur : un rechargement pour plus de sessions attendra qu'elle finisse.
+  relayed.set(modelId, relayedOf(modelId) + 1);
+  res.once('close', () => relayed.set(modelId, relayedOf(modelId) - 1));
   const active = getState().engines[modelId];
   if (active?.status !== 'ready') return sendJson(res, 503, { error: { message: 'Le moteur de ce modèle vient de s’arrêter : réessayez' } }, { ...cors, 'Retry-After': '5' });
   // Le dernier modèle servi devient celui affiché comme actif.

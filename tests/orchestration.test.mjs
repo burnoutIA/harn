@@ -12,6 +12,7 @@ import { DIRS, PORTS } from '../src/paths.mjs';
 import { makePlan } from '../src/planner.mjs';
 import { loadWithHeadroom, tuneModel } from '../src/setup.mjs';
 import { activate } from '../src/activation.mjs';
+import { followDemand, updateSharing } from '../src/placement.mjs';
 import { getState, update } from '../src/state.mjs';
 
 // Les scénarios qui ont cassé sur une vraie machine, rejoués avec un faux llama-server
@@ -173,4 +174,27 @@ test('placement : un modèle qui répond n’est pas déchargé, le nouveau atte
   release();
   await loading;
   assert.deepEqual(Object.keys(getState().engines), [b.id]);
+});
+
+test('sessions : la demande en ajoute une, jamais au milieu d’une réponse ; la carte partagée est signalée', LIMIT, async () => {
+  await stopEngine();
+  const a = placed('t-slots-a', 4000);
+  const b = placed('t-slots-b', 4000);
+  await activate(a.id);
+  assert.equal(getState().engines[a.id].slots, 1);
+  // Deux demandes à la fois, la première déjà partie au moteur : on ne relance pas.
+  assert.equal(followDemand(a.id, 2, 1, activate), null);
+  // Plus tard, le moteur ne répond à personne : il repart avec deux sessions de 32k chacune.
+  const resize = followDemand(a.id, 1, 0, activate);
+  assert.ok(resize, 'rechargement attendu');
+  await resize;
+  const engine = getState().engines[a.id];
+  assert.equal(engine.slots, 2);
+  assert.equal(engine.args[engine.args.indexOf('--parallel') + 1], '2');
+  assert.equal(engine.args[engine.args.indexOf('-c') + 1], '65536');
+  // Deux modèles chargés : l'avis de partage le dit.
+  await activate(b.id);
+  updateSharing();
+  assert.equal(getState().sharing?.[0]?.kind, 'models');
+  assert.deepEqual(getState().sharing[0].models.map((m) => m.id).sort(), [a.id, b.id].sort());
 });

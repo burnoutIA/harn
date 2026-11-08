@@ -8,6 +8,7 @@ import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
 import { handleV1, setActivator } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
+import { updateSharing } from './placement.mjs';
 import { DIRS, PORTS } from './paths.mjs';
 import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, openInEditor } from './pi.mjs';
 import { installKetch } from './runtimes.mjs';
@@ -554,6 +555,8 @@ async function main() {
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
     startPeers().catch((error) => console.error(`[harn] autres machines : ${error.message}`));
+    // Plusieurs modèles ou plusieurs demandes sur la carte : la fenêtre le dit (placement.mjs).
+    live.on('live', updateSharing);
     if (state.lan) {
       setLan(true).then(() => console.log(`Harn · API réseau local sur le port ${PORTS.lan}`))
         .catch((error) => { console.error(`[harn] réseau local non rouvert : ${error.message}`); update((s) => { s.lan = false; }); });

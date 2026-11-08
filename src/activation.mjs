@@ -42,9 +42,11 @@ export function runIq(modelId) {
       update((s) => { (s.profiles[modelId] ??= {}).iqRunning = 'Préparation'; });
       try {
         if (getState().engines?.[modelId]?.status !== 'ready') await activate(modelId);
-        // Le contexte réellement chargé (argument -c du moteur) borne la taille du journal du banc.
-        const engineArgs = getState().engines?.[modelId]?.args ?? [];
-        const loaded = engineArgs.includes('-c') ? Number(engineArgs[engineArgs.indexOf('-c') + 1]) : null;
+        // Le contexte réellement chargé (argument -c du moteur, partagé entre ses sessions) borne
+        // la taille du journal du banc.
+        const engine = getState().engines?.[modelId] ?? {};
+        const engineArgs = engine.args ?? [];
+        const loaded = engineArgs.includes('-c') ? Math.floor(Number(engineArgs[engineArgs.indexOf('-c') + 1]) / (engine.slots ?? 1)) : null;
         const context = loaded || getState().profiles[modelId]?.tuning?.context || 32768;
         const result = await runIqTest(modelId, { context, onProgress: (detail) => update((s) => { s.profiles[modelId].iqRunning = detail; }) });
         update((s) => { s.profiles[modelId].iq = result; s.profiles[modelId].iqRunning = null; s.profiles[modelId].iqError = null; });

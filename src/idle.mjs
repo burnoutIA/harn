@@ -13,6 +13,7 @@ const lastUse = new Map();   // id du modèle → fin de la dernière réponse
 
 const activeId = () => getState().active?.modelId ?? null;
 export const inUse = (modelId) => (inFlight.get(modelId) ?? 0) > 0;
+export const inFlightOf = (modelId) => inFlight.get(modelId) ?? 0;
 export const lastUseOf = (modelId) => Math.max(lastUse.get(modelId) ?? 0, getState().engines?.[modelId]?.readyAt ?? 0);
 
 // Une requête relayée au moteur d'un modèle : à appeler à son arrivée, la fonction rendue à sa fin.

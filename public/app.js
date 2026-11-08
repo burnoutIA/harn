@@ -486,6 +486,7 @@ function homeSkeleton() {
       </div>
     </section>
     <div class="tiles" id="tiles"></div>
+    <div id="sharing"></div>
     <div id="next"></div>
     <section class="card activity" id="activity">
       <div class="main"><div id="act-head"></div><div id="act-spark"></div><div id="act-stats"></div><div id="act-req"></div></div>
@@ -740,7 +741,25 @@ function renderHome() {
   renderGauge();
   renderTiles();
   renderNext();
+  renderSharing();
   renderActivity();
+}
+
+// La carte partagée : plusieurs modèles chargés, ou plusieurs demandes sur un même modèle.
+// Chacun va plus lentement : on dit qui, et ce qu'on peut fermer.
+function renderSharing() {
+  const items = state.sharing ?? [];
+  const lines = items.map((item) => {
+    if (item.kind === 'sessions') {
+      const who = [...new Set(item.clients)].join(', ');
+      const wait = item.slots < item.clients.length ? ` Le modèle a ${item.slots} session${item.slots > 1 ? 's' : ''} : les autres attendent leur tour, Harn en ajoutera une dès qu’il ne répondra à personne si la carte a la place.` : ` ${item.slots} sessions en parallèle.`;
+      return `<b>${esc(item.name)}</b> répond à ${item.clients.length} demandes en même temps (${esc(who)}).${wait} Si l’une ne vous sert pas, fermez-la : les autres iront plus vite.`;
+    }
+    const names = item.models.map((m) => `${esc(m.name)}${m.busy ? ' (répond)' : ''}`).join(', ');
+    const buttons = item.models.filter((m) => !m.busy).map((m) => `<button class="btn small ghost" data-action="unload-one" data-id="${esc(m.id)}">${icon.power} Décharger ${esc(m.name)}</button>`).join('');
+    return `<b>${item.models.length} modèles se partagent la carte</b> : ${names}. Quand ils répondent ensemble, chacun va moins vite. Déchargez ceux qui ne vous servent pas.${buttons ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">${buttons}</div>` : ''}`;
+  });
+  paint('sharing', lines.map((line) => `<div class="tip">${icon.info}<span>${line}</span></div>`).join(''));
 }
 
 // ── Modèles ────────────────────────────────────────────────

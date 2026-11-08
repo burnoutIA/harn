@@ -2,6 +2,7 @@ import { modelById, ownLauncher, totalBytes } from './catalog.mjs';
 import { layersOf, loadedModels, stopEngine } from './engine.mjs';
 import { busyWith } from './gpu-queue.mjs';
 import { inUse, lastUseOf } from './idle.mjs';
+import { clientsOf } from './metrics.mjs';
 import { freeVram, loadWithHeadroom } from './loading.mjs';
 import { bus, getState, update } from './state.mjs';
 import { HEADROOM_MIN_MIB } from './tuner.mjs';
@@ -21,12 +22,16 @@ const WAIT_MS = 15 * 60_000;
 export const exclusive = (model, tuning = {}) => ownLauncher(model) || layersOf(tuning) === 'auto' || tuning.backend === 'cpu';
 const tuningOf = (modelId) => getState().profiles?.[modelId]?.tuning ?? {};
 
-// Ce que le modèle prendra sur la carte avec ce réglage, en Mio.
+// Ce que le modèle prendra sur la carte avec ce réglage, en Mio. Chaque session (slots) a son
+// propre cache de tout le contexte : une session de plus coûte un cache de plus.
+const kvMiB = (model, tuning) => ((tuning.context ?? 32768) * (model.kvBytesPerToken?.[tuning.kv ?? 'q8_0'] ?? model.kvBytesPerToken?.q8_0 ?? 35_000)) / MiB;
 export function needMiB(model, tuning = {}) {
+  const slots = tuning.slots ?? 1;
   const measured = getState().profiles?.[model.id]?.vram;
-  if (measured?.mib && measured.context === (tuning.context ?? null) && measured.kv === (tuning.kv ?? null)) return measured.mib;
-  const kvBytes = model.kvBytesPerToken?.[tuning.kv ?? 'q8_0'] ?? model.kvBytesPerToken?.q8_0 ?? 35_000;
-  return Math.round(((totalBytes(model) + (tuning.context ?? 32768) * kvBytes) / MiB + COMPUTE_MIB) * 1.05);
+  if (measured?.mib && measured.context === (tuning.context ?? null) && measured.kv === (tuning.kv ?? null)) {
+    return Math.round(measured.mib + (slots - (measured.slots ?? 1)) * kvMiB(model, tuning) * 1.05);
+  }
+  return Math.round((totalBytes(model) / MiB + slots * kvMiB(model, tuning) + COMPUTE_MIB) * 1.05);
 }
 
 // Un modèle qui travaille : une réponse en cours, ou un banc / un test qui tient la carte pour lui.
@@ -69,22 +74,111 @@ let queue = Promise.resolve();
 const serial = (task) => { const turn = queue.then(task); queue = turn.catch(() => {}); return turn; };
 
 // Charge un modèle à côté des autres : place faite, chargement, puis mémoire réellement prise
-// notée dans son profil (la prochaine fois, plus d'estimation).
+// notée dans son profil (la prochaine fois, plus d'estimation). Il reçoit autant de sessions que
+// la demande récente en réclame et que la carte en permet (slotsFor).
 export function placeAndLoad(model, tuning) {
   return serial(async () => {
-    const unloaded = await makeRoom(model.id, tuning);
+    const slots = exclusive(model, tuning) ? 1 : await slotsFor(model, tuning);
+    const wanted = { ...tuning, ...(slots > 1 ? { slots } : {}) };
+    const unloaded = await makeRoom(model.id, wanted);
     if (unloaded.length) bus.emit('toast', `Place faite pour ${model.name ?? model.id} : ${unloaded.join(', ')} déchargé${unloaded.length > 1 ? 's' : ''}`);
     const before = await freeVram();
     // Marge trop juste après chargement (estimation trop basse) : un autre modèle inactif part
     // d'abord, le contexte ne cède qu'en dernier recours.
     const freeMore = async () => Boolean(await evictOne(model.id));
-    const loaded = await loadWithHeadroom(model, tuning, { alone: exclusive(model, tuning), freeMore });
+    const loaded = await loadWithHeadroom(model, wanted, { alone: exclusive(model, wanted), freeMore });
     const after = await freeVram();
     if (before !== null && after !== null && before > after && !exclusive(model, loaded.tuning)) {
-      update((s) => { (s.profiles[model.id] ??= {}).vram = { mib: before - after, context: loaded.tuning.context ?? null, kv: loaded.tuning.kv ?? null, at: new Date().toISOString() }; });
+      update((s) => { (s.profiles[model.id] ??= {}).vram = { mib: before - after, context: loaded.tuning.context ?? null, kv: loaded.tuning.kv ?? null, slots: loaded.tuning.slots ?? 1, at: new Date().toISOString() }; });
     }
+    if (slots > 1) bus.emit('toast', `${model.name ?? model.id} sert maintenant ${slots} sessions en même temps (${Math.round((loaded.tuning.context ?? 0) / 1024)}k de contexte chacune)`);
+    updateSharing();
     return loaded;
   });
+}
+
+// ── Sessions en parallèle, selon la demande ─────────────────────
+// Le moteur démarre avec une session. Une requête qui arrive quand toutes sont prises est notée :
+// la demande de pointe des 15 dernières minutes donne le nombre de sessions voulu (4 au plus).
+// Changer ce nombre relance le moteur : on ne le fait qu'à un moment où il ne répond à personne
+// (entre deux tours d'un agent), jamais au milieu d'une réponse.
+const MAX_SLOTS = 4;
+const DEMAND_MS = 15 * 60_000;
+const demand = new Map(); // id du modèle → [{ n, at }]
+export function noteDemand(modelId, n, now = Date.now()) {
+  const list = (demand.get(modelId) ?? []).filter((d) => now - d.at < DEMAND_MS);
+  list.push({ n, at: now });
+  demand.set(modelId, list);
+}
+export const wantedSlots = (modelId, now = Date.now()) => Math.min(MAX_SLOTS, Math.max(1, ...(demand.get(modelId) ?? []).filter((d) => now - d.at < DEMAND_MS).map((d) => d.n)));
+
+// Le nombre de sessions qui tient : la place libre, plus celle du modèle lui-même s'il est chargé,
+// plus celle des modèles inactifs qu'on peut décharger.
+export async function slotsFor(model, tuning) {
+  const wanted = wantedSlots(model.id);
+  if (wanted <= 1) return 1;
+  const free = await freeVram();
+  if (free === null) return 1;
+  const own = getState().engines?.[model.id] ? needMiB(model, { ...tuning, slots: getState().engines[model.id].slots ?? 1 }) : 0;
+  const spare = loadedModels().filter((id) => id !== model.id && !working(id) && !exclusive(modelById(id) ?? {}, tuningOf(id)))
+    .reduce((sum, id) => sum + needMiB(modelById(id), { ...tuningOf(id), slots: getState().engines[id]?.slots ?? 1 }), 0);
+  for (let slots = wanted; slots > 1; slots -= 1) {
+    if (free + own + spare - needMiB(model, { ...tuning, slots }) >= HEADROOM_MIN_MIB) return slots;
+  }
+  return 1;
+}
+
+// Appelé par la passerelle à chaque requête, avant de la relayer. n : réponses en cours pour ce
+// modèle, celle-ci comprise ; relayed : celles déjà parties au moteur. Rend la promesse d'un
+// rechargement avec plus de sessions quand il est temps, sinon null.
+const resizing = new Map();
+export function followDemand(modelId, n, relayed, reload) {
+  noteDemand(modelId, n);
+  const engine = getState().engines?.[modelId];
+  const model = modelById(modelId);
+  if (!engine || engine.status !== 'ready' || !model || exclusive(model, tuningOf(modelId))) return null;
+  if (resizing.has(modelId)) return resizing.get(modelId);
+  if (relayed > 0 || wantedSlots(modelId) <= (engine.slots ?? 1)) return null;
+  const task = (async () => {
+    // Rien ne gagne à relancer si la carte n'a pas la place d'une session de plus.
+    if (await slotsFor(model, tuningOf(modelId)) <= (engine.slots ?? 1)) {
+      notice(`Plus de place pour une ${(engine.slots ?? 1) + 1}e session de ${model.name ?? modelId} : les demandes passent l’une après l’autre`);
+      return;
+    }
+    console.log(`[harn] ${modelId} : ${wantedSlots(modelId)} sessions demandées, rechargement entre deux réponses`);
+    await stopEngine(modelId);
+    await reload(modelId);
+  })().finally(() => resizing.delete(modelId));
+  resizing.set(modelId, task);
+  return task;
+}
+
+// ── Prévenir l'utilisateur ─────────────────────────────────────
+// Plusieurs modèles sur la carte, ou plusieurs clients sur un même modèle : tout le monde va
+// plus lentement. state.sharing le dit dans la fenêtre, avec qui est concerné ; un message
+// s'affiche à chaque nouvelle situation.
+const toasted = new Set();
+function notice(message) {
+  if (toasted.has(message)) return;
+  toasted.add(message);
+  setTimeout(() => toasted.delete(message), DEMAND_MS).unref?.();
+  bus.emit('toast', message);
+}
+export function updateSharing() {
+  const engines = Object.entries(getState().engines ?? {}).filter(([, e]) => ['ready', 'loading'].includes(e.status));
+  const items = [];
+  if (engines.length > 1) items.push({ kind: 'models', models: engines.map(([id]) => ({ id, name: modelById(id)?.name ?? id, busy: inUse(id) })) });
+  for (const [id] of engines) {
+    const who = clientsOf(id);
+    if (who.length > 1) items.push({ kind: 'sessions', model: id, name: modelById(id)?.name ?? id, clients: who, slots: getState().engines[id]?.slots ?? 1 });
+  }
+  const next = items.length ? items : null;
+  if (JSON.stringify(next) === JSON.stringify(getState().sharing ?? null)) return;
+  update((s) => { s.sharing = next; });
+  for (const item of items) {
+    if (item.kind === 'sessions') notice(`${item.name} répond à ${item.clients.length} demandes en même temps (${[...new Set(item.clients)].join(', ')}) : chacune va plus lentement${item.slots < item.clients.length ? ', certaines attendent leur tour' : ''}. Si l’une ne vous sert pas, fermez-la.`);
+    if (item.kind === 'models' && item.models.filter((m) => m.busy).length > 1) notice(`${item.models.length} modèles se partagent la carte et répondent ensemble : chacun va plus lentement. Déchargez celui qui ne vous sert pas.`);
+  }
 }
 
 // Décharge le modèle inactif le moins récemment utilisé (autre que keep). Rend son id, ou null.

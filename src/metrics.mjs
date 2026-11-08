@@ -184,3 +184,6 @@ export async function loadRecent() {
 }
 
 export const activeModel = () => getState().active;
+// Qui attend une réponse de ce modèle en ce moment : la clé API (dots…) ou le client (pi…).
+export const clientsOf = (modelId) => [...inflight.keys()].filter((r) => r.model === modelId && r.engine !== 'peer')
+  .map((r) => r.key ?? String(r.client ?? 'client').split(/[\s/(]/)[0]);

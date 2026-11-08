@@ -204,6 +204,8 @@ export function recipeFor(model, tuning, { port = PORTS.engine } = {}) {
     env: { ...engineEnv(runtime.dir, runtime.libs), ...radeonVulkanEnv(runtime, state.hardware), ...(engineSheet(tuning.fork)?.env ?? {}) },
     endpoint: `http://127.0.0.1:${port}`,
     health: `http://127.0.0.1:${port}/health`,
+    slots: tuning.slots ?? 1,
+    context: tuning.context ?? null,
   };
   // Moteur ajouté avec l'accord de l'utilisateur (PR, fork) : il tourne dans la bulle, sans
   // réseau, et ne voit que ses fichiers, ceux du modèle et la clé du moteur (sandbox.mjs).
