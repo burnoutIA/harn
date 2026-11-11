@@ -143,6 +143,24 @@ Mesuré sur R9700 (Vulkan b12064, T=0,7, serveur neuf, une requête) :
 - Le banc écrit du code de zéro et ne voit pas ce gain : la variante sans n-gramme ne
   l'emporte que si elle gagne au-delà du bruit.
 
+### Petits modèles : tête MTP plutôt que brouillon séparé
+
+Mesuré sur R9700 (Vulkan b12064, T=0,7), prose / édition / code neuf, en tok/s :
+
+| | Qwen3.5-9B | Qwen3.5-4B |
+|---|---|---|
+| Sans spéculation | 94 / 93 / 94 | 149 / 148 / 149 |
+| Brouillon Qwen3.5-0.8B Q8_0, n3 | 52 / 82 / 78 | 61 / 97 / 82 |
+| GGUF -MTP d'unsloth, MTP2 | 128 / 172 / 165 | 183 / 248 / 230 |
+| GGUF -MTP, MTP3 + n-gramme | 122 / 362 / 173 | 170 / 345 / 226 |
+
+- Un brouillon séparé paie lui aussi le coût fixe par token : sur un petit modèle, il coûte
+  autant qu'il rapporte et divise la vitesse par deux. Ne pas l'essayer.
+- unsloth publie des GGUF `Qwen3.5-*-MTP-GGUF` avec la tête MTP (≈ 3 % plus gros). Les
+  prendre à la place des GGUF ordinaires.
+- `--spec-type draft-mtp,ngram-mod` est accepté par l'officiel ; Harn l'active par défaut
+  sur MTP, et le banc essaie aussi sans.
+
 ### Petits modèles : le plafond et le parallèle
 
 Chaque token coûte ~2-3 ms fixes (lancements de noyaux), quelle que soit la taille du modèle.

@@ -86,7 +86,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         loadedHeadroom = await freeVram();
       }
       // Un brouillon n-gramme se souvient de la réponse du passage précédent : un seul passage.
-      const runs = ['mtp-adaptive', 'ngram'].includes(tuning.spec?.type) ? 1 : 2;
+      const runs = ['mtp-adaptive', 'ngram'].includes(tuning.spec?.type) || tuning.spec?.ngram ? 1 : 2;
       const result = await measure(getState().active.endpoint, modelId, { workloads, weights, runs, sampling: model.sampling, onProgress: say });
       const entry = { id: `arm${index}`, stage, label, tuning, headroomMiB: loadedHeadroom, ...result };
       entry.ok = ownLauncher(model) || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
@@ -139,15 +139,20 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     const arms = [{ n: current.n - 1, pMin: current.pMin }, { n: current.n + 1, pMin: current.pMin }, ...mtpPlan(profile).arms]
       .filter((arm) => arm.n >= 2 && arm.n <= 6 && !seen.has(`${arm.n}/${arm.pMin}`) && seen.add(`${arm.n}/${arm.pMin}`))
       .slice(0, 3);
-    for (const arm of arms) best = better(await trial('Spéculation MTP', { ...best.tuning, spec: { type: 'mtp', n: arm.n, pMin: arm.pMin } }), best);
+    const ngram = current.ngram ? { ngram: true } : {};
+    for (const arm of arms) best = better(await trial('Spéculation MTP', { ...best.tuning, spec: { type: 'mtp', n: arm.n, pMin: arm.pMin, ...ngram } }), best);
   }
 
-  // Brouillon n-gramme (modèles sans MTP ; DFlash2, s'il existe, est essayé ensuite) : en place par
+  // Brouillon n-gramme (DFlash2, s'il existe, est essayé ensuite) : en place par
   // défaut, car son vrai gain est l'édition de fichiers, que le banc (code écrit de zéro, prose) ne
   // mesure pas. Le retirer ne l'emporte que s'il gagne au-delà du bruit.
-  if (['ngram', 'none'].includes(best.tuning.spec?.type ?? 'none') && (!model.mtp || best.tuning.noNextn) && engineSheet(runtimeKind(model, best.tuning))?.ngram) {
-    const flipped = best.tuning.spec?.type === 'ngram' ? { type: 'none' } : { type: 'ngram' };
-    best = better(await trial('Spéculation n-gramme', { ...best.tuning, spec: flipped }), best);
+  // Avec MTP (n fixe), le n-gramme s'y ajoute ou s'en retire de la même façon.
+  const spec = best.tuning.spec ?? { type: 'none' };
+  if (engineSheet(runtimeKind(model, best.tuning))?.ngram) {
+    let flipped = null;
+    if (['ngram', 'none'].includes(spec.type) && (!model.mtp || best.tuning.noNextn)) flipped = spec.type === 'ngram' ? { type: 'none' } : { type: 'ngram' };
+    else if (spec.type === 'mtp' && spec.n !== 'auto') flipped = { ...spec, ngram: !spec.ngram };
+    if (flipped) best = better(await trial('Spéculation n-gramme', { ...best.tuning, spec: flipped }), best);
   }
 
   const dflashContext = gpu ? roomFor(model, best, DFLASH_MIB) : null;

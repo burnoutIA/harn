@@ -112,6 +112,12 @@ test('modèle sans MTP : brouillon n-gramme par défaut', LIMIT, async () => {
   assert.equal(launches(model.id)[0].spec, 'ngram-mod');
 });
 
+test('modèle MTP sur llama.cpp officiel : MTP doublé du n-gramme', LIMIT, async () => {
+  const model = addModel('t-mtp-ngram', {});
+  await loadWithHeadroom(model, defaultTuning(model, 131072, HARDWARE));
+  assert.equal(launches(model.id)[0].spec, 'draft-mtp,ngram-mod');
+});
+
 test('banc : deux bancs lancés ensemble passent l’un après l’autre, profondeur mesurée, f16 retenu', LIMIT, async () => {
   const a = addModel('t-bench-a', { tps: 90, depthSlope: 0.6, f16DepthBonus: 0.5 });
   const b = addModel('t-bench-b', { tps: 70 });

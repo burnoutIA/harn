@@ -46,7 +46,10 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
     // Sans tête MTP : brouillon n-gramme, gratuit (pas de VRAM), qui reprend les passages déjà vus
     // dans le contexte. R9700, édition d'un fichier à T=0,7 : Qwen3.5-9B 89 → 192 tok/s, Qwen3.5-4B
     // 134 → 207, Gemma 4 12B 63 → 232 ; en prose rien ne correspond, il ne propose rien (débit égal).
-    spec: model.mtp && backend !== 'cpu' ? { type: 'mtp', n: mtp.n, pMin: mtp.pMin } : (model.engine ?? 'llama') === 'llama' ? { type: 'ngram' } : { type: 'none' },
+    // MTP doublé du n-gramme (llama.cpp officiel) : R9700, Qwen3.5-9B MTP3, édition 178 → 362 tok/s,
+    // prose et code neuf inchangés.
+    spec: model.mtp && backend !== 'cpu' ? { type: 'mtp', n: mtp.n, pMin: mtp.pMin, ...((model.engine ?? 'llama') === 'llama' ? { ngram: true } : {}) }
+      : (model.engine ?? 'llama') === 'llama' ? { type: 'ngram' } : { type: 'none' },
     fa: 'on',
     visionOnCpu: true,
     layers: 'all',
@@ -62,6 +65,7 @@ export function describe(tuning) {
   if (tuning.challengeArm) return tuning.challengeArm;
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
+  if (tuning.spec?.type === 'mtp' && tuning.spec.ngram) parts.push('n-gramme');
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
   if (tuning.spec?.type === 'ngram') parts.push('n-gramme');
   if (tuning.fa === 'off') parts.push('sans FA');
@@ -109,7 +113,8 @@ export function llamaArgs(model, files, tuning, hardware) {
     // Profondeur choisie par le moteur lui-même (llamAmpere : adaptative 3-4, réglée pour ses noyaux).
     if (draft.length) args.push('--spec-type', 'draft-mtp', ...draft);
   } else if (spec.type === 'mtp') {
-    args.push('--spec-type', 'draft-mtp', ...draft, '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
+    const ngram = spec.ngram && engineSheet(tuning.fork ?? 'llama')?.ngram;
+    args.push('--spec-type', ngram ? 'draft-mtp,ngram-mod' : 'draft-mtp', ...draft, '--spec-draft-n-max', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin));
     // Brouillon calculé sur les N premiers tokens seulement (fork RDNA Boosts) : la tête de sortie
     // (248k × 5120 pour Qwen3.8) n'est plus relue en entier à chaque passe du brouillon.
     if (spec.vocab) args.push('--spec-draft-mtp-vocab', String(spec.vocab));
