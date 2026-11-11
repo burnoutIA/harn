@@ -5,7 +5,7 @@ import { engineInUse, inFlightOf } from './idle.mjs';
 import { beginRequest, endRequest, onChunk } from './metrics.mjs';
 import { peerModels, peerRoute, peersWith } from './peers.mjs';
 import { freeVram } from './loading.mjs';
-import { followDemand, needMiB } from './placement.mjs';
+import { followDemand, needMiB, parallelAsked } from './placement.mjs';
 import { HEADROOM_MIN_MIB } from './tuner.mjs';
 import { getState } from './state.mjs';
 
@@ -102,9 +102,9 @@ const relayed = new Map();
 const relayedOf = (modelId) => relayed.get(modelId) ?? 0;
 
 export async function handleV1(req, res, url, { lan = false } = {}) {
-  const cors = lan ? { 'Access-Control-Allow-Origin': '*' } : {};
+  const cors = lan ? { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Harn-Parallel-Granted' } : {};
   if (lan && req.method === 'OPTIONS') {
-    res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'authorization, content-type' });
+    res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'authorization, content-type, x-harn-parallel' });
     return res.end();
   }
   const pathKey = extractPathKey(url.pathname);
@@ -147,7 +147,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (route) {
     return relay(req, res, {
       target: `${route.peer.url}${url.pathname.slice('/v1'.length)}${url.search}`,
-      headers: { ...route.headers, 'X-Harn-Hop': '1' },
+      headers: { ...route.headers, 'X-Harn-Hop': '1', ...(req.headers['x-harn-parallel'] ? { 'X-Harn-Parallel': req.headers['x-harn-parallel'] } : {}) },
       payload: Buffer.from(JSON.stringify({ ...body, model: route.remoteId })),
       measure: generative ? { model: `${route.remoteId}@${route.peer.id}`, endpoint: route.peer.url, engine: 'peer' } : null,
       unreachable: `Machine « ${route.peer.name} » injoignable`,
@@ -171,7 +171,8 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   res.once('close', engineInUse(modelId));
   // Plus de demandes en même temps que de sessions : le moteur en reçoit plus, à un moment où il
   // ne répond à personne (placement.mjs). Sinon la requête attend son tour dans le moteur.
-  const resize = followDemand(modelId, inFlightOf(modelId), relayedOf(modelId), activate);
+  // Le client peut annoncer d'avance combien de sessions il lui faut (X-Harn-Parallel: N, 4 au plus).
+  const resize = followDemand(modelId, inFlightOf(modelId), relayedOf(modelId), activate, parallelAsked(req.headers['x-harn-parallel']));
   if (resize) await resize.catch(() => {});
   // Pas chargé : on le charge, à côté des autres s'il tient (placement.mjs).
   if (getState().engines?.[modelId]?.status !== 'ready') {
@@ -194,12 +195,15 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
     measure: generative ? { model: modelId, endpoint: active.endpoint, engine } : null,
     unreachable: 'Moteur injoignable',
     decision, cors,
+    // Ce que le client a réellement : le plafond (4) et la place sur la carte peuvent donner moins
+    // que X-Harn-Parallel. Vaut pour cette machine seulement.
+    granted: active.slots ?? 1,
   });
 }
 
 // Relaie la requête vers target (le moteur d'ici ou une autre machine) octet pour octet, en
 // lisant au passage les compteurs pour le direct et l'historique.
-async function relay(req, res, { target, headers, payload, measure, unreachable, decision, cors }) {
+async function relay(req, res, { target, headers, payload, measure, unreachable, decision, cors, granted = null }) {
   const request = measure ? beginRequest({ ...measure, client: req.headers['user-agent'] ?? 'client', key: decision.key?.label ?? null }) : null;
 
   const controller = new AbortController();
@@ -220,6 +224,8 @@ async function relay(req, res, { target, headers, payload, measure, unreachable,
 
   res.writeHead(upstream.status, {
     'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
+    // Sessions accordées : celles du moteur d'ici, ou celles qu'a accordées l'autre machine.
+    ...(granted ? { 'X-Harn-Parallel-Granted': String(granted) } : upstream.headers.get('x-harn-parallel-granted') ? { 'X-Harn-Parallel-Granted': upstream.headers.get('x-harn-parallel-granted') } : {}),
     'Cache-Control': 'no-cache',
     // « Carte occupée » chez l'autre machine : le client sait quand réessayer.
     ...(upstream.headers.get('retry-after') ? { 'Retry-After': upstream.headers.get('retry-after') } : {}),

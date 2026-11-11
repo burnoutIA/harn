@@ -24,8 +24,8 @@ async function fakeHarn(key) {
     }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), hop: req.headers['x-harn-hop'] ?? null });
-    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '42' });
+    received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), hop: req.headers['x-harn-hop'] ?? null, ...(req.headers['x-harn-parallel'] ? { parallel: req.headers['x-harn-parallel'] } : {}) });
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '42', ...(req.headers['x-harn-parallel'] ? { 'X-Harn-Parallel-Granted': '2' } : {}) });
     res.end(JSON.stringify({ error: { message: 'carte occupée' } }));
   });
   return { server, received };
@@ -69,6 +69,12 @@ test('une machine ajoutée prête ses modèles, et la passerelle relaie vers ell
   assert.equal(reply.status, 503, 'l’erreur de l’autre machine remonte telle quelle');
   assert.equal(reply.headers.get('retry-after'), '42');
   assert.deepEqual(received.at(-1), { url: '/v1/chat/completions', body: { model: 'qwen-27b', messages: [{ role: 'user', content: 'salut' }] }, hop: '1' });
+
+  // Sessions annoncées : transmises à l'autre machine (elles valent pour sa copie), et ce qu'elle
+  // accorde revient au client.
+  const asked = await fetch(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Harn-Parallel': '3' }, body: JSON.stringify({ model: 'qwen-27b@pc2', messages: [] }) });
+  assert.equal(asked.headers.get('x-harn-parallel-granted'), '2');
+  assert.equal(received.at(-1).parallel, '3');
 
   // Sans @ : installé seulement sur l'autre machine, il y part tout seul.
   const post = (body, headers = {}) => fetch(`${base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });

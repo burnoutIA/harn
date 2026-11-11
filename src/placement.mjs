@@ -102,15 +102,25 @@ export function placeAndLoad(model, tuning) {
 // la demande de pointe des 15 dernières minutes donne le nombre de sessions voulu (4 au plus).
 // Changer ce nombre relance le moteur : on ne le fait qu'à un moment où il ne répond à personne
 // (entre deux tours d'un agent), jamais au milieu d'une réponse.
+//
+// Un client peut aussi annoncer ses sessions (en-tête X-Harn-Parallel: N). Elles valent pour CE
+// Harn (chaque machine gère sa copie du modèle : un client qui répartit sur pc1 et pc2 annonce à
+// chacune ce qu'il lui enverra). L'annonce tient tant que le client la renvoie, et ASKED.ms après
+// la dernière : passé ce délai, le moteur est relancé avec moins de sessions dès qu'il ne répond à
+// personne, pour rendre la mémoire aux autres usages de la carte. Les requêtes qui portent
+// l'annonce ne comptent pas dans la demande observée (15 min) : c'est le client qui décide.
 const MAX_SLOTS = 4;
 const DEMAND_MS = 15 * 60_000;
+export const ASKED = { ms: 60_000, retryMs: 5_000 };
 const demand = new Map(); // id du modèle → [{ n, at }]
+const asked = new Map();  // id du modèle → { n, at } (dernière annonce du client)
 export function noteDemand(modelId, n, now = Date.now()) {
   const list = (demand.get(modelId) ?? []).filter((d) => now - d.at < DEMAND_MS);
   list.push({ n, at: now });
   demand.set(modelId, list);
 }
-export const wantedSlots = (modelId, now = Date.now()) => Math.min(MAX_SLOTS, Math.max(1, ...(demand.get(modelId) ?? []).filter((d) => now - d.at < DEMAND_MS).map((d) => d.n)));
+const askedNow = (modelId, now) => { const a = asked.get(modelId); return a && now - a.at < ASKED.ms ? a.n : 1; };
+export const wantedSlots = (modelId, now = Date.now()) => Math.min(MAX_SLOTS, Math.max(1, askedNow(modelId, now), ...(demand.get(modelId) ?? []).filter((d) => now - d.at < DEMAND_MS).map((d) => d.n)));
 
 // Le nombre de sessions qui tient : la place libre, plus celle du modèle lui-même s'il est chargé,
 // plus celle des modèles inactifs qu'on peut décharger.
@@ -128,18 +138,29 @@ export async function slotsFor(model, tuning) {
   return 1;
 }
 
+// Valeur de l'en-tête X-Harn-Parallel : 2 à 4 sessions, sinon rien d'annoncé.
+export function parallelAsked(value) {
+  const n = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(n) && n > 1 ? Math.min(MAX_SLOTS, n) : null;
+}
+
 // Appelé par la passerelle à chaque requête, avant de la relayer. n : réponses en cours pour ce
-// modèle, celle-ci comprise ; relayed : celles déjà parties au moteur. Rend la promesse d'un
-// rechargement avec plus de sessions quand il est temps, sinon null.
+// modèle, celle-ci comprise ; relayed : celles déjà parties au moteur ; askedN : sessions
+// annoncées par le client (parallelAsked). Rend la promesse d'un rechargement avec plus de
+// sessions quand il est temps, sinon null.
 const resizing = new Map();
-export function followDemand(modelId, n, relayed, reload) {
-  noteDemand(modelId, n);
+const shrinkTimers = new Map();
+export function followDemand(modelId, n, relayed, reload, askedN = null) {
+  if (askedN) {
+    asked.set(modelId, { n: askedN, at: Date.now() });
+    armShrink(modelId, reload, ASKED.ms);
+  } else noteDemand(modelId, n);
   const engine = getState().engines?.[modelId];
   const model = modelById(modelId);
   if (!engine || engine.status !== 'ready' || !model || exclusive(model, tuningOf(modelId))) return null;
   if (resizing.has(modelId)) return resizing.get(modelId);
   if (relayed > 0 || wantedSlots(modelId) <= (engine.slots ?? 1)) return null;
-  const task = (async () => {
+  return resize(modelId, async () => {
     // Rien ne gagne à relancer si la carte n'a pas la place d'une session de plus.
     if (await slotsFor(model, tuningOf(modelId)) <= (engine.slots ?? 1)) {
       notice(`Plus de place pour une ${(engine.slots ?? 1) + 1}e session de ${model.name ?? modelId} : les demandes passent l’une après l’autre`);
@@ -148,9 +169,27 @@ export function followDemand(modelId, n, relayed, reload) {
     console.log(`[harn] ${modelId} : ${wantedSlots(modelId)} sessions demandées, rechargement entre deux réponses`);
     await stopEngine(modelId);
     await reload(modelId);
-  })().finally(() => resizing.delete(modelId));
+  });
+}
+function resize(modelId, work) {
+  const task = work().finally(() => resizing.delete(modelId));
   resizing.set(modelId, task);
   return task;
+}
+
+// L'annonce du client a expiré : moins de sessions, dès que le moteur ne répond à personne.
+function armShrink(modelId, reload, delay) {
+  clearTimeout(shrinkTimers.get(modelId));
+  const timer = setTimeout(() => {
+    shrinkTimers.delete(modelId);
+    const engine = getState().engines?.[modelId];
+    if (!engine || engine.status !== 'ready' || wantedSlots(modelId) >= (engine.slots ?? 1)) return;
+    if (inUse(modelId) || resizing.has(modelId)) return armShrink(modelId, reload, ASKED.retryMs);
+    console.log(`[harn] ${modelId} : annonce du client expirée, retour à ${wantedSlots(modelId)} session(s)`);
+    resize(modelId, async () => { await stopEngine(modelId); await reload(modelId); }).catch(() => {});
+  }, delay + 50);
+  timer.unref?.();
+  shrinkTimers.set(modelId, timer);
 }
 
 // ── Prévenir l'utilisateur ─────────────────────────────────────

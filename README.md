@@ -68,6 +68,13 @@ et propose la nouvelle par un bouton, qui l'applique et relance Harn. Seul le co
 - Interface : <http://127.0.0.1:4747>
 - API OpenAI : `http://127.0.0.1:4747/v1`. Si le champ `model` désigne un autre modèle installé,
   celui-ci est chargé.
+- Sessions en parallèle sur un même modèle (llama-server seulement) : le client peut les annoncer
+  avec l'en-tête `X-Harn-Parallel: N` (4 au plus). Chaque réponse porte
+  `X-Harn-Parallel-Granted` : les sessions réellement en place, parfois moins que demandé quand la
+  carte n'a pas la place. Le nombre vaut pour la machine qui sert le modèle : un client qui répartit
+  ses appels entre `modele` et `modele@pc2` annonce à chacune ce qu'il lui envoie. L'annonce tient
+  tant que le client la renvoie, et 60 s après la dernière ; ensuite le moteur revient au nombre de
+  sessions de départ dès qu'il ne répond à personne, ce qui rend la mémoire de la carte.
 - Après dix minutes sans requête, le modèle est déchargé et la carte graphique rendue au bureau.
   La requête suivante le recharge toute seule (elle attend le temps du chargement).
 - Pour brancher une autre application (Copilot, un éditeur, un autre poste du réseau) : voir

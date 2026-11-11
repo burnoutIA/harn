@@ -12,7 +12,7 @@ import { DIRS, PORTS } from '../src/paths.mjs';
 import { makePlan } from '../src/planner.mjs';
 import { loadWithHeadroom, tuneModel } from '../src/setup.mjs';
 import { activate } from '../src/activation.mjs';
-import { followDemand, updateSharing } from '../src/placement.mjs';
+import { ASKED, followDemand, parallelAsked, updateSharing } from '../src/placement.mjs';
 import { getState, update } from '../src/state.mjs';
 
 // Les scénarios qui ont cassé sur une vraie machine, rejoués avec un faux llama-server
@@ -210,4 +210,35 @@ test('sessions : la demande en ajoute une, jamais au milieu d’une réponse ; l
   updateSharing();
   assert.equal(getState().sharing?.[0]?.kind, 'models');
   assert.deepEqual(getState().sharing[0].models.map((m) => m.id).sort(), [a.id, b.id].sort());
+});
+
+test('sessions : le client les annonce (X-Harn-Parallel), le moteur les reçoit sans attendre la vague', LIMIT, async () => {
+  await stopEngine();
+  assert.equal(parallelAsked('3'), 3);
+  assert.equal(parallelAsked('12'), 4);
+  assert.equal(parallelAsked('1'), null);
+  assert.equal(parallelAsked('abc'), null);
+  assert.equal(parallelAsked(undefined), null);
+  const a = placed('t-asked-a', 4000);
+  await activate(a.id);
+  assert.equal(getState().engines[a.id].slots, 1);
+  // Une seule requête, mais trois sessions annoncées : relance tout de suite (personne n'attend de réponse).
+  const resize = followDemand(a.id, 1, 0, activate, parallelAsked('3'));
+  assert.ok(resize, 'rechargement attendu');
+  await resize;
+  const engine = getState().engines[a.id];
+  assert.equal(engine.slots, 3);
+  assert.equal(engine.args[engine.args.indexOf('--parallel') + 1], '3');
+  // Les requêtes annoncées ne laissent pas de demande de 15 min : l'annonce expirée, le moteur
+  // revient à une session dès qu'il ne répond à personne.
+  ASKED.ms = 300;
+  ASKED.retryMs = 100;
+  try {
+    followDemand(a.id, 3, 0, activate, 3);
+    const deadline = Date.now() + 20_000;
+    while (getState().engines[a.id]?.slots !== 1 || getState().engines[a.id]?.status !== 'ready') {
+      assert.ok(Date.now() < deadline, 'retour à une session attendu');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  } finally { ASKED.ms = 60_000; ASKED.retryMs = 5_000; }
 });
