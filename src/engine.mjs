@@ -67,6 +67,7 @@ export function describe(tuning) {
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'mtp' && tuning.spec.ngram) parts.push('n-gramme');
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
+  if (tuning.spec?.type === 'mtp-adaptive') parts.push(`MTP adaptatif ≤${tuning.spec.n} · n-gramme`);
   if (tuning.spec?.type === 'ngram') parts.push('n-gramme');
   if (tuning.fa === 'off') parts.push('sans FA');
   if (tuning.noNextn) parts.push('sans MTP (absent du fichier)');
