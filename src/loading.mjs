@@ -306,7 +306,7 @@ export async function loadWithHeadroom(model, tuning, { alone = true, freeMore =
       if (ticket !== current_()) throw superseded();
       // Un fichier qui annonce une couche MTP qu'il ne contient pas (convertisseur d'une autre
       // version) : on recharge en ignorant cette annonce avant de conclure à l'échec.
-      if (error.tensors && model.profile?.mtp && !current.noNextn) { current = { ...current, noNextn: true, spec: { type: 'none' } }; continue; }
+      if (error.tensors && model.profile?.mtp && !current.noNextn) { current = { ...current, noNextn: true, spec: { type: 'ngram' } }; continue; }
       if (error.fatal || exhausted(current) || ownLauncher(model)) throw error;
       current = smaller(current);
       continue;

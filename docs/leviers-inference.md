@@ -120,6 +120,37 @@ La tête MTP est déjà dans les GGUF `-mtp`. Le gain dépend de la bande passan
 - `--spec-draft-sampling probabilistic` : +16 % à 100k à T=0,7, −9 % à 4k. Pas en défaut.
 - Mesurer à `--parallel 1` : l'avantage disparaît vers parallel=4.
 
+### Brouillon n-gramme (`--spec-type ngram-mod`)
+
+Le levier des modèles sans tête MTP. Aucun modèle de plus, aucune VRAM : le moteur propose
+la suite d'un passage déjà présent dans le contexte, et le modèle la vérifie d'un coup.
+Activé par défaut dans Harn pour tout modèle llama.cpp sans MTP (officiel et RDNA Boosts ;
+pas Prism ni llamAmpere, non vérifiés).
+
+Mesuré sur R9700 (Vulkan b12064, T=0,7, serveur neuf, une requête) :
+
+| Modèle | Édition d'un fichier | Prose |
+|---|---|---|
+| Qwen3.5-9B Q4_K_M | 89 → 192 tok/s | 89 → 89 |
+| Qwen3.5-4B Q4_K_M | 134 → 207 | 136 → 135 |
+| Gemma 4 12B Q4_0 | 63 → 232 | 65 → 65 |
+
+- Gagne quand la réponse recopie le contexte (agent qui réécrit un fichier, diff, refactor).
+  En prose, rien ne correspond : il ne propose rien et ne coûte rien.
+- `ngram-mod` bat `ngram-simple` (n 4, m 16) sur la recopie d'un fichier : 9B 555 contre 263 tok/s, 4B 795 contre 435.
+- Il se souvient des requêtes précédentes : une même requête répétée paraît plus rapide.
+  Le banc ne fait donc qu'un passage par variante.
+- Le banc écrit du code de zéro et ne voit pas ce gain : la variante sans n-gramme ne
+  l'emporte que si elle gagne au-delà du bruit.
+
+### Petits modèles : le plafond et le parallèle
+
+Chaque token coûte ~2-3 ms fixes (lancements de noyaux), quelle que soit la taille du modèle.
+Sur R9700 (640 Go/s), la lecture des poids atteint 80 % de la bande passante pour un 9B,
+58 % pour un 4B, 48 % pour un 1,7B. En flux unique, un petit modèle ne passe guère 300 tok/s.
+Leur atout est le parallèle : Qwen3.5-4B, débit cumulé 129 / 251 / 423 / 548 tok/s pour
+1 / 2 / 4 / 8 flux (`llama-batched-bench`).
+
 ### DFlash2 (`--spec-type draft-dflash`)
 
 Dans llama.cpp depuis b10658. Brouillon séparé (`z-lab/Qwen3.8-27B-DFlash2-GGUF`, Q4_K_M

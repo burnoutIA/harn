@@ -3,7 +3,7 @@
 // Ajouter une migration : incrémenter SCHEMA_VERSION et décrire le passage à cette version.
 import { verbosityLabel } from './iq-test.mjs';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const MIGRATIONS = {
   // v2 : `layers` explicite dans chaque réglage. Avant, une cible --fit relevée (> 1 Gio)
@@ -27,6 +27,15 @@ const MIGRATIONS = {
     for (const profile of Object.values(state.profiles ?? {})) {
       const v = profile.iq?.verbosity;
       if (v && v.replyTokens === undefined && v.avgTokens !== undefined) v.label = verbosityLabel(v.avgTokens);
+    }
+  },
+  // v5 : les modèles llama.cpp sans spéculation passent au brouillon n-gramme (voir defaultTuning).
+  // Strata, Radiance, HyperQwen et Gemma Challenge n'utilisent pas ce champ ; un moteur qui ne
+  // connaît pas ngram-mod (Prism, llamAmpere) le lance sans spéculation, comme avant.
+  5: (state) => {
+    for (const profile of Object.values(state.profiles ?? {})) {
+      const tuning = profile.tuning;
+      if (tuning?.spec?.type === 'none' && !tuning.strataArm && !tuning.strataConfig) tuning.spec = { type: 'ngram' };
     }
   },
 };

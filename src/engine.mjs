@@ -43,7 +43,10 @@ export function defaultTuning(model, context, hardware, kv = 'q8_0') {
     context,
     backend,
     kv,
-    spec: model.mtp && backend !== 'cpu' ? { type: 'mtp', n: mtp.n, pMin: mtp.pMin } : { type: 'none' },
+    // Sans tête MTP : brouillon n-gramme, gratuit (pas de VRAM), qui reprend les passages déjà vus
+    // dans le contexte. R9700, édition d'un fichier à T=0,7 : Qwen3.5-9B 89 → 192 tok/s, Qwen3.5-4B
+    // 134 → 207, Gemma 4 12B 63 → 232 ; en prose rien ne correspond, il ne propose rien (débit égal).
+    spec: model.mtp && backend !== 'cpu' ? { type: 'mtp', n: mtp.n, pMin: mtp.pMin } : (model.engine ?? 'llama') === 'llama' ? { type: 'ngram' } : { type: 'none' },
     fa: 'on',
     visionOnCpu: true,
     layers: 'all',
@@ -60,6 +63,7 @@ export function describe(tuning) {
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
+  if (tuning.spec?.type === 'ngram') parts.push('n-gramme');
   if (tuning.fa === 'off') parts.push('sans FA');
   if (tuning.noNextn) parts.push('sans MTP (absent du fichier)');
   if (layersOf(tuning) === 'auto') parts.push('partagé CPU');
@@ -97,7 +101,8 @@ export function llamaArgs(model, files, tuning, hardware) {
   // GGUF qui annonce une couche d'anticipation (MTP) absente du fichier : on corrige la métadonnée
   // au chargement, le modèle tourne sur ses couches réelles, sans anticipation.
   if (tuning.noNextn && model.profile?.arch) args.push('--override-kv', `${model.profile.arch}.nextn_predict_layers=int:0`);
-  const spec = tuning.noNextn ? { type: 'none' } : tuning.spec ?? { type: 'none' };
+  // Sans couche MTP réelle, seul le brouillon n-gramme reste possible.
+  const spec = tuning.noNextn && tuning.spec?.type !== 'ngram' ? { type: 'none' } : tuning.spec ?? { type: 'none' };
   // Tête MTP livrée dans un fichier à part : le moteur la charge comme brouillon.
   const draft = files.mtpDraft ? ['--spec-draft-model', files.mtpDraft] : [];
   if (spec.type === 'mtp' && spec.n === 'auto') {
@@ -115,6 +120,9 @@ export function llamaArgs(model, files, tuning, hardware) {
     args.push('--spec-type', 'draft-mtp-adaptive,ngram-mod', ...draft, '--spec-ngram-mod-n-match', String(spec.n * 5),
       '--spec-draft-n-max', String(spec.n), '--spec-draft-n-start', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', '0');
     if (spec.vocab) args.push('--spec-draft-mtp-vocab', String(spec.vocab));
+  } else if (spec.type === 'ngram' && engineSheet(tuning.fork ?? (model.engine === 'prism' ? 'prism' : 'llama'))?.ngram) {
+    // Réglages par défaut du moteur (n-match 24, brouillon 48-64) : ce sont eux qui ont été mesurés.
+    args.push('--spec-type', 'ngram-mod');
   } else if (spec.type === 'dflash' && files.dflash) {
     // Le brouillon entier sur la carte (sinon le moteur peut le laisser au processeur).
     args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n), '-ngld', '999');

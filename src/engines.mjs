@@ -34,7 +34,8 @@ function portable(tuning, profile) {
 }
 
 const BUILTIN = {
-  llama: { id: 'llama', label: 'llama.cpp', repo: 'ggml-org/llama.cpp', source: 'release', tag: /^b\d+$/ },
+  // ngram : accepte --spec-type ngram-mod (vérifié sur b12064 et sur le fork RDNA Boosts).
+  llama: { id: 'llama', label: 'llama.cpp', repo: 'ggml-org/llama.cpp', source: 'release', tag: /^b\d+$/, ngram: true },
   // Prism ne sert que les modèles ternaires Bonsai, qui le désignent eux-mêmes.
   prism: { id: 'prism', label: 'llama.cpp Prism', repo: 'PrismML-Eng/llama.cpp', source: 'release', tag: /^prism-/, alternate: false },
   // llamAmpere (github.com/JakeATX/llamAmpere) : noyaux écrits pour les RTX 30. Mesuré sur la 3090
@@ -60,7 +61,7 @@ const BUILTIN = {
     id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'stew675/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
     ref: '81e969e9a90322b6416b4fd930dfd3d655275d7d', base: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807',
     tree: '1bac1001f1780a5907fbce256ceeeaac8b8561ec', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807' },
-    isolated: true, eligible: rdna4Linux,
+    isolated: true, eligible: rdna4Linux, ngram: true,
     // Sa fenêtre MTP (le brouillon ne garde que ~¼ du contexte) casse la vision : une image arrivée
     // au-delà de la fenêtre (816 tokens à la même position, Qwen-VL) ne trouve pas de place dans le
     // cache du brouillon → « failed to process mtmd chunk » (session pi à 43,7k tokens, 2026-11-03).

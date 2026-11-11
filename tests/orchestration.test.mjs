@@ -102,7 +102,14 @@ test('GGUF qui annonce une couche MTP absente : rechargé sans elle', LIMIT, asy
   const [first, second] = launches(model.id);
   assert.equal(first.overrides.length, 0);
   assert.deepEqual(second.overrides, ['xing4_0.nextn_predict_layers=int:0']);
-  assert.equal(second.spec, 'none');
+  // Sans couche MTP, il reste le brouillon n-gramme.
+  assert.equal(second.spec, 'ngram-mod');
+});
+
+test('modèle sans MTP : brouillon n-gramme par défaut', LIMIT, async () => {
+  const model = addModel('t-ngram', {}, { mtp: false });
+  await loadWithHeadroom(model, defaultTuning(model, 131072, HARDWARE));
+  assert.equal(launches(model.id)[0].spec, 'ngram-mod');
 });
 
 test('banc : deux bancs lancés ensemble passent l’un après l’autre, profondeur mesurée, f16 retenu', LIMIT, async () => {
