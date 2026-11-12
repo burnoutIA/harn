@@ -232,6 +232,7 @@ main { padding: 8px clamp(16px, 4vw, 48px) 72px; max-width: var(--page-max); wid
 @media (max-width: 760px) { .next { grid-template-columns: 1fr; } .next .side-action { justify-items: start; text-align: left; } }
 .tip { display: flex; gap: 12px; align-items: flex-start; padding: 16px 18px; border-radius: 14px; background: var(--surface-2); color: var(--muted); font-size: calc(14px * var(--fs)); }
 .tip b { color: var(--text); }
+.tip > svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 
 /* ── Accueil : activité ─────────────────────────────────────── */
 .activity { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 0; padding: 0; overflow: hidden; }

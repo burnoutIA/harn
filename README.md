@@ -68,17 +68,81 @@ et propose la nouvelle par un bouton, qui l'applique et relance Harn. Seul le co
 - Interface : <http://127.0.0.1:4747>
 - API OpenAI : `http://127.0.0.1:4747/v1`. Si le champ `model` désigne un autre modèle installé,
   celui-ci est chargé.
-- Sessions en parallèle sur un même modèle (llama-server seulement) : le client peut les annoncer
-  avec l'en-tête `X-Harn-Parallel: N` (4 au plus). Chaque réponse porte
-  `X-Harn-Parallel-Granted` : les sessions réellement en place, parfois moins que demandé quand la
-  carte n'a pas la place. Le nombre vaut pour la machine qui sert le modèle : un client qui répartit
-  ses appels entre `modele` et `modele@pc2` annonce à chacune ce qu'il lui envoie. L'annonce tient
-  tant que le client la renvoie, et 60 s après la dernière ; ensuite le moteur revient au nombre de
-  sessions de départ dès qu'il ne répond à personne, ce qui rend la mémoire de la carte.
+- Plusieurs requêtes, modèles ou machines à la fois : voir [« Parallélisme »](#parallélisme).
 - Après dix minutes sans requête, le modèle est déchargé et la carte graphique rendue au bureau.
   La requête suivante le recharge toute seule (elle attend le temps du chargement).
 - Pour brancher une autre application (Copilot, un éditeur, un autre poste du réseau) : voir
   [« Sécurité de l'inférence »](#sécurité-de-linférence).
+
+## Parallélisme
+
+Trois niveaux, du plus fin au plus large.
+
+### Plusieurs sessions sur un même modèle
+
+Seulement avec llama-server. Les moteurs qui se réservent toute la carte (vLLM, Strata, modèle
+partagé avec la RAM, CPU) répondent à une requête à la fois.
+
+- Le moteur démarre avec une session. Quand une requête arrive alors que toutes sont prises, Harn
+  le note. La pointe des 15 dernières minutes donne le nombre de sessions voulu, 4 au plus.
+- Ajouter une session relance le moteur (llama-server ne sait pas changer `--parallel` en route).
+  Harn ne le fait qu'à un moment où le modèle ne répond à personne, et seulement si la carte a la
+  place ; il décharge au besoin les modèles inactifs. En attendant, les requêtes en trop attendent
+  leur tour dans le moteur.
+- Chaque session a son propre cache de tout le contexte : 3 sessions de 32k, c'est un moteur lancé
+  à 96k. Pas de cache commun (`--kv-unified`) : les sessions s'y partageraient le contexte, et un
+  agent qui lit « 128k » dans `/v1/models` ne compacterait pas à temps alors que les autres ont
+  déjà rempli le cache. Sa requête échouerait, ou le début de sa conversation serait jeté sans
+  qu'il le sache. Avec un cache par session, la fenêtre annoncée est vraie pour chacune.
+
+**Annoncer ses sessions (`X-Harn-Parallel`).** Un client qui sait d'avance combien de requêtes il
+enverra en même temps peut l'annoncer, pour ne pas attendre que la première vague passe une par
+une :
+
+```
+X-Harn-Parallel: 3              (requête, 2 à 4)
+X-Harn-Parallel-Granted: 3      (chaque réponse)
+```
+
+- `Granted` donne les sessions réellement en place au moment de la réponse. C'est parfois moins
+  que demandé, quand la carte n'a pas la place ou qu'une réponse en cours a empêché la relance :
+  le client relit la valeur à chaque réponse.
+- Le nombre vaut pour la machine qui sert le modèle. Un client qui répartit ses appels entre
+  `modele` et `modele@pc2` annonce à chacune ce qu'il lui envoie, et nomme la machine : sans `@`,
+  Harn choisit lui-même où la requête part.
+- L'annonce tient tant que le client la renvoie, et 60 s après la dernière. Ensuite le moteur
+  revient à moins de sessions dès qu'il ne répond à personne, ce qui rend la mémoire de la carte
+  aux autres usages. Les requêtes annoncées ne comptent pas dans la demande des 15 minutes.
+- Sur le port réseau local, l'en-tête est admis en CORS et `Granted` est lisible par une page web.
+
+**Rester interchangeable avec les autres fournisseurs.** Les API en ligne (DeepSeek, Claude…) ne
+connaissent pas ces en-têtes et les ignorent : un client peut envoyer `X-Harn-Parallel` à tous ses
+fournisseurs avec le même code. S'il reçoit `X-Harn-Parallel-Granted`, il règle sa concurrence sur
+cette valeur ; sinon il garde celle de sa configuration, ou se règle sur les réponses 429 comme
+partout ailleurs. Sans l'en-tête, Harn marche aussi : il suit la demande, avec du retard.
+
+### Plusieurs modèles sur une même carte
+
+Un moteur par modèle. Avant de charger, Harn calcule la place que prendra le modèle (mesurée à son
+dernier chargement, sinon estimée) ; s'il ne tient pas, il décharge le modèle inactif utilisé le
+moins récemment, et si tous répondent, il attend qu'une réponse finisse. Quand plusieurs modèles
+se partagent la carte, ou plusieurs clients un même modèle, l'accueil le signale, avec un bouton
+« Décharger » pour ceux qui ne servent pas : quand ils répondent ensemble, chacun va moins vite.
+
+### Plusieurs machines
+
+Les modèles d'une autre machine Harn du réseau s'utilisent ici sous le nom `modele@machine`
+(`qwen-27b@pc2`). Pour en ajouter une : sur elle, ouvrir l'API au réseau local et créer une clé ;
+ici, Machine → Autres machines Harn, avec son nom, son adresse (`http://192.168.1.38:4748/v1`) et
+cette clé. Une requête sans `@` part là où le modèle sera servi le plus tôt. Chaque machine
+gère sa carte et ses sessions ; une requête venue d'une autre machine n'est jamais renvoyée plus
+loin.
+
+### Ce qui reste un par un
+
+Les bancs, les tests d'intelligence, les analyses et la génération d'images passent par une file
+d'attente de la carte. Pendant le banc d'un modèle, la carte lui appartient : les requêtes pour un
+autre modèle sont refusées (503 avec `Retry-After`) plutôt que de fausser la mesure.
 
 ## Ce qui se passe au premier démarrage
 

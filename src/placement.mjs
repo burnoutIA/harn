@@ -209,7 +209,7 @@ export function updateSharing() {
   if (engines.length > 1) items.push({ kind: 'models', models: engines.map(([id]) => ({ id, name: modelById(id)?.name ?? id, busy: inUse(id) })) });
   for (const [id] of engines) {
     const who = clientsOf(id);
-    if (who.length > 1) items.push({ kind: 'sessions', model: id, name: modelById(id)?.name ?? id, clients: who, slots: getState().engines[id]?.slots ?? 1 });
+    if (who.length > 1) items.push({ kind: 'sessions', model: id, name: modelById(id)?.name ?? id, clients: who, slots: getState().engines[id]?.slots ?? 1, max: exclusive(modelById(id) ?? {}, tuningOf(id)) ? 1 : MAX_SLOTS });
   }
   const next = items.length ? items : null;
   if (JSON.stringify(next) === JSON.stringify(getState().sharing ?? null)) return;

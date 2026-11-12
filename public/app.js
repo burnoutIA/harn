@@ -752,7 +752,7 @@ function renderSharing() {
   const lines = items.map((item) => {
     if (item.kind === 'sessions') {
       const who = [...new Set(item.clients)].join(', ');
-      const wait = item.slots < item.clients.length ? ` Le modèle a ${item.slots} session${item.slots > 1 ? 's' : ''} : les autres attendent leur tour, Harn en ajoutera une dès qu’il ne répondra à personne si la carte a la place.` : ` ${item.slots} sessions en parallèle.`;
+      const wait = item.slots < item.clients.length ? ` Le modèle a ${item.slots} session${item.slots > 1 ? 's' : ''}${item.slots < item.max ? '' : ' (le maximum)'} : les autres attendent leur tour${item.slots < item.max ? ', Harn en ajoutera une dès qu’il ne répondra à personne si la carte a la place' : ''}.` : ` ${item.slots} sessions en parallèle.`;
       return `<b>${esc(item.name)}</b> répond à ${item.clients.length} demandes en même temps (${esc(who)}).${wait} Si l’une ne vous sert pas, fermez-la : les autres iront plus vite.`;
     }
     const names = item.models.map((m) => `${esc(m.name)}${m.busy ? ' (répond)' : ''}`).join(', ');
