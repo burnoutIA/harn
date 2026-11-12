@@ -23,6 +23,34 @@ export function setActivator(fn, busy = () => null, free = async () => {}) { act
 // réponse vide. On pose medium quand le client ne dit rien (décision du poste de référence).
 const EFFORT = { minimal: 'low', low: 'low', medium: 'medium', high: 'xhigh', xhigh: 'xhigh', max: 'xhigh' };
 
+const VLLM = new Set(['hyperqwen', 'radiance', 'gemma-challenge']);
+
+// vLLM refuse (400) une requête dont prompt + max_tokens dépasse le contexte, même d'un token.
+// pi ramène max_tokens à la place qui reste d'après SA estimation du prompt, qui peut être un
+// peu courte : la requête était refusée et pi compactait pour rien. Le message de vLLM ne donne
+// qu'une borne (« at least »), pas le vrai compte : on le demande à /tokenize (~60 ms), puis
+// max_tokens = la place réelle. Rien si elle est trop petite pour une réponse : l'erreur remonte
+// et le client compacte, ce qu'il doit faire.
+const FIT_MARGIN = 16;
+const FIT_MIN_OUTPUT = 1024;
+export async function fitContext(endpoint, shaped) {
+  if (!Array.isArray(shaped?.messages)) return null;
+  const response = await fetch(`${endpoint}/tokenize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...engineHeaders() },
+    body: JSON.stringify({ model: shaped.model, messages: shaped.messages, tools: shaped.tools, chat_template_kwargs: shaped.chat_template_kwargs, add_generation_prompt: true }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) return null;
+  const { count, max_model_len: context } = await response.json();
+  const room = context - count - FIT_MARGIN;
+  if (!(count > 0) || !(room >= FIT_MIN_OUTPUT)) return null;
+  const fitted = { ...shaped };
+  for (const field of ['max_tokens', 'max_completion_tokens']) if (fitted[field] != null) fitted[field] = Math.min(fitted[field], room);
+  if (fitted.max_tokens == null && fitted.max_completion_tokens == null) fitted.max_tokens = room;
+  return { payload: Buffer.from(JSON.stringify(fitted)), count, room };
+}
+
 export function shapeRequest(body, model) {
   const shaped = { ...body, model: model.id };
   if (model.engine !== 'strata' && model.reasoning) {
@@ -36,7 +64,7 @@ export function shapeRequest(body, model) {
   }
   // vLLM livre plusieurs tokens par morceau en décodage spéculatif (~2 avec DFlash2) : il donne le
   // compte exact dans chaque morceau, sinon le direct afficherait la moitié de la vitesse.
-  const vllm = ['hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine);
+  const vllm = VLLM.has(model.engine);
   if (shaped.stream) shaped.stream_options = { include_usage: true, ...(vllm ? { continuous_usage_stats: true } : {}), ...(body.stream_options ?? {}) };
   return shaped;
 }
@@ -188,10 +216,17 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
   const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';
+  const shaped = generative ? shapeRequest(body, model) : null;
   return relay(req, res, {
     target: `${active.endpoint}${url.pathname}${url.search}`,
     headers: engineHeaders(),
-    payload: generative ? Buffer.from(JSON.stringify(shapeRequest(body, model))) : raw,
+    payload: generative ? Buffer.from(JSON.stringify(shaped)) : raw,
+    // vLLM : prompt + max_tokens au-delà du contexte → max_tokens ramené à la place réelle, une fois.
+    fit: generative && VLLM.has(model.engine) ? async () => {
+      const fitted = await fitContext(active.endpoint, shaped);
+      if (fitted) console.log(`[harn] ${modelId} : max_tokens ramené à ${fitted.room} (prompt de ${fitted.count} tokens, plus long que l'estimation du client)`);
+      return fitted?.payload ?? null;
+    } : null,
     measure: generative ? { model: modelId, endpoint: active.endpoint, engine } : null,
     unreachable: 'Moteur injoignable',
     decision, cors,
@@ -203,20 +238,32 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
 
 // Relaie la requête vers target (le moteur d'ici ou une autre machine) octet pour octet, en
 // lisant au passage les compteurs pour le direct et l'historique.
-async function relay(req, res, { target, headers, payload, measure, unreachable, decision, cors, granted = null }) {
+async function relay(req, res, { target, headers, payload, measure, unreachable, decision, cors, granted = null, fit = null }) {
   const request = measure ? beginRequest({ ...measure, client: req.headers['user-agent'] ?? 'client', key: decision.key?.label ?? null }) : null;
 
   const controller = new AbortController();
   res.on('close', () => { if (!res.writableFinished) controller.abort(); });
 
+  const send = (body) => fetch(target, {
+    method: req.method,
+    headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', ...headers },
+    body: ['GET', 'HEAD'].includes(req.method) ? undefined : body,
+    signal: controller.signal,
+  });
   let upstream;
   try {
-    upstream = await fetch(target, {
-      method: req.method,
-      headers: { 'Content-Type': req.headers['content-type'] ?? 'application/json', ...headers },
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : payload,
-      signal: controller.signal,
-    });
+    upstream = await send(payload);
+    // Prompt + max_tokens au-delà du contexte (vLLM) : renvoyée une fois avec la place réelle.
+    if (upstream.status === 400 && fit) {
+      const text = await upstream.text();
+      const fitted = /maximum context length/i.test(text) ? await fit().catch(() => null) : null;
+      if (fitted) upstream = await send(fitted);
+      else {
+        if (request) await endRequest(request, { error: 'HTTP 400' });
+        res.writeHead(400, { 'Content-Type': upstream.headers.get('content-type') ?? 'application/json', ...cors });
+        return res.end(text);
+      }
+    }
   } catch (error) {
     if (request) await endRequest(request, { error: error.message });
     return sendJson(res, 502, { error: { message: `${unreachable} : ${error.message}` } }, cors);
