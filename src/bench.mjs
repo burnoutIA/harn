@@ -61,7 +61,18 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   // Le banc mesure le modèle seul sur la carte : vitesse et marge VRAM ne valent qu'ainsi.
   await stopOthers(modelId);
   // engine : le moteur imposé quand l'officiel ne sait pas charger ce modèle ({ fork, backend }).
-  const initial = startFrom ?? await loadWithHeadroom(model, { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) });
+  const startTuning = { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) };
+  // Un moteur compilé par Harn dont les sources ont changé (correctif ajouté ou modifié) est recompilé
+  // avant toute mesure : sinon le banc mesurerait l'ancien binaire. Sans changement, rien à faire.
+  if (!startFrom && startTuning.fork && engineSheet(startTuning.fork)?.source === 'build') {
+    const sheet = engineSheet(startTuning.fork);
+    onProgress(`${sheet.label} · préparation du moteur`);
+    await ensureEngine({ id: sheet.id }, { hardware, onLog: (text) => {
+      const step = String(text).match(/\[\s*(\d+)%\]/g)?.at(-1);
+      if (step) onProgress(`${sheet.label} · compilation ${step}`);
+    } }).catch((error) => recordBuildFailure(sheet.id, error, hardware));
+  }
+  const initial = startFrom ?? await loadWithHeadroom(model, startTuning);
 
   let loadedTuning = initial.tuning;
   let loadedHeadroom = initial.headroomMiB;
@@ -191,6 +202,23 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
       best = better(await trial('Backend', { ...best.tuning, backend }), best);
     } catch (error) {
       results.push({ id: backend, stage: 'Backend', label: backend, error: error.message, ok: false });
+    }
+  }
+
+  // Les variantes propres au moteur du réglage (fiche de engines.mjs : DFlash2, MTP adaptatif…).
+  // alternates() écarte le moteur courant : sans cette étape, un modèle déjà passé sur un fork ne
+  // réessaierait jamais ses variantes, même quand le moteur change (nouveau correctif de Harn).
+  const ownSheet = gpu && best.tuning.fork ? engineSheet(best.tuning.fork) : null;
+  if (ownSheet?.arms) {
+    try {
+      const arms = ownSheet.arms({ ...best.tuning }, model).filter((arm) => describe(arm) !== describe(best.tuning));
+      if (model.dflash && arms.some((arm) => arm.spec?.type === 'dflash')) {
+        onProgress(`${ownSheet.label} · téléchargement du brouillon DFlash2`);
+        await downloadFile(model, model.dflash);
+      }
+      for (const arm of arms) best = better(await trial(`Moteur ${ownSheet.label}`, arm), best);
+    } catch (error) {
+      results.push({ id: ownSheet.id, stage: `Moteur ${ownSheet.label}`, label: 'variantes', error: error.message.slice(0, 200), ok: false });
     }
   }
 
