@@ -62,6 +62,12 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   await stopOthers(modelId);
   // engine : le moteur imposé quand l'officiel ne sait pas charger ce modèle ({ fork, backend }).
   const startTuning = { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) };
+  // Le contexte repart de l'estimation du plan : un banc passé au mauvais moment (carte encore occupée
+  // par un autre moteur) l'avait réduit, et rien ne le faisait remonter. Le chargement le réduit à
+  // nouveau si la marge manque vraiment.
+  const estimate = state.plan?.verdicts?.find((v) => v.id === modelId);
+  const estimated = estimate?.contextEstimated ?? estimate?.context;
+  if (!startFrom && !ownLauncher(model) && estimated > (startTuning.context ?? 0)) startTuning.context = estimated;
   // Un moteur compilé par Harn dont les sources ont changé (correctif ajouté ou modifié) est recompilé
   // avant toute mesure : sinon le banc mesurerait l'ancien binaire. Sans changement, rien à faire.
   if (!startFrom && startTuning.fork && engineSheet(startTuning.fork)?.source === 'build') {
