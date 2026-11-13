@@ -278,6 +278,16 @@ export function makePlan(hardware, scores = {}, profiles = {}) {
   const verdicts = MODELS.map((model) => ({ id: model.id, ...assess(model, hardware), intelligence: q(model), tested: scores[model.id] !== undefined }));
   const verdict = (id) => verdicts.find((entry) => entry.id === id);
   const calibration = calibrate(verdicts, profiles);
+  // Le contexte d'un modèle passé au banc : celui du réglage retenu, réellement chargé. Le banc peut
+  // s'écarter de l'estimation (brouillon DFlash2, marge VRAM) ; l'estimation reste dans contextEstimated.
+  for (const entry of verdicts) {
+    const tuned = profiles[entry.id]?.bench ? profiles[entry.id]?.tuning?.context : null;
+    if (tuned && tuned !== entry.context) {
+      entry.contextEstimated = entry.context;
+      entry.context = tuned;
+      entry.meetsContext = tuned >= OBJECTIVE.minContext;
+    }
+  }
   // Note globale : mesurée pour un modèle passé aux bancs, sinon estimée (intelligence, vitesse et
   // contexte attendus ici). C'est elle qui départage les modèles qui tiennent l'objectif.
   for (const entry of verdicts) {

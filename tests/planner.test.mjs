@@ -29,6 +29,16 @@ test('Strata sur Radeon : la R9700 oui, une RX 6600 non', () => {
   assert.ok(amd('AMD Radeon RX 6600').verdicts.filter((v) => /strata/.test(v.id)).every((v) => v.fit === 'no'));
 });
 
+test('contexte affiché : celui du réglage retenu par le banc, l’estimation sinon', () => {
+  const hw = { ...machine(32, 128), os: { platform: 'linux' }, primary: { vendor: 'amd', name: 'AMD Radeon AI PRO R9700', vramMiB: 32 * 1024 } };
+  const id = 'qwen3-8-27b-gguf-ud-q4-k-m';
+  const estimated = makePlan(hw).verdicts.find((v) => v.id === id).context;
+  const benched = makePlan(hw, {}, { [id]: { tuning: { context: 120832 }, bench: { winner: { tps: 87.3 } } } }).verdicts.find((v) => v.id === id);
+  assert.equal(benched.context, 120832);
+  assert.equal(benched.contextEstimated, estimated);
+  assert.equal(makePlan(hw, {}, { [id]: { tuning: { context: 120832 } } }).verdicts.find((v) => v.id === id).context, estimated, 'sans banc : l’estimation');
+});
+
 test('sous Linux sans Python venv : Strata hors de portée, avec la commande à lancer', () => {
   const plan = makePlan({ ...machine(24, 128), os: { platform: 'linux' }, python: { ok: false } });
   const strata = plan.verdicts.filter((v) => /strata/.test(v.id));
