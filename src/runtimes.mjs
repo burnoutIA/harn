@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { copyFile, link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -287,20 +288,34 @@ async function ensureRocm(onLog) {
 // Les puces RDNA4 : gfx1201 (Navi 48 : RX 9070, R9700, R9600D), gfx1200 (Navi 44 : RX 9060).
 export const rdna4Target = (hardware) => (/9060/.test(hardware?.primary?.name ?? '') ? 'gfx1200' : 'gfx1201');
 
-// sheet : { id, label, repo, ref (commit des correctifs), base (commit llama.cpp), tree }.
+// Correctifs de Harn (src/assets/<fiche>/), posés après la série du fork et la vérification de son arbre.
+// L'empreinte de leur contenu entre dans l'identité du build : un correctif modifié ou ajouté recompile,
+// dans un dossier à part (l'ancien moteur reste utilisable tant que le nouveau n'est pas prêt).
+const ENGINE_PATCHES = fileURLToPath(new URL('./assets/', import.meta.url));
+async function harnPatches(sheet) {
+  const files = (sheet.patches ?? []).map((name) => path.join(ENGINE_PATCHES, sheet.id, name));
+  if (!files.length) return { files, build: sheet.ref, dir: sheet.ref.slice(0, 12) };
+  const hash = createHash('sha256');
+  for (const file of files) hash.update(await readFile(file));
+  const short = hash.digest('hex').slice(0, 12);
+  return { files, build: `${sheet.ref}+${short}`, dir: `${sheet.ref.slice(0, 12)}-${short}` };
+}
+
+// sheet : { id, label, repo, ref (commit des correctifs), base (commit llama.cpp), tree, patches? }.
 export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
   const runtimeId = `${sheet.id}-hip`;
   const existing = getState().runtimes[runtimeId];
-  if (existing?.commit === sheet.ref && (await stat(existing.serverPath).catch(() => null))) return existing;
+  const own = await harnPatches(sheet);
+  if ((existing?.build ?? existing?.commit) === own.build && (await stat(existing.serverPath).catch(() => null))) return existing;
   const rocm = await ensureRocm(onLog);
-  const repoDir = path.join(DIRS.runtime, sheet.id, sheet.ref.slice(0, 12));
+  const repoDir = path.join(DIRS.runtime, sheet.id, own.dir);
   const target = rdna4Target(hardware);
   const buildDir = `build-${target}`;
   const binDir = path.join(repoDir, buildDir, 'bin');
   const serverPath = path.join(binDir, 'llama-server');
   const libs = [path.join(rocm, 'lib')];
 
-  if (!((await builtCommit(repoDir)) === sheet.ref && (await stat(serverPath).catch(() => null)))) {
+  if (!((await builtCommit(repoDir)) === own.build && (await stat(serverPath).catch(() => null)))) {
     const fetchSource = (repo, ref, what) => download({
       id: `runtime:${sheet.id}-${what}`, label: `${sheet.label} (${what} ${ref.slice(0, 7)})`,
       url: `https://github.com/${repo}/archive/${ref}.tar.gz`, dest: path.join(DIRS.downloads, `${sheet.id}-${what}-${ref.slice(0, 7)}.tar.gz`),
@@ -326,6 +341,10 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
     const tree = (await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir })).stdout.trim();
     if (tree !== sheet.tree) throw new Error(`${sheet.label} : les sources obtenues ne sont pas celles publiées (arbre ${tree.slice(0, 12)}, attendu ${sheet.tree.slice(0, 12)})`);
     await rm(patchDir, { recursive: true, force: true });
+    for (const file of own.files) {
+      onLog(`Correctif de Harn : ${path.basename(file)}`);
+      await git(['apply', file]);
+    }
     // Le clang de ROCm range ses en-têtes après /usr/include : sans -isystem, ceux du ROCm de la
     // distribution (Ubuntu 26.04 : 7.1, dans /usr/include/hip) passent devant et la compilation échoue.
     const env = { ...process.env, PATH: `${path.join(rocm, 'bin')}:${path.join(rocm, 'llvm', 'bin')}:${process.env.PATH}`, ROCM_PATH: rocm, HIP_PATH: rocm, HIP_PLATFORM: 'amd' };
@@ -340,7 +359,7 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
       `-Dhip_DIR=${path.join(rocm, 'lib', 'cmake', 'hip')}`, `-DCMAKE_HIP_FLAGS=--rocm-path=${rocm} -isystem ${path.join(rocm, 'include')}`,
       `-DCMAKE_CXX_FLAGS=-isystem ${path.join(rocm, 'include')}`], { cwd: repoDir });
     await step(['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 120 * 60_000 });
-    await writeFile(path.join(repoDir, '.harn-commit'), sheet.ref);
+    await writeFile(path.join(repoDir, '.harn-commit'), own.build);
   }
 
   // Version et cartes relevées dans la bulle : ce binaire ne tourne jamais hors d'elle.
@@ -352,7 +371,7 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
   const version = (await probe(['--version'])).match(/version:\s*(\S+)/)?.[1];
   if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
   const devices = [...(await probe(['--list-devices'])).matchAll(/^\s+([A-Za-z]+\d+): (.+?) \((\d+) MiB/gm)].map(([, id, name, mib]) => ({ id, name, mib: Number(mib) }));
-  const info = { kind: sheet.id, label: sheet.label, backend: 'hip', tag: sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, libs,
+  const info = { kind: sheet.id, label: sheet.label, backend: 'hip', tag: sheet.ref.slice(0, 7) + (own.files.length ? '+harn' : ''), commit: sheet.ref, build: own.build, version, dir: binDir, serverPath, libs,
     devices: devices.length ? devices : null, verified: false, builtWith: `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;

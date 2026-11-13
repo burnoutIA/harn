@@ -1,6 +1,7 @@
 import './helpers/home.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 import { modelById } from '../src/catalog.mjs';
 import { shapeRequest } from '../src/gateway.mjs';
 import { makePlan, pickBackend } from '../src/planner.mjs';
@@ -372,13 +373,18 @@ test('RDNA Boosts : proposé aux Radeon RDNA4 sous Linux, deux façons d’antic
   const model = modelById('qwen3-8-27b-gguf-ud-q4-k-m');
   const r9700 = { ...named('AMD Radeon AI PRO R9700', 0, 32, 'amd'), os: { platform: 'linux' }, cpu: { physical: 8 } };
   const official = { context: 131072, backend: 'vulkan', kv: 'q8_0', batch: 1024, ubatch: 512, spec: { type: 'mtp', n: 3, pMin: 0 } };
+  // Les correctifs de Harn posés sur le fork sont livrés avec Harn.
+  for (const name of engineSheet('rdnaboosts').patches ?? []) {
+    const text = await readFile(new URL(`../src/assets/rdnaboosts/${name}`, import.meta.url), 'utf8');
+    assert.match(text, /^diff --git /m);
+  }
   if (await sandboxAvailable()) {
     const found = await alternates(model, official, gpuProfile(r9700), r9700);
     const boosts = found.find((a) => a.id === 'rdnaboosts');
     assert.ok(boosts);
-    // Avec un brouillon DFlash2 : DFlash2 n=4 et n=6, puis MTP 3 sur brouillon réduit.
-    const [d4, d6, short] = boosts.arms('vulkan');
-    assert.deepEqual([d4.spec, d6.spec.n, d4.backend, d4.fork], [{ type: 'dflash', n: 4 }, 6, 'hip', 'rdnaboosts']);
+    // Avec un brouillon DFlash2 : DFlash2 n=4 et n=7, puis MTP 3 sur brouillon réduit.
+    const [d4, d7, short] = boosts.arms('vulkan');
+    assert.deepEqual([d4.spec, d7.spec.n, d4.backend, d4.fork], [{ type: 'dflash', n: 4 }, 7, 'hip', 'rdnaboosts']);
     assert.deepEqual([short.backend, short.kv, short.fork, short.spec.vocab], ['hip', 'f16', 'rdnaboosts', 98304]);
     const dflashArgs = llamaArgs(model, { model: 'm.gguf', dflash: 'd.gguf' }, d4, r9700);
     assert.deepEqual(dflashArgs.slice(dflashArgs.indexOf('--spec-type'), dflashArgs.indexOf('--spec-type') + 8), ['--spec-type', 'draft-dflash', '--spec-draft-model', 'd.gguf', '--spec-draft-n-max', '4', '-ngld', '999']);

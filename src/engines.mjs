@@ -61,6 +61,11 @@ const BUILTIN = {
     id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'stew675/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
     ref: '81e969e9a90322b6416b4fd930dfd3d655275d7d', base: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807',
     tree: '1bac1001f1780a5907fbce256ceeeaac8b8561ec', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807' },
+    // Correctif de Harn (src/assets/rdnaboosts) : la vérification spéculative (2-16 tokens) en WMMA int8,
+    // qui décompresse chaque poids une fois pour tous les tokens au lieu d'une fois par token. Q4_K, Q5_K,
+    // Q6_K, IQ4_XS lus au format GGUF d'origine. Cycle DFlash2 n=7 : 48,0 → 43,5 ms ; code 121 → 131 tok/s,
+    // prose 51 → 54 (R9700, Qwen3.8-27B UD-Q4_K_M, 30 graines). GGML_CUDA_WMMA_MMVQ=0 le coupe.
+    patches: ['wmma-mmvq.patch'],
     isolated: true, eligible: rdna4Linux, ngram: true,
     // Sa fenêtre MTP (le brouillon ne garde que ~¼ du contexte) casse la vision : une image arrivée
     // au-delà de la fenêtre (816 tokens à la même position, Qwen-VL) ne trouve pas de place dans le
@@ -70,12 +75,14 @@ const BUILTIN = {
     // Les façons d'anticiper, départagées par le banc selon l'usage (R9700, Qwen3.8-27B Q4_K_M,
     // température 1, code / prose / ~32k) :
     // - brouillon DFlash2 : n=4 106 / 68 / 97, n=6 120 / 64 / 107 (n=5 115 / 66 / 105). Le meilleur partout ;
+    //   avec le correctif WMMA, vérifier 8 tokens coûte presque autant que 2 : n=7 (le maximum que DFlash2
+    //   vérifie) passe devant n=6, code 131 contre 125 ;
     // - MTP 3 sur un brouillon réduit aux 98 304 premiers tokens : 92 / 59 / 85 ;
     // - MTP adaptatif jusqu'à 9 + n-gramme : 116 / 51 / 126 (la profondeur monte trop en prose).
     arms: (tuning, model) => {
       const base = { ...tuning, backend: 'hip', kv: 'f16', kvV: undefined };
       const mtp = { ...base, spec: { type: 'mtp', n: 3, pMin: 0, vocab: 98304 } };
-      if (model.dflash) return [{ ...base, spec: { type: 'dflash', n: 4 } }, { ...base, spec: { type: 'dflash', n: 6 } }, ...(model.mtp && !tuning.noNextn ? [mtp] : [])];
+      if (model.dflash) return [{ ...base, spec: { type: 'dflash', n: 4 } }, { ...base, spec: { type: 'dflash', n: 7 } }, ...(model.mtp && !tuning.noNextn ? [mtp] : [])];
       if (!model.mtp || tuning.noNextn) return [{ ...base, spec: tuning.spec }];
       return [mtp, { ...base, spec: { type: 'mtp-adaptive', n: 9, vocab: 98304 } }];
     },
