@@ -312,6 +312,13 @@ test('banc : seuil de bruit, pondération selon l’usage', async () => {
   assert.equal(isBetter({ ok: true, tps: 83, spread: 0.01 }, current), true, '3,75 % : au-delà');
   assert.equal(isBetter({ ok: true, tps: 85, spread: 0.08 }, current), false, 'mesure trop dispersée pour trancher');
   assert.equal(isBetter({ ok: false, tps: 200 }, current), false, 'marge VRAM insuffisante');
+  // Dominance (banc du 2026-11-13, DFlash2 n=7 contre MTP3) : dispersé, mais meilleur sur chaque charge.
+  const mtp3 = { ok: true, tps: 70, spread: 0.14, workloads: [{ workload: 'code', tps: 84.7 }, { workload: 'prose', tps: 49.8 }] };
+  const dflash7 = { ok: true, tps: 87.4, spread: 0.3, workloads: [{ workload: 'code', tps: 115.2 }, { workload: 'prose', tps: 55.9 }] };
+  assert.equal(isBetter(dflash7, mtp3), true, 'meilleur partout : retenu malgré la dispersion');
+  const mixed = { ...dflash7, workloads: [{ workload: 'code', tps: 140 }, { workload: 'prose', tps: 45 }] };
+  assert.equal(isBetter(mixed, mtp3), false, 'perd en prose : la dispersion décide');
+  assert.equal(isBetter({ ...dflash7, workloads: [{ workload: 'code', tps: 115.2 }] }, mtp3), false, 'une seule charge en commun ne suffit pas');
   const results = [{ workload: 'code', tps: 110 }, { workload: 'prose', tps: 60 }];
   assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.code) > weightedHarmonic(results, USAGE_WEIGHTS.balanced));
   assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.prose) < weightedHarmonic(results, USAGE_WEIGHTS.balanced));

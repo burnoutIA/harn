@@ -142,7 +142,14 @@ export function isBetter(candidate, current) {
   if (!candidate.ok || candidate.error) return false;
   if (!current || current.error) return true;
   const margin = Math.max(NOISE, candidate.spread ?? 0, current.spread ?? 0);
-  return candidate.tps > current.tps * (1 + margin);
+  if (candidate.tps > current.tps * (1 + margin)) return true;
+  // Dominance : meilleur de plus que le bruit sur chacune des charges mesurées des deux côtés. Une
+  // anticipation à forte variance (DFlash2 n=7 : ±30 % d'un passage à l'autre à température 1, selon
+  // le texte tiré) ne passerait jamais la marge de sa propre dispersion, même à +36 % en code.
+  const theirs = new Map((current.workloads ?? []).map((w) => [w.workload, w.tps]));
+  const shared = (candidate.workloads ?? []).filter((w) => theirs.has(w.workload));
+  return shared.length >= 2 && shared.length === theirs.size && candidate.tps > current.tps * (1 + NOISE)
+    && shared.every((w) => w.tps > theirs.get(w.workload) * (1 + NOISE));
 }
 
 // runs : chaque charge mesurée plusieurs fois, la moyenne gardée et l'écart noté (la profondeur,
