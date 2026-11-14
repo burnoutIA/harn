@@ -1,0 +1,42 @@
+diff --git a/ggml/src/ggml-cuda/gdn-conv.cu b/ggml/src/ggml-cuda/gdn-conv.cu
+index 06c85a3..527e183 100644
+--- a/ggml/src/ggml-cuda/gdn-conv.cu
++++ b/ggml/src/ggml-cuda/gdn-conv.cu
+@@ -351,7 +351,8 @@ static bool gdn_conv_norm_one(const ggml_cgraph * cgraph, int j, const ggml_cuda
+ 
+ // The q / k l2 norm pair right after the conv (only no-op nodes between): the direct kernel also writes both normalized
+ // outputs.  Returns the index of the second SCALE, -1 when the pattern is not there.  GGML_CUDA_FUSE_GDN_CONV_NORM=0: off.
+-static int gdn_conv_norm_match(const ggml_cgraph * cgraph, const ggml_cuda_gdn_conv_match & m, gdn_conv_norm_args & na) {
++static int gdn_conv_norm_match(const ggml_cgraph * cgraph, const ggml_cuda_gdn_conv_match & m, gdn_conv_norm_args & na,
++                               const ggml_backend_cuda_context * ctx = nullptr) {
+     static const bool fuse = getenv("GGML_CUDA_FUSE_GDN_CONV_NORM") == nullptr || atoi(getenv("GGML_CUDA_FUSE_GDN_CONV_NORM")) != 0;
+     if (!fuse || !m.silu || m.C % 256 != 0) return -1;
+     int j = m.conv_idx + 2;
+@@ -380,8 +381,18 @@ static int gdn_conv_norm_match(const ggml_cgraph * cgraph, const ggml_cuda_gdn_c
+         const uintptr_t a0 = (uintptr_t) a->data, a1 = a0 + ggml_nbytes(a), b0 = (uintptr_t) b->data, b1 = b0 + ggml_nbytes(b);
+         return a0 < b1 && b0 < a1;
+     };
++    // A deferred conv-state gather (ggml_cuda_gdn_conv_direct reads the cache row, never m.state->data): the dead
++    // GET_ROWS output may then hold the SCALE outputs. This is the speculative verify shape (T <= 16 with snapshots),
++    // where the allocator does place the q output there.
++    bool state_deferred = false;
++    if (ctx != nullptr) {
++        const ggml_tensor * root = m.state;
++        while (root->view_src != nullptr) root = root->view_src;
++        state_deferred = std::find(ctx->gdn_deferred_gathers.begin(), ctx->gdn_deferred_gathers.end(), root) != ctx->gdn_deferred_gathers.end();
++    }
+     for (const ggml_tensor * d : { cgraph->nodes[j + 1], cgraph->nodes[j2 + 1] }) {
+         for (const ggml_tensor * src : { m.x, m.state, m.w, (const ggml_tensor *) m.conv_out }) {
++            if (src == m.state && state_deferred) continue;
+             if (overlap(d, src)) return -1;
+         }
+     }
+@@ -436,7 +447,7 @@ int ggml_cuda_gdn_conv_try_fuse(ggml_backend_cuda_context & ctx, const ggml_cgra
+     }
+     if (node->op == GGML_OP_SSM_CONV && ggml_cuda_gdn_conv_match_at_conv(cgraph, i, gm)) {
+         gdn_conv_norm_args na;
+-        const int last = gdn_conv_norm_match(cgraph, gm, na);
++        const int last = gdn_conv_norm_match(cgraph, gm, na, &ctx);
+         if (last > 0) {
+             ggml_cuda_gdn_conv_direct(ctx, gm, &na);
+             return last - i;

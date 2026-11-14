@@ -65,7 +65,10 @@ const BUILTIN = {
     // qui décompresse chaque poids une fois pour tous les tokens au lieu d'une fois par token. Q4_K, Q5_K,
     // Q6_K, IQ4_XS lus au format GGUF d'origine. Cycle DFlash2 n=7 : 48,0 → 43,5 ms ; code 121 → 131 tok/s,
     // prose 51 → 54 (R9700, Qwen3.8-27B UD-Q4_K_M, 30 graines). GGML_CUDA_WMMA_MMVQ=0 le coupe.
-    patches: ['wmma-mmvq.patch'],
+    // Second correctif : la fusion conv + normes q/k des couches DeltaNet se coupait à la vérification sur
+    // un faux chevauchement mémoire (l'état de la conv est lu dans le cache, l'ancien tampon est mort) ;
+    // réactivée : −0,7 ms par cycle, résultats identiques au bit près. GGML_CUDA_FUSE_GDN_CONV_NORM=0 la coupe.
+    patches: ['wmma-mmvq.patch', 'gdn-conv-norm.patch'],
     isolated: true, eligible: rdna4Linux, ngram: true,
     // Sa fenêtre MTP (le brouillon ne garde que ~¼ du contexte) casse la vision : une image arrivée
     // au-delà de la fenêtre (816 tokens à la même position, Qwen-VL) ne trouve pas de place dans le
