@@ -87,7 +87,9 @@ const BUILTIN = {
       const mtp = { ...base, spec: { type: 'mtp', n: 3, pMin: 0, vocab: 98304 } };
       if (model.dflash) return [{ ...base, spec: { type: 'dflash', n: 4 } }, { ...base, spec: { type: 'dflash', n: 7 } }, ...(model.mtp && !tuning.noNextn ? [mtp] : [])];
       if (!model.mtp || tuning.noNextn) return [{ ...base, spec: tuning.spec }];
-      return [mtp, { ...base, spec: { type: 'mtp-adaptive', n: 9, vocab: 98304 } }];
+      // MTP adaptatif ≤6 avec seuil 0,3 : la profondeur s'arrête dès que le brouillon doute. Uncensored Q4_K_M
+      // (2026-11-14, 10 graines) : code 119 / prose 47 contre 116 / 42 pour ≤9 seuil 0 ; ≤9 reste (Swift : n-gramme long).
+      return [mtp, { ...base, spec: { type: 'mtp-adaptive', n: 9, vocab: 98304 } }, { ...base, spec: { type: 'mtp-adaptive', n: 6, pMin: 0.3, vocab: 98304 } }];
     },
   },
 };

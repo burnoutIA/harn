@@ -149,8 +149,11 @@ export function isBetter(candidate, current) {
   // propre dispersion, même à +22 % en code et à égalité en prose.
   const theirs = new Map((current.workloads ?? []).map((w) => [w.workload, w.tps]));
   const shared = (candidate.workloads ?? []).filter((w) => theirs.has(w.workload));
-  return shared.length >= 2 && shared.length === theirs.size && candidate.tps > current.tps * (1 + NOISE)
-    && shared.every((w) => w.tps >= theirs.get(w.workload) * (1 - NOISE));
+  if (shared.length < 2 || shared.length !== theirs.size) return false;
+  if (candidate.tps > current.tps * (1 + NOISE) && shared.every((w) => w.tps >= theirs.get(w.workload) * (1 - NOISE))) return true;
+  // Net gain pondéré (≥ 10 %) contre un recul limité (≤ 10 %) sur une charge : on gagne plus qu'on ne perd
+  // (Uncensored Q4_K_M : +14 % pondéré, code +33 %, prose −4,5 %).
+  return candidate.tps > current.tps * 1.10 && shared.every((w) => w.tps >= theirs.get(w.workload) * 0.90);
 }
 
 // runs : chaque charge mesurée plusieurs fois, la moyenne gardée et l'écart noté (la profondeur,

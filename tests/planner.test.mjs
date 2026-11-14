@@ -326,12 +326,17 @@ test('banc : seuil de bruit, pondération selon l’usage', async () => {
   const mtp3 = { ok: true, tps: 70, spread: 0.14, workloads: [{ workload: 'code', tps: 84.7 }, { workload: 'prose', tps: 49.8 }] };
   const dflash7 = { ok: true, tps: 87.4, spread: 0.3, workloads: [{ workload: 'code', tps: 115.2 }, { workload: 'prose', tps: 55.9 }] };
   assert.equal(isBetter(dflash7, mtp3), true, 'meilleur partout : retenu malgré la dispersion');
-  const mixed = { ...dflash7, workloads: [{ workload: 'code', tps: 140 }, { workload: 'prose', tps: 45 }] };
-  assert.equal(isBetter(mixed, mtp3), false, 'recule de 10 % en prose : la dispersion décide');
+  const mixed = { ...dflash7, workloads: [{ workload: 'code', tps: 140 }, { workload: 'prose', tps: 42 }] };
+  assert.equal(isBetter(mixed, mtp3), false, 'recule de 16 % en prose : la dispersion décide');
   // Banc suivant : n=7 contre n=4, +22 % en code, égalité en prose (−0,5 %), +11 % pondéré.
   const dflash4 = { ok: true, tps: 78.4, spread: 0.12, workloads: [{ workload: 'code', tps: 94.3 }, { workload: 'prose', tps: 56.2 }] };
   const dflash7b = { ok: true, tps: 87.3, spread: 0.3, workloads: [{ workload: 'code', tps: 115.1 }, { workload: 'prose', tps: 55.9 }] };
   assert.equal(isBetter(dflash7b, dflash4), true, 'égalité dans le bruit sur une charge, net gain ailleurs');
+  // Net gain pondéré contre un petit recul (Uncensored Q4_K_M, 2026-11-14) : retenu ; un recul de plus de 10 % : non.
+  const vulkan = { ok: true, tps: 71.7, spread: 0.1, workloads: [{ workload: 'code', tps: 89.4 }, { workload: 'prose', tps: 49.1 }] };
+  const ad6 = { ok: true, tps: 81.5, spread: 0.2, workloads: [{ workload: 'code', tps: 119.3 }, { workload: 'prose', tps: 46.9 }] };
+  assert.equal(isBetter(ad6, vulkan), true, '+14 % pondéré, prose −4,5 %');
+  assert.equal(isBetter({ ...ad6, workloads: [{ workload: 'code', tps: 140 }, { workload: 'prose', tps: 43 }] }, vulkan), false, 'prose −12 %');
   assert.equal(isBetter({ ...dflash7, workloads: [{ workload: 'code', tps: 115.2 }] }, mtp3), false, 'une seule charge en commun ne suffit pas');
   const results = [{ workload: 'code', tps: 110 }, { workload: 'prose', tps: 60 }];
   assert.ok(weightedHarmonic(results, USAGE_WEIGHTS.code) > weightedHarmonic(results, USAGE_WEIGHTS.balanced));

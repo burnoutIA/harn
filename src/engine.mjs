@@ -67,7 +67,7 @@ export function describe(tuning) {
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'mtp' && tuning.spec.ngram) parts.push('n-gramme');
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
-  if (tuning.spec?.type === 'mtp-adaptive') parts.push(`MTP adaptatif ≤${tuning.spec.n} · n-gramme`);
+  if (tuning.spec?.type === 'mtp-adaptive') parts.push(`MTP adaptatif ≤${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''} · n-gramme`);
   if (tuning.spec?.type === 'ngram') parts.push('n-gramme');
   if (tuning.fa === 'off') parts.push('sans FA');
   if (tuning.noNextn) parts.push('sans MTP (absent du fichier)');
@@ -124,7 +124,7 @@ export function llamaArgs(model, files, tuning, hardware) {
     // reprend les passages déjà vus dans le contexte (code, agents). --spec-type s'y additionne :
     // jamais draft-mtp en plus, le moteur refuserait et coupait l'anticipation sans le dire.
     args.push('--spec-type', 'draft-mtp-adaptive,ngram-mod', ...draft, '--spec-ngram-mod-n-match', String(spec.n * 5),
-      '--spec-draft-n-max', String(spec.n), '--spec-draft-n-start', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', '0');
+      '--spec-draft-n-max', String(spec.n), '--spec-draft-n-start', String(spec.n), '--spec-draft-n-min', '0', '--spec-draft-p-min', String(spec.pMin ?? 0));
     if (spec.vocab) args.push('--spec-draft-mtp-vocab', String(spec.vocab));
   } else if (spec.type === 'ngram' && engineSheet(tuning.fork ?? (model.engine === 'prism' ? 'prism' : 'llama'))?.ngram) {
     // Réglages par défaut du moteur (n-match 24, brouillon 48-64) : ce sont eux qui ont été mesurés.
