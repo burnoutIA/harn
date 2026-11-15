@@ -1,4 +1,4 @@
-import { gpuChangeCheck, switchCard } from './gpu-profiles.mjs';
+import { gpuChangeCheck, settleGpuChange, switchCard } from './gpu-profiles.mjs';
 import { detectHardware } from './hardware.mjs';
 import { makePlan } from './planner.mjs';
 import { iqScores } from './scores.mjs';
@@ -15,6 +15,7 @@ export async function refreshHardware() {
   const plan = makePlan(hardware, iqScores(), getState().profiles);
   // La VRAM prise par les autres applications se lit avant qu'on charge quoi que ce soit.
   const checks = await systemChecks(hardware, { vramBaselineMiB: ours ? getState().vramBaselineMiB ?? 0 : null });
+  update((s) => { s.plan = plan; settleGpuChange(s); });
   const notice = gpuChangeCheck(getState().gpuChange);
   if (notice) checks.unshift(notice);
   update((s) => {

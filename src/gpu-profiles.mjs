@@ -56,6 +56,18 @@ export function switchCard(state, hardware, now = new Date()) {
   return state.gpuChange;
 }
 
+// Le changement de carte est réglé quand chaque modèle installé qu'elle peut faire tourner a son banc
+// sur elle : le bandeau part de lui-même (il restait des semaines après les derniers bancs).
+export function settleGpuChange(state) {
+  const change = state.gpuChange;
+  if (!change) return false;
+  const usable = Object.keys(state.models ?? {}).filter((id) => state.models[id]?.installedAt && state.plan?.verdicts?.find((v) => v.id === id)?.fit !== 'no');
+  if (!usable.every((id) => state.profiles?.[id]?.bench?.gpu === change.to)) return false;
+  state.gpuChange = null;
+  if (Array.isArray(state.checks)) state.checks = state.checks.filter((c) => c.id !== 'gpu-change');
+  return true;
+}
+
 // Le bandeau qui l'annonce, tant que l'utilisateur ne l'a pas lu.
 export function gpuChangeCheck(change) {
   if (!change) return null;

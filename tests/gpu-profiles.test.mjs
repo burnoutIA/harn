@@ -66,3 +66,20 @@ test('moteur qui voit aussi la puce intégrée : la carte retenue lui est désig
   assert.deepEqual(deviceArgs(hip, {}), ['--device', 'ROCm0']);
   assert.deepEqual(deviceArgs(hip, { primary: { name: 'AMD Radeon Graphics' } }), []);
 });
+
+test('changement de carte réglé une fois chaque modèle utilisable remesuré sur elle', async () => {
+  const { settleGpuChange } = await import('../src/gpu-profiles.mjs');
+  const state = {
+    gpuChange: { from: 'RTX 3090', to: 'R9700' },
+    checks: [{ id: 'gpu-change' }, { id: 'autre' }],
+    models: { a: { installedAt: 1 }, b: { installedAt: 1 }, c: { installedAt: 1 } },
+    plan: { verdicts: [{ id: 'a', fit: 'full' }, { id: 'b', fit: 'full' }, { id: 'c', fit: 'no' }] },
+    profiles: { a: { bench: { gpu: 'R9700' } }, b: { bench: { gpu: 'RTX 3090' } } },
+  };
+  assert.equal(settleGpuChange(state), false);
+  assert.ok(state.gpuChange);
+  state.profiles.b.bench.gpu = 'R9700';
+  assert.equal(settleGpuChange(state), true);
+  assert.equal(state.gpuChange, null);
+  assert.deepEqual(state.checks.map((c) => c.id), ['autre']);
+});

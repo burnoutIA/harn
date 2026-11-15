@@ -12,6 +12,7 @@ import { downloadFile } from './model-files.mjs';
 import { makePlan, OBJECTIVE } from './planner.mjs';
 import { installLlama } from './runtimes.mjs';
 import { iqScores } from './scores.mjs';
+import { settleGpuChange } from './gpu-profiles.mjs';
 import { getState, update } from './state.mjs';
 import { HEADROOM_MIN_MIB, USAGE_WEIGHTS, isBetter, measure } from './tuner.mjs';
 
@@ -38,6 +39,7 @@ export async function tuneModel(modelId, options = {}) {
     update((s) => {
       s.plan = makePlan(s.hardware, iqScores(s), s.profiles);
       if (s.models[modelId]) s.models[modelId].error = null;
+      settleGpuChange(s);
     });
     return result;
   });
