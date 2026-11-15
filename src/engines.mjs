@@ -53,28 +53,25 @@ const BUILTIN = {
       return [{ ...base, kv: 'tq5_0', kvV: 'turbo4' }, base];
     },
   },
-  // RDNA Boosts (github.com/stew675/llama-cpp-rdna-boosts) : 16 blocs de correctifs HIP pour RDNA,
-  // posés sur llama.cpp 6050b467c, compilés contre ROCm 10.1 (buildRdnaBoosts). Non relu : isolé.
-  // R9700, Qwen3.8-27B Q4_K_M, température 1 (pas MTP, code / ~32k) : Vulkan officiel 43,7 / 48,1 ms,
-  // ce fork 42,0 / 45,7 ms ; brouillon réduit aux 98 304 premiers tokens 39,3 / 42,8 ms.
+  // RDNA Boosts : la série de correctifs HIP pour RDNA de stew675 (github.com/stew675/llama-cpp-rdna-boosts),
+  // dans le fork de Harn (github.com/burnoutIA/llama-cpp-rdna-boosts, branche harn, voir HARN.md) :
+  // la publication v16-4f9dfa0e3-r289 de stew675 plus deux blocs de Harn, compilés contre ROCm 10.1
+  // (buildRdnaBoosts). Non relu : isolé.
+  // - 0090 : la vérification spéculative (2-16 tokens) en WMMA int8, chaque poids décompressé une fois pour
+  //   tous les tokens (Q4_K, Q5_K, Q6_K, IQ4_XS au format GGUF d'origine). GGML_CUDA_WMMA_MMVQ=0 le coupe ;
+  // - 0091 : la fusion conv + normes q/k des couches DeltaNet, que la vérification refusait sur un faux
+  //   chevauchement mémoire. Résultats identiques au bit près. GGML_CUDA_FUSE_GDN_CONV_NORM=0 la coupe.
+  // R9700, Qwen3.8-27B UD-Q4_K_M, DFlash2 n=7, 10 graines (code / prose) : r289 de stew675 124 / 51 tok/s,
+  // le fork de Harn 131 / 56 (cycle 47,4 → 42,6 ms) ; la version précédente (81e969e + les mêmes
+  // correctifs) faisait 131 / 55.
   rdnaboosts: {
-    id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'stew675/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
-    ref: '81e969e9a90322b6416b4fd930dfd3d655275d7d', base: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807',
-    tree: '1bac1001f1780a5907fbce256ceeeaac8b8561ec', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '6050b467c07a95c7b87debd4ddac2f8ba8d9b807' },
-    // Correctif de Harn (src/assets/rdnaboosts) : la vérification spéculative (2-16 tokens) en WMMA int8,
-    // qui décompresse chaque poids une fois pour tous les tokens au lieu d'une fois par token. Q4_K, Q5_K,
-    // Q6_K, IQ4_XS lus au format GGUF d'origine. Cycle DFlash2 n=7 : 48,0 → 43,5 ms ; code 121 → 131 tok/s,
-    // prose 51 → 54 (R9700, Qwen3.8-27B UD-Q4_K_M, 30 graines). GGML_CUDA_WMMA_MMVQ=0 le coupe.
-    // Second correctif : la fusion conv + normes q/k des couches DeltaNet se coupait à la vérification sur
-    // un faux chevauchement mémoire (l'état de la conv est lu dans le cache, l'ancien tampon est mort) ;
-    // réactivée : −0,7 ms par cycle, résultats identiques au bit près. GGML_CUDA_FUSE_GDN_CONV_NORM=0 la coupe.
-    patches: ['wmma-mmvq.patch', 'gdn-conv-norm.patch'],
+    id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'burnoutIA/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
+    ref: '9d004f447d23d87a861e28179e1f5e541efabc96', base: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad',
+    tree: '01460a79b0f4c746b2aa874f70bd8b0e2353aff9', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad' },
     isolated: true, eligible: rdna4Linux, ngram: true,
-    // Sa fenêtre MTP (le brouillon ne garde que ~¼ du contexte) casse la vision : une image arrivée
-    // au-delà de la fenêtre (816 tokens à la même position, Qwen-VL) ne trouve pas de place dans le
-    // cache du brouillon → « failed to process mtmd chunk » (session pi à 43,7k tokens, 2026-11-03).
-    // Coupée : ~0,6 Gio de plus à 150k, le brouillon voit tout le contexte.
-    env: { LLAMA_SPEC_DRAFT_WINDOW: '0' },
+    // La fenêtre MTP du brouillon (qui cassait la vision au-delà de la fenêtre : « failed to process mtmd
+    // chunk », 2026-11-03) est désactivée par défaut depuis r247 (--spec-draft-kv-window, ex-variable
+    // LLAMA_SPEC_DRAFT_WINDOW, que Harn fixait à 0).
     // Les façons d'anticiper, départagées par le banc selon l'usage (R9700, Qwen3.8-27B Q4_K_M,
     // température 1, code / prose / ~32k) :
     // - brouillon DFlash2 : n=4 106 / 68 / 97, n=6 120 / 64 / 107 (n=5 115 / 66 / 105). Le meilleur partout ;
