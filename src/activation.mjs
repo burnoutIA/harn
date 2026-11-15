@@ -13,6 +13,9 @@ import { getState, update } from './state.mjs';
 // Charger un modèle installé, et lui faire passer le banc d'intelligence.
 // Activer un modèle installé avec ses réglages gagnants (ou ceux par défaut s'il n'a pas de banc).
 const activations = new Map();
+// Les chargements en cours (celui du démarrage surtout) : le banc les laisse finir avant d'arrêter
+// les autres moteurs, sinon le modèle mesuré se charge pendant que la carte se remplit encore.
+export const activationsSettled = () => Promise.allSettled([...activations.values()]);
 export function activate(modelId) {
   const blocked = activationBlocker(modelId);
   if (blocked) return Promise.reject(new Error(blocked));

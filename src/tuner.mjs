@@ -55,6 +55,15 @@ export const WORKLOADS = {
       { role: 'user', content: `${codeBlocks(208)}\n\n${ASK_CODE}` },
     ],
   },
+  // ~94k tokens lus : là où le type de KV se départage (l'attention lit tout le KV à chaque token).
+  long: {
+    label: 'Contexte ~94k',
+    maxTokens: 256,
+    messages: [
+      { role: 'system', content: 'Tu es un développeur TypeScript senior. Réponds uniquement avec du code.' },
+      { role: 'user', content: `${codeBlocks(600)}\n\n${ASK_CODE}` },
+    ],
+  },
   // ~20k tokens de contexte : là où la pente de l'attention sur le KV se voit.
   deep: {
     label: 'Contexte long',
@@ -130,9 +139,9 @@ export function weightedHarmonic(results, weights = {}) {
 // Ce que l'utilisateur fait surtout : la moyenne du banc pèse code et texte en conséquence. La
 // profondeur compte toujours (la charge d'un agent dont la conversation grossit).
 export const USAGE_WEIGHTS = {
-  code: { code: 0.7, prose: 0.3, depth: 0.5, deep: 0.5 },
-  balanced: { code: 0.5, prose: 0.5, depth: 0.5, deep: 0.5 },
-  prose: { code: 0.3, prose: 0.7, depth: 0.5, deep: 0.5 },
+  code: { code: 0.7, prose: 0.3, depth: 0.5, long: 0.5, deep: 0.5 },
+  balanced: { code: 0.5, prose: 0.5, depth: 0.5, long: 0.5, deep: 0.5 },
+  prose: { code: 0.3, prose: 0.7, depth: 0.5, long: 0.5, deep: 0.5 },
 };
 
 // Le bruit d'une mesure : la carte varie de quelques pour cent d'une session à l'autre (MTP2 et
@@ -157,9 +166,12 @@ export function isBetter(candidate, current) {
 }
 
 // runs : chaque charge mesurée plusieurs fois, la moyenne gardée et l'écart noté (la profondeur,
-// longue à lire, une seule fois). sampling : celui du modèle (catalogue) ; sans, température 1.
-export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, runs = 2, weights = {}, sampling = null, onProgress = () => {} } = {}) {
-  await complete(endpoint, modelId, [{ role: 'user', content: 'Bonjour' }], 16, { sampling }); // échauffement
+// et la charge longue, longues à lire, une seule fois). sampling : celui du modèle (catalogue) ; sans, température 1.
+// fresh : relance le moteur avant chaque nouveau passage d'une même charge (brouillon n-gramme, qui
+// se souvient de la réponse précédente au même prompt).
+export async function measure(endpoint, modelId, { workloads = ['code', 'prose'], maxTokens = 384, runs = 2, weights = {}, sampling = null, fresh = null, onProgress = () => {} } = {}) {
+  const warmup = () => complete(endpoint, modelId, [{ role: 'user', content: 'Bonjour' }], 16, { sampling });
+  await warmup();
   const results = [];
   const pstates = new Set();
   for (const id of workloads) {
@@ -169,7 +181,12 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
     const watcher = setInterval(async () => { const gpu = await sampleGpu(); if (gpu && gpu.util >= 50) pstates.add(gpu.pstate); }, 1500);
     const samples = [];
     try {
-      for (let run = 0; run < (id === 'depth' ? 1 : runs); run += 1) {
+      // Deux passages trop éloignés (> 25 %) : deux de plus, la moyenne de deux graines ne vaut rien
+      // quand l'une fait recopier le prompt au brouillon (Ornith 9B, n-gramme : ~280 et ~140 tok/s).
+      const spreadOf = () => (Math.max(...samples.map((x) => x.tps)) - Math.min(...samples.map((x) => x.tps))) / (samples.reduce((a, x) => a + x.tps, 0) / samples.length);
+      let count = ['depth', 'long'].includes(id) ? 1 : runs;
+      for (let run = 0; run < count; run += 1) {
+        if (fresh && run > 0) { await fresh(); await warmup(); }
         const started = Date.now();
         const answer = await complete(endpoint, modelId, workload.messages, workload.maxTokens ?? maxTokens, { sampling, seed: 42 + run });
         const t = answer.timings ?? {};
@@ -178,10 +195,13 @@ export async function measure(endpoint, modelId, { workloads = ['code', 'prose']
           tps: t.predicted_per_second ?? generated / ((Date.now() - started) / 1000),
           // La lecture du prompt se juge au premier passage : ensuite le cache de prompt la court-circuite.
           prefillTps: t.prompt_per_second ?? null,
-          promptTokens: t.prompt_n ?? answer.usage?.prompt_tokens ?? null,
+          // Tout le prompt, cache compris (prompt_n ne compte que la partie relue : la charge longue
+          // reprend le début de la profondeur).
+          promptTokens: answer.usage?.prompt_tokens ?? t.prompt_n ?? null,
           acceptance: t.draft_n ? t.draft_n_accepted / t.draft_n : null,
           estimated: !answer.timings || Boolean(t.estimated),
         });
+        if (run === count - 1 && count === runs && runs >= 2 && spreadOf() > 0.25) count += 2;
       }
     } finally { clearInterval(watcher); }
     const tps = samples.reduce((sum, s) => sum + s.tps, 0) / samples.length;

@@ -130,7 +130,7 @@ test('banc : deux bancs lancés ensemble passent l’un après l’autre, profon
   // Profondeur : mesurée et retenue dans le choix du KV.
   assert.ok(ra.bench.depth?.tokens > 20_000);
   assert.equal(ra.tuning.kv, 'f16');
-  assert.ok(ra.bench.arms.some((arm) => arm.stage === 'KV en profondeur'));
+  assert.ok(ra.bench.arms.some((arm) => arm.stage === 'KV en contexte long'));
 });
 
 test('inactivité : le modèle est déchargé après dix minutes sans requête, pas pendant une réponse', LIMIT, async () => {

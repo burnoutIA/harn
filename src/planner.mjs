@@ -222,7 +222,7 @@ const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma
 export function measuredAt100k(bench) {
   const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);
   const short = arm?.workloads?.find((w) => w.workload === 'code');
-  const deep = bench?.depth;
+  const deep = bench?.long ?? bench?.depth;
   if (!short?.promptTokens || !short.tps || !deep?.tokens || !deep.tps || deep.tokens <= short.promptTokens * 2) return null;
   const slope = (1 / deep.tps - 1 / short.tps) / (deep.tokens - short.promptTokens);
   const perToken = 1 / deep.tps + Math.max(0, slope) * (OBJECTIVE.minContext - deep.tokens);

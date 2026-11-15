@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
+import { activationsSettled } from './activation.mjs';
 import { modelById, ownLauncher } from './catalog.mjs';
 import { describe, startEngine, stopOthers } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
@@ -19,6 +20,8 @@ const sameTuning = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // DFlash2 : brouillon Q4_K_M et ses tampons. Mesuré sur RTX 3090 (b11430, 124k) : ~0,9 Gio ;
 // on garde un peu de marge. La VRAM réelle est revérifiée après chargement.
 const DFLASH_MIB = 1200;
+// La charge longue (~94k tokens lus) demande ce contexte.
+const LONG_CONTEXT = 100 * 1024;
 // Le plus grand contexte (≥ 100k) qui laisse la marge une fois `extraMiB` ajoutés en VRAM.
 function roomFor(model, best, extraMiB) {
   if (best.headroomMiB == null || !model.kvBytesPerToken) return null;
@@ -58,7 +61,10 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   const state = getState();
   const hardware = state.hardware;
   const profile = gpuProfile(hardware);
-  // Le banc mesure le modèle seul sur la carte : vitesse et marge VRAM ne valent qu'ainsi.
+  // Le banc mesure le modèle seul sur la carte : vitesse et marge VRAM ne valent qu'ainsi. Un
+  // chargement encore en cours (le modèle par défaut, rechargé au démarrage de Harn) finit d'abord :
+  // arrêté en route, il laissait la carte occupée et le banc partait à 102k au lieu de 150k.
+  await activationsSettled();
   await stopOthers(modelId);
   // engine : le moteur imposé quand l'officiel ne sait pas charger ce modèle ({ fork, backend }).
   const startTuning = { ...(state.profiles[modelId]?.tuning ?? startingTuning(model, hardware)), ...(engine ?? {}) };
@@ -85,10 +91,8 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   const results = [];
   let index = 0;
 
-  // Les charges de la comparaison en cours : une fois la profondeur entrée dans la comparaison
-  // (étape KV), chaque essai suivant la mesure aussi, sinon un moteur mesuré sans elle gagnerait
-  // d'office (sa moyenne ne compterait pas la partie la plus lente).
-  let compared = ['code', 'prose'];
+  // Les charges comparées d'un essai à l'autre (la profondeur ne s'ajoute qu'à l'étape KV, la dernière).
+  const compared = ['code', 'prose'];
   const usage = getState().prefs?.usage ?? 'balanced';
   const weights = USAGE_WEIGHTS[usage] ?? USAGE_WEIGHTS.balanced;
   async function trial(stage, tuning, workloads = compared) {
@@ -102,9 +106,12 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         loadedTuning = tuning;
         loadedHeadroom = await freeVram();
       }
-      // Un brouillon n-gramme se souvient de la réponse du passage précédent : un seul passage.
-      const runs = ['mtp-adaptive', 'ngram'].includes(tuning.spec?.type) || tuning.spec?.ngram ? 1 : 2;
-      const result = await measure(getState().active.endpoint, modelId, { workloads, weights, runs, sampling: model.sampling, onProgress: say });
+      // Un brouillon n-gramme se souvient des réponses précédentes : deux passages quand même, moteur
+      // relancé avant le second. Mesuré une seule fois, un passage chanceux gagnait le banc (Ornith 9B,
+      // MTP adaptatif + n-gramme : code à 285 tok/s contre ~130 pour ses voisins, aux mêmes graines).
+      const ngram = ['mtp-adaptive', 'ngram'].includes(tuning.spec?.type) || tuning.spec?.ngram;
+      const fresh = ngram ? async () => { say('relance (mémoire n-gramme)'); await startEngine(recipeFor(model, tuning)); } : null;
+      const result = await measure(getState().active.endpoint, modelId, { workloads, weights, runs: 2, fresh, sampling: model.sampling, onProgress: say });
       const entry = { id: `arm${index}`, stage, label, tuning, headroomMiB: loadedHeadroom, ...result };
       entry.ok = ownLauncher(model) || loadedHeadroom === null || loadedHeadroom >= HEADROOM_MIN_MIB;
       results.push(entry);
@@ -183,22 +190,6 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     }
   }
 
-  // KV f16 : pente de profondeur plus faible sur le build officiel, mais KV deux fois plus gros.
-  // Il ne se juge qu'avec la charge longue, mesurée aussi sur le réglage actuel.
-  // Mesuré en profondeur (~32k), à un contexte qui laisse f16 tenir avec la marge (réduit s'il le
-  // faut, jamais sous l'objectif de 100k) : Xing4 (MLA) y gagne 30 % de génération à 49k.
-  const perToken = model.kvBytesPerToken;
-  const f16Context = gpu && perToken?.f16 && perToken[best.tuning.kv] && best.headroomMiB !== null
-    ? Math.min(best.tuning.context, Math.floor((best.headroomMiB - HEADROOM_MIN_MIB + best.tuning.context * perToken[best.tuning.kv] / 2 ** 20) / (perToken.f16 / 2 ** 20) / 4096) * 4096)
-    : 0;
-  if (best.tuning.kv !== 'f16' && !best.tuning.kvV && f16Context >= OBJECTIVE.minContext) {
-    const reference = await trial('KV en profondeur', best.tuning, ['code', 'prose', 'depth']);
-    const f16 = await trial('KV en profondeur', { ...best.tuning, kv: 'f16', context: f16Context }, ['code', 'prose', 'depth']);
-    if (!reference.error && isBetter(f16, reference)) best = f16;
-    else if (!reference.error) best = reference;
-    if (!best.error) compared = ['code', 'prose', 'depth'];
-  }
-
   if (gpu && profile.flashAttentionUncertain) best = better(await trial('Flash Attention', { ...best.tuning, fa: 'off' }), best);
 
   // Radeon : Vulkan et HIP, même réglage.
@@ -251,12 +242,31 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     }
   }
 
+  // Le type de KV (f16 ou q8_0), en dernier : il se juge sur le moteur et l'anticipation retenus, et
+  // seulement en contexte long, où se joue l'écart. R9700, Qwen3.8-27B (RDNA Boosts), décodage simple :
+  // q8_0 ~2 % plus lent à 1k, à égalité vers 30k, 11 % plus rapide à 100k et 17 % à 141k (l'attention
+  // lit deux fois moins de KV). Qualité : perplexité à 64k identique (2,151 f16, 2,148 q8_0).
+  // Chaque type est mesuré au plus grand contexte qui lui laisse la marge (jamais sous l'objectif).
+  const perToken = model.kvBytesPerToken;
+  if (gpu && perToken?.f16 && perToken?.q8_0 && ['f16', 'q8_0'].includes(best.tuning.kv) && !best.tuning.kvV && best.headroomMiB != null) {
+    const other = best.tuning.kv === 'f16' ? 'q8_0' : 'f16';
+    const otherContext = Math.min(OBJECTIVE.maxContext, Math.floor((best.headroomMiB - HEADROOM_MIN_MIB + best.tuning.context * perToken[best.tuning.kv] / 2 ** 20) / (perToken[other] / 2 ** 20) / 4096) * 4096);
+    if (otherContext >= OBJECTIVE.minContext) {
+      const loads = Math.min(best.tuning.context, otherContext) >= LONG_CONTEXT ? ['code', 'prose', 'depth', 'long'] : ['code', 'prose', 'depth'];
+      const reference = await trial('KV en contexte long', best.tuning, loads);
+      const candidate = await trial('KV en contexte long', { ...best.tuning, kv: other, context: otherContext }, loads);
+      if (!reference.error) best = isBetter(candidate, reference) ? candidate : reference;
+      else if (!candidate.error && candidate.ok) best = candidate;
+    }
+  }
+
   return finish(model, results, best);
 
   async function finish(model, results, best) {
     if (!sameTuning(loadedTuning, best.tuning)) await startEngine(recipeFor(model, best.tuning));
     // La vitesse en profondeur du réglage retenu (reprise si l'étape KV l'a déjà mesurée).
     let depth = best.workloads?.find((w) => w.workload === 'depth') ?? null;
+    const long = best.workloads?.find((w) => w.workload === 'long') ?? null;
     if (!depth && model.engine !== 'strata' && best.tuning.backend !== 'cpu' && best.tuning.context >= 40960) {
       onProgress('Vitesse en profondeur (~32k tokens)');
       depth = (await measure(getState().active.endpoint, modelId, { workloads: ['depth'], sampling: model.sampling }).catch(() => null))?.workloads[0] ?? null;
@@ -272,6 +282,7 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
         winner: { id: best.id, label: best.label, tps: best.tps, prefillTps: best.prefillTps, throttled: best.throttled },
         usage,
         depth: depth && { tokens: depth.promptTokens, tps: +depth.tps.toFixed(1), prefillTps: depth.prefillTps ? Math.round(depth.prefillTps) : null },
+        long: long && { tokens: long.promptTokens, tps: +long.tps.toFixed(1), prefillTps: long.prefillTps ? Math.round(long.prefillTps) : null },
       };
     });
     await writeMachineFacts().catch(() => {});
