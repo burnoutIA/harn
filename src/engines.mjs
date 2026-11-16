@@ -66,9 +66,14 @@ const BUILTIN = {
   // correctifs) faisait 131 / 55.
   rdnaboosts: {
     id: 'rdnaboosts', label: 'llama.cpp RDNA Boosts', repo: 'burnoutIA/llama-cpp-rdna-boosts', source: 'build', builder: 'rdna',
-    ref: '9d004f447d23d87a861e28179e1f5e541efabc96', base: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad',
-    tree: '01460a79b0f4c746b2aa874f70bd8b0e2353aff9', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad' },
+    ref: '64f2e8862d4d208354ea0a3d0f29b53967a9f4e5', base: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad',
+    tree: '345e62faed5199208404b625c1e55c49ec5ac9e7', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad' },
     isolated: true, eligible: rdna4Linux, ngram: true,
+    // Bloc 0092 du fork de Harn : avec --spec-draft-mtp-vocab, le brouillon MTP garde tout le vocabulaire en notant
+    // chaque token sur une copie 2 bits (Q2_0) de la tête de sortie, puis recalcule exactement les 64 meilleurs
+    // (idée reprise de vllm-radiance). Uncensored Q4_K_M, 10 graines : MTP3 code 88,8 → 88,7, prose 48,2 → 53,4 ;
+    // adaptatif ≤9 + n-gramme 115,4 → 115,1 / 43,0 → 47,4. Sans effet sur DFlash2.
+    env: { LLAMA_MTP_DRAFT_COARSE: '64', LLAMA_MTP_DRAFT_COARSE_TYPE: 'q2_0' },
     // La fenêtre MTP du brouillon (qui cassait la vision au-delà de la fenêtre : « failed to process mtmd
     // chunk », 2026-11-03) est désactivée par défaut depuis r247 (--spec-draft-kv-window, ex-variable
     // LLAMA_SPEC_DRAFT_WINDOW, que Harn fixait à 0).
