@@ -6,7 +6,7 @@ import { MODELS, displayName, modelById, totalBytes, variantOf } from './catalog
 import { globalRating, paramsOf } from './rating.mjs';
 import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
-import { handleV1, setActivator } from './gateway.mjs';
+import { handleV1, setActivator, setVoice } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { updateSharing } from './placement.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -315,7 +315,10 @@ async function api(req, res, url) {
   // La voix : installer et arrêter, depuis la fenêtre seulement.
   if (parts[1] === 'voice') {
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
-    if (parts[2] === 'install') { background(installVoice()); return json(res, 202, { ok: true }); }
+    if (parts[2] === 'install') {
+      if (!voiceReport().canInstall) return json(res, 409, { error: 'Voxtral ne tourne que sur une carte Nvidia : installez la voix sur une autre machine Harn reliée à celle-ci' });
+      background(installVoice()); return json(res, 202, { ok: true });
+    }
     if (parts[2] === 'stop') { await stopVoice(); return json(res, 200, voiceReport()); }
     return json(res, 404, { error: 'inconnu' });
   }
@@ -561,6 +564,7 @@ async function main() {
   await loadKeys();
   await internalKey();
   setActivator(activate, busyWith, gpuFree);
+  setVoice({ speak, start: startVoice, report: voiceReport });
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {

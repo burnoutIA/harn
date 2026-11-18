@@ -8,6 +8,7 @@ import { withGpu } from './gpu-queue.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { getLive } from './metrics.mjs';
 import { DIRS, PORTS } from './paths.mjs';
+import { peerWithVoice } from './peers.mjs';
 import { installVoxtral } from './runtimes.mjs';
 import { bus, getState, update } from './state.mjs';
 
@@ -37,6 +38,28 @@ const voiceState = () => getState().voice ?? {};
 const patch = (fields) => update((s) => { s.voice = { ...(s.voice ?? {}), ...fields }; });
 const runtime = () => getState().runtimes?.voxtral ?? null;
 export const voiceInstalled = () => Boolean(runtime()?.installedAt);
+// vLLM et vLLM-Omni installés par pip visent CUDA : Voxtral ne tourne que sur une carte Nvidia.
+// Une machine sans elle (la R9700) prend la voix d'un pair qui l'a (peers.mjs) : il la fait
+// tourner sur sa carte et renvoie l'audio, rien ne bouge ici.
+const nvidiaHere = () => getState().hardware?.primary?.vendor === 'nvidia';
+// Le démarrage à froid chez le pair (chargement, compilation des noyaux) peut prendre plusieurs
+// minutes : la première requête l'attend.
+const REMOTE_TIMEOUT_MS = START_TIMEOUT_MS + 3 * 60_000;
+const remote = () => (voiceInstalled() ? null : peerWithVoice());
+function remoteCall(route, pathname, body, timeout = REMOTE_TIMEOUT_MS) {
+  return fetch(`${route.peer.url}${pathname}`, {
+    method: 'POST',
+    headers: { ...route.headers, 'content-type': 'application/json', 'X-Harn-Hop': '1' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
+  }).catch((error) => { throw failure(502, `La voix de « ${route.peer.name} » est injoignable : ${error.name === 'TimeoutError' ? 'pas de réponse' : error.message}`); });
+}
+async function remoteError(route, res) {
+  const text = await res.text();
+  let message = text;
+  try { message = JSON.parse(text)?.error?.message ?? text; } catch {}
+  return failure(res.status === 401 ? 502 : res.status, `La voix de « ${route.peer.name} » : ${String(message).slice(0, 300)}`);
+}
 
 // La deploy-config de vLLM-Omni pour Voxtral (vllm_omni/deploy/voxtral_tts.yaml), ramenée à une
 // requête à la fois. Les parts de carte se calculent sur sa taille.
@@ -107,6 +130,7 @@ ${common}
 // ── Installation (depuis la fenêtre de Harn) ──
 let installing = null;
 export function installVoice() {
+  if (!nvidiaHere()) return Promise.reject(failure(409, 'Voxtral ne tourne que sur une carte Nvidia : installez la voix sur une autre machine Harn reliée à celle-ci, elle la prêtera'));
   installing ??= (async () => {
     patch({ installing: true, detail: 'Préparation', error: null });
     let last = '';
@@ -140,7 +164,9 @@ const healthy = () => fetch(`http://127.0.0.1:${PORTS.voice}/health`).then((r) =
 // Le modèle de texte déchargé pour faire de la place revient une fois la carte rendue (pendant
 // le démarrage, elle est à la voix : il serait refusé), sans faire attendre la voix.
 let textToRestore = null;
-export function startVoice() {
+export function startVoice({ here = false } = {}) {
+  const route = here ? null : remote();
+  if (route) return remoteCall(route, '/audio/start', {}).then(async (res) => { if (!res.ok) throw await remoteError(route, res); });
   if (child && voiceState().status === 'ready') { touch(); return Promise.resolve(); }
   starting ??= withGpu('voice:voxtral', launch).finally(() => {
     starting = null;
@@ -228,12 +254,20 @@ export async function stopVoice() {
 
 // ── Parler ──
 // Le texte en Ogg/Opus, le format des messages vocaux de Telegram.
-export async function speak(text, voice = DEFAULT_VOICE) {
+// here : demandée par un autre Harn, servie avec la voix d'ici seulement (pas d'aller-retour).
+export async function speak(text, voice = DEFAULT_VOICE, { here = false } = {}) {
   const input = String(text ?? '').trim();
   if (!input) throw failure(400, 'Rien à dire');
   if (input.length > MAX_SPEAK_CHARS) throw failure(400, `Texte limité à ${MAX_SPEAK_CHARS} caractères par message vocal`);
   if (!VOICES.includes(voice)) throw failure(400, `Voix inconnue : ${voice}. Voix : ${VOICES.join(', ')}`);
-  await startVoice();
+  const route = here ? null : remote();
+  if (route) {
+    const res = await remoteCall(route, '/audio/speech', { input, model: SERVED, voice, response_format: 'opus' });
+    if (!res.ok) throw await remoteError(route, res);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  if (!voiceInstalled()) throw failure(409, nvidiaHere() ? 'La voix n’est pas installée : l’installer depuis la fiche de l’agent, dans Harn' : 'Pas de voix ici (Voxtral demande une carte Nvidia) ni sur une machine reliée joignable');
+  await startVoice({ here: true });
   touch();
   const res = await fetch(`http://127.0.0.1:${PORTS.voice}/v1/audio/speech`, {
     method: 'POST',
@@ -246,4 +280,8 @@ export async function speak(text, voice = DEFAULT_VOICE) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-export const voiceReport = () => ({ installed: voiceInstalled(), voices: VOICES, ...voiceState() });
+// remote : la machine qui prête sa voix, quand celle-ci n'en a pas. canInstall : une carte Nvidia.
+export function voiceReport() {
+  const route = remote();
+  return { installed: voiceInstalled(), canInstall: nvidiaHere(), voices: VOICES, ...voiceState(), remote: route ? { name: route.peer.name, status: route.voice.status } : null };
+}

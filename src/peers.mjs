@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DIRS } from './paths.mjs';
+import { getState, update } from './state.mjs';
 
 // Les autres machines qui font tourner Harn (« pairs »). Celle-ci joint leur API réseau local
 // (port lan, clé exigée) et propose leurs modèles sous le nom « modele@pair » : une requête pour
@@ -62,7 +63,7 @@ async function poll(peer) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
     const models = (body.data ?? []).filter((m) => m?.id && (m.owned_by ?? 'harn') === 'harn' && !String(m.id).includes(SEPARATOR));
-    seen.set(peer.id, { ok: true, error: null, models, checkedAt: Date.now() });
+    seen.set(peer.id, { ok: true, error: null, models, voice: await voiceOf(peer), checkedAt: Date.now() });
   } catch (error) {
     const message = error.name === 'TimeoutError' ? 'ne répond pas (machine éteinte, Harn arrêté ou réseau local fermé ?)' : error.cause?.code === 'ECONNREFUSED' ? 'connexion refusée (réseau local fermé sur l’autre machine ?)' : error.message;
     seen.set(peer.id, { ok: false, error: message, models: [], checkedAt: Date.now() });
@@ -70,7 +71,25 @@ async function poll(peer) {
   return seen.get(peer.id);
 }
 
-export const refreshPeers = () => Promise.all(peers.map(poll));
+// Sa voix (voice.mjs) : installée chez elle, sur sa propre carte. Un Harn d'avant la voix répond
+// 404 : pas de voix.
+async function voiceOf(peer) {
+  try {
+    const response = await fetch(`${peer.url}/audio/voices`, { headers: headersOf(peer), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return body?.installed ? { voices: Array.isArray(body.voices) ? body.voices : [], status: body.status ?? null } : null;
+  } catch { return null; }
+}
+
+export const refreshPeers = () => Promise.all(peers.map(poll)).then((all) => { showVoice(); return all; });
+
+// Pour la fiche d'agent : quelle machine prêterait sa voix (voice.mjs s'en sert si celle-ci n'en a pas).
+function showVoice() {
+  const found = peerWithVoice();
+  const next = found ? { name: found.peer.name, status: found.voice.status } : null;
+  if (JSON.stringify(getState().voiceRemote ?? null) !== JSON.stringify(next)) update((s) => { s.voiceRemote = next; });
+}
 
 // Le premier relevé : ceux qui ont besoin de la liste (lancement d'un agent) l'attendent.
 let ready = null;
@@ -135,6 +154,12 @@ export function peersWith(modelId) {
     const m = seen.get(peer.id)?.ok ? seen.get(peer.id).models.find((x) => x.id === modelId) : null;
     return m ? [{ peer: peer.id, loaded: Boolean(m.meta?.loaded), free: Boolean(m.meta?.free) }] : [];
   });
+}
+
+// La première machine joignable qui a la voix, pour un Harn qui ne l'a pas lui-même.
+export function peerWithVoice() {
+  const peer = peers.find((p) => seen.get(p.id)?.ok && seen.get(p.id).voice);
+  return peer ? { peer: { id: peer.id, name: peer.name, url: peer.url }, headers: headersOf(peer), voice: seen.get(peer.id).voice } : null;
 }
 
 // « modele@pc2 » → la machine et le nom du modèle chez elle ; null pour un modèle d'ici.

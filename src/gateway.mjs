@@ -17,6 +17,10 @@ let activate = async () => { throw new Error('Aucun moteur'); };
 let busyWith = () => null;
 let gpuFree = async () => {};
 export function setActivator(fn, busy = () => null, free = async () => {}) { activate = fn; busyWith = busy; gpuFree = free; }
+// La voix (voice.mjs), branchée par main.mjs : /v1/audio/speech au format OpenAI, pour une autre
+// machine Harn qui n'a pas de voix à elle (peers.mjs) ou tout autre client.
+let voice = null;
+export function setVoice(api) { voice = api; }
 
 // Les niveaux de Qwen3.8 sont low / medium / xhigh. Le défaut du gabarit est xhigh, le plus
 // bavard : sur un run long il épuise le budget de sortie en pleine réflexion et rend une
@@ -149,6 +153,11 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList(), cors);
+  // Ce qu'un autre Harn regarde à chaque relevé : la voix d'ici seulement, jamais celle d'un pair.
+  if (req.method === 'GET' && url.pathname === '/v1/audio/voices') {
+    const report = voice?.report() ?? {};
+    return sendJson(res, 200, { installed: Boolean(report.installed), voices: report.voices ?? [], status: report.status ?? null }, cors);
+  }
   if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
     const found = modelsList().data.find((m) => m.id === decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
     return found ? sendJson(res, 200, found, cors) : sendJson(res, 404, { error: { message: 'Modèle inconnu ou non installé', type: 'invalid_request_error' } }, cors);
@@ -164,6 +173,24 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   let body = null;
   if (raw.length && (req.headers['content-type'] ?? '').includes('json')) {
     try { body = JSON.parse(raw); } catch { return sendJson(res, 400, { error: { message: 'JSON invalide' } }, cors); }
+  }
+
+  // La voix. Venue d'une autre machine (réseau local ou X-Harn-Hop) : servie avec celle d'ici.
+  if (req.method === 'POST' && /^\/v1\/audio\/(speech|start)$/.test(url.pathname)) {
+    if (!voice) return sendJson(res, 503, { error: { message: 'Pas de voix dans ce Harn' } }, cors);
+    const here = lan || Boolean(req.headers['x-harn-hop']);
+    try {
+      if (url.pathname.endsWith('/start')) {
+        await voice.start({ here });
+        return sendJson(res, 200, { ok: true }, cors);
+      }
+      if (body?.response_format && body.response_format !== 'opus') return sendJson(res, 400, { error: { message: 'Seul response_format « opus » est servi (messages vocaux Ogg/Opus)' } }, cors);
+      const audio = await voice.speak(body?.input, body?.voice ?? undefined, { here });
+      res.writeHead(200, { ...cors, 'content-type': 'audio/ogg', 'content-length': audio.length });
+      return res.end(audio);
+    } catch (error) {
+      return sendJson(res, error.status ?? 500, { error: { message: error.message } }, cors);
+    }
   }
 
   // Un modèle d'une autre machine (« modele@pc2 ») : relayé tel quel, elle le charge elle-même.

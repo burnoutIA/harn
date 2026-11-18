@@ -1367,8 +1367,15 @@ function voiceBlock(agent) {
   if (!agent.options.voice) return '';
   const v = state.voice ?? {};
   const installed = Boolean(state.runtimes?.voxtral?.installedAt);
+  // Sans carte Nvidia, Voxtral ne tourne pas ici : une machine reliée (Réseau local) prête la sienne.
+  const nvidia = state.hardware?.primary?.vendor === 'nvidia';
+  const lent = state.voiceRemote;
   let body;
-  if (v.installing) body = `<p class="hint">Installation de la voix… <small>${esc(v.detail ?? '')}</small></p>`;
+  if (!installed && lent) {
+    const status = lent.status === 'ready' ? 'en marche' : lent.status === 'starting' ? 'démarre…' : 'arrêtée, /parler la démarre (une à deux minutes la première fois)';
+    body = `<p class="hint">Sur Telegram, <code>/parler</code> pour des réponses vocales, <code>/ecrire</code> pour revenir au texte. Voix prêtée par <strong>${esc(lent.name)}</strong>, sur sa carte : ${status}.</p>`;
+  } else if (!installed && !nvidia) body = '<p class="hint">Voxtral ne tourne que sur une carte Nvidia. Installez la voix dans le Harn d’une machine qui en a une, puis reliez-la à celle-ci (« Autres machines Harn », dans l’accès) : elle prêtera sa voix.</p>';
+  else if (v.installing) body = `<p class="hint">Installation de la voix… <small>${esc(v.detail ?? '')}</small></p>`;
   else if (!installed) body = `<p class="hint">Voxtral (Mistral) : environ 15 Go à télécharger (moteur et poids). En mode vocal, ~8,5 Go sur la carte graphique, à côté du modèle de texte. Licence CC BY-NC : usage non commercial.</p>${v.error ? `<p class="hint bad">${esc(v.error)}</p>` : ''}<button class="btn small" type="button" data-action="voice-install">Installer la voix</button>`;
   else {
     const status = v.status === 'ready' ? 'en marche, elle s’arrête après un quart d’heure sans rien dire' : v.status === 'starting' ? 'démarre…' : 'arrêtée, /parler la démarre';
