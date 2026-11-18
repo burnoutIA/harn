@@ -140,6 +140,9 @@ export function llamaArgs(model, files, tuning, hardware) {
     args.push('--mmproj', files.mmproj);
     if (tuning.visionOnCpu || !gpu) args.push('--no-mmproj-offload');
   }
+  // Modèle sans réflexion (LFM3 Omni) : sinon llama-server ouvre « <think> » d'office et le modèle,
+  // qui attend « <think></think> » vide, répond de travers.
+  if (!model.reasoning) args.push('--reasoning', 'off');
   const sampling = model.sampling;
   args.push('--temp', String(sampling.temperature), '--top-p', String(sampling.top_p), '--top-k', String(sampling.top_k), '--min-p', String(sampling.min_p));
   if (sampling.repeat_penalty) args.push('--repeat-penalty', String(sampling.repeat_penalty));

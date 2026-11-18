@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { activate } from './activation.mjs';
@@ -37,7 +37,8 @@ const failure = (status, message) => Object.assign(new Error(message), { status 
 const voiceState = () => getState().voice ?? {};
 const patch = (fields) => update((s) => { s.voice = { ...(s.voice ?? {}), ...fields }; });
 const runtime = () => getState().runtimes?.voxtral ?? null;
-export const voiceInstalled = () => Boolean(runtime()?.installedAt);
+// Installée, et toujours là : un dossier runtime/voxtral effacé à la main ne compte plus.
+export const voiceInstalled = () => Boolean(runtime()?.installedAt && existsSync(runtime().model ?? ''));
 // vLLM et vLLM-Omni installés par pip visent CUDA : Voxtral ne tourne que sur une carte Nvidia.
 // Une machine sans elle (la R9700) prend la voix d'un pair qui l'a (peers.mjs) : il la fait
 // tourner sur sa carte et renvoie l'audio, rien ne bouge ici.

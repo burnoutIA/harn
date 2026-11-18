@@ -580,7 +580,12 @@ async function main() {
     openWindow();
     await reapOrphans();
     // La voix d'avant ce démarrage vient d'être reprise avec les autres orphelins.
-    update((s) => { if (s.voice) s.voice = { ...s.voice, status: 'stopped', installing: false, detail: null }; });
+    // Un runtime/voxtral effacé à la main sort de l'état : la fiche d'agent ne le croit plus installé.
+    const voiceGone = !voiceReport().installed;
+    update((s) => {
+      if (s.voice) s.voice = { ...s.voice, status: 'stopped', installing: false, detail: null };
+      if (voiceGone && s.runtimes?.voxtral) delete s.runtimes.voxtral;
+    });
     watchForUpdates();
     watchHub();
     watchImageHub();
