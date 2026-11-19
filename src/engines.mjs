@@ -11,7 +11,7 @@ import path from 'node:path';
 import { llamAmpereEligible, mtpPlan } from './levers.mjs';
 import { github } from './github.mjs';
 import { sandboxAvailable, sandboxReady } from './sandbox.mjs';
-import { buildEngine, buildRdnaBoosts, installLlama, latestRelease } from './runtimes.mjs';
+import { buildEngine, buildHip, installLlama, latestRelease } from './runtimes.mjs';
 import { modelById } from './catalog.mjs';
 import { DIRS } from './paths.mjs';
 import { getState, update } from './state.mjs';
@@ -21,6 +21,8 @@ export const canBuild = (hardware) => hardware?.os?.platform === 'linux' && hard
 // Radeon RDNA4 (RX 9000, R9700) sous Linux, la bulle disponible : le fork RDNA Boosts n'est pas relu.
 const rdna4Linux = (hardware) => hardware?.os?.platform === 'linux' && hardware?.primary?.vendor === 'amd'
   && /RX 9\d{3}|R9[67]00/.test(hardware.primary.name ?? '') && sandboxReady();
+// Un moteur ajouté (PR, fork) se compile ici : en CUDA sur une NVIDIA, en HIP sur une RDNA4 (dans la bulle).
+export const buildable = (hardware) => canBuild(hardware) || rdna4Linux(hardware);
 const cudaArchOf = (hardware) => String(Math.round((hardware?.primary?.computeCapability ?? 8.6) * 10));
 
 // Réglage repris d'un autre moteur : K/V et profondeur MTP propres à un fork ramenés au commun.
@@ -102,7 +104,7 @@ export function engineSheet(id, hardware = getState().hardware) {
   if (!id) return BUILTIN.llama;
   if (BUILTIN[id]) return BUILTIN[id];
   const added = getState().engines?.[id];
-  return added && { ...added, source: 'build', cudaArch: cudaArchOf(hardware), eligible: canBuild };
+  return added && { ...added, source: 'build', cudaArch: cudaArchOf(hardware), eligible: buildable };
 }
 const sheets = () => [...Object.keys(BUILTIN), ...Object.keys(getState().engines ?? {})].map((id) => engineSheet(id));
 
@@ -185,8 +187,10 @@ export const archMissing = (arch) => `Architecture « ${arch} » : aucun moteur 
 export async function ensureEngine(candidate, { hardware = getState().hardware, backend = getState().plan?.backend?.id, onLog = () => {} } = {}) {
   const sheet = engineSheet(candidate.id);
   if (sheet.source === 'release') return installLlama(sheet.id, backend, { refresh: Boolean(candidate.refresh) });
-  if (sheet.builder === 'rdna') return buildRdnaBoosts(sheet, hardware, onLog);
-  if (!canBuild(hardware)) throw new Error(`${sheet.label} se compile sur cette machine, ce qui demande Linux, une carte NVIDIA et les outils de compilation`);
+  if (sheet.builder === 'rdna') return buildHip(sheet, hardware, onLog);
+  // Un moteur ajouté sur une Radeon RDNA4 : même chaîne que RDNA Boosts (ROCm 10.1, dans la bulle).
+  if (!canBuild(hardware) && rdna4Linux(hardware)) return buildHip(sheet, hardware, onLog);
+  if (!canBuild(hardware)) throw new Error(`${sheet.label} se compile sur cette machine, ce qui demande Linux et une carte NVIDIA (avec les outils de compilation) ou une Radeon RDNA4 (avec bubblewrap)`);
   return buildEngine(sheet, hardware.buildTools, onLog);
 }
 
@@ -221,11 +225,54 @@ export async function alternates(model, tuning, profile, hardware = getState().h
 
 // ── Chercher le moteur qui manque ─────────────────────────
 // 1. une version officielle plus récente qui connaît l'architecture ;
-// 2. une PR ouverte de llama.cpp dont le code la connaît (code non fusionné : accord demandé).
+// 2. une PR ouverte de llama.cpp dont le code la connaît (code non fusionné : accord demandé) ;
+// 3. un fork de llama.cpp cité par la fiche Hugging Face du modèle (Olala d'OVHai : « These files
+//    need our llama.cpp fork »), accord demandé de la même façon.
 const gh = (route) => github(route);
+const HF = 'https://huggingface.co';
 
-// exclude : moteurs déjà essayés sans succès pour ce modèle.
-export async function findEngine(arch, { name = null, exclude = [] } = {}) {
+// Les dépôts GitHub cités par la fiche d'un modèle (et celle de son modèle de base, souvent la
+// seule à parler du moteur), dans l'ordre où ils apparaissent.
+async function citedRepos(repo) {
+  const card = async (id) => {
+    const response = await fetch(`${HF}/${id}/raw/main/README.md`, { headers: { 'User-Agent': 'harn' }, signal: AbortSignal.timeout(20_000) }).catch(() => null);
+    return response?.ok ? response.text() : '';
+  };
+  const text = await card(repo);
+  const base = text.match(/^base_model:\s*(?:-\s*)?([\w.-]+\/[\w.-]+)\s*$/m)?.[1];
+  return cardRepos(`${text}\n${base && base !== repo ? await card(base) : ''}`);
+}
+export function cardRepos(text) {
+  const found = [...text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?=[\/)\]\s"'#?<]|$)/g)].map(([, owner, name]) => `${owner}/${name}`);
+  return [...new Set(found)].filter((full) => full.toLowerCase() !== BUILTIN.llama.repo);
+}
+
+// Un fork de llama.cpp cité par la fiche, dont la branche par défaut connaît l'architecture.
+async function forkFromCard(arch, repo, exclude) {
+  for (const full of (await citedRepos(repo)).slice(0, 8)) {
+    const info = await gh(`/repos/${full}`).catch(() => null);
+    if (!info || info.parent?.full_name !== BUILTIN.llama.repo) continue;
+    const head = await gh(`/repos/${full}/commits/${info.default_branch}`).catch(() => null);
+    if (!head?.sha) continue;
+    const id = `fork-${full.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    if (exclude.includes(id)) continue;
+    const archs = await rawArchs(full, head.sha).catch(() => []);
+    if (!archs.includes(arch)) continue;
+    return {
+      kind: 'fork',
+      label: `llama.cpp ${info.owner.login}`,
+      sheet: {
+        id, label: `llama.cpp ${info.owner.login}`, repo: full, ref: head.sha,
+        url: info.html_url, title: head.commit?.message?.split('\n')[0]?.slice(0, 160) ?? full, author: info.owner.login, state: 'fork',
+        citedBy: repo, onlyArchs: [arch], foundAt: new Date().toISOString(),
+      },
+    };
+  }
+  return null;
+}
+
+// exclude : moteurs déjà essayés sans succès pour ce modèle. repo : le dépôt Hugging Face du modèle.
+export async function findEngine(arch, { name = null, exclude = [], repo = null } = {}) {
   const official = BUILTIN.llama;
   const latest = await latestTag(official);
   if (latest && (await engineArchs('llama', latest).catch(() => [])).includes(arch)) {
@@ -253,7 +300,7 @@ export async function findEngine(arch, { name = null, exclude = [] } = {}) {
       };
     }
   }
-  return null;
+  return repo ? forkFromCard(arch, repo, exclude) : null;
 }
 
 // Accord donné : la fiche entre dans le registre, ses architectures sont connues tout de suite.

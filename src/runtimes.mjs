@@ -96,8 +96,10 @@ export function engineEnv(dir, libs = []) {
 
 // Les cartes que ce build voit (« Vulkan1: AMD Radeon AI PRO R9700 (RADV GFX1201) (32624 MiB, … ») :
 // une puce intégrée y figure aussi, avec la RAM pour mémoire. null si le build ne sait pas répondre.
-export async function listDevices(serverPath, dir) {
-  const { stdout, stderr } = await run(serverPath, ['--list-devices'], { env: engineEnv(dir), windowsHide: true, timeout: 30_000 }).catch((error) => error);
+// isolated : moteur non relu (PR, fork), qui ne tourne que dans la bulle, même pour lister les cartes.
+export async function listDevices(serverPath, dir, { libs = [], isolated = false } = {}) {
+  const boxed = isolated ? sandboxed(serverPath, ['--list-devices'], { readable: [dir, ...libs], gpu: true }) : { command: serverPath, args: ['--list-devices'] };
+  const { stdout, stderr } = await run(boxed.command, boxed.args, { env: engineEnv(dir, libs), windowsHide: true, timeout: 30_000 }).catch((error) => error);
   const devices = [...`${stdout ?? ''}\n${stderr ?? ''}`.matchAll(/^\s+([A-Za-z]+\d+): (.+?) \((\d+) MiB/gm)].map(([, id, name, mib]) => ({ id, name, mib: Number(mib) }));
   return devices.length ? devices : null;
 }
@@ -301,8 +303,12 @@ async function harnPatches(sheet) {
   return { files, build: `${sheet.ref}+${short}`, dir: `${sheet.ref.slice(0, 12)}-${short}` };
 }
 
-// sheet : { id, label, repo, ref (commit des correctifs), base (commit llama.cpp), tree, patches? }.
-export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
+// Deux sortes de sources :
+// - une série de correctifs posée sur un commit de llama.cpp (RDNA Boosts) :
+//   sheet = { id, label, repo, ref (commit des correctifs), base (commit llama.cpp), tree, patches? } ;
+// - un fork ordinaire de llama.cpp, ajouté avec l'accord de l'utilisateur (PR, fork cité par la fiche
+//   d'un modèle) : sheet = { id, label, repo, ref (commit) }, son archive dépliée telle quelle.
+export async function buildHip(sheet, hardware, onLog = () => {}) {
   const runtimeId = `${sheet.id}-hip`;
   const existing = getState().runtimes[runtimeId];
   const own = await harnPatches(sheet);
@@ -321,29 +327,37 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
       url: `https://github.com/${repo}/archive/${ref}.tar.gz`, dest: path.join(DIRS.downloads, `${sheet.id}-${what}-${ref.slice(0, 7)}.tar.gz`),
     });
     const parent = path.dirname(repoDir);
-    const baseArchive = await fetchSource('ggml-org/llama.cpp', sheet.base, 'base');
-    const patchArchive = await fetchSource(sheet.repo, sheet.ref, 'correctifs');
-    const unpacked = path.join(parent, `llama.cpp-${sheet.base}`);
-    const patchDir = path.join(parent, `${sheet.repo.split('/')[1]}-${sheet.ref}`);
-    for (const dir of [repoDir, unpacked, patchDir]) await rm(dir, { recursive: true, force: true });
-    await extract(baseArchive, parent);
-    await extract(patchArchive, parent);
-    await rename(unpacked, repoDir);
-    // git am n'exécute rien : appliqué hors de la bulle, sur un dépôt créé pour l'occasion.
-    const git = (args) => runLogged('git', ['-c', 'user.name=harn', '-c', 'user.email=harn@localhost', '-c', 'commit.gpgsign=false', ...args],
-      { cwd: repoDir, env: { ...process.env, GIT_COMMITTER_NAME: 'harn', GIT_COMMITTER_EMAIL: 'harn@localhost' } }, onLog);
-    await git(['init', '-q']);
-    // -f : quelques fichiers suivis par llama.cpp tombent sous son propre .gitignore (build-*, *.log).
-    await git(['add', '-A', '-f']);
-    await git(['commit', '-q', '-m', `llama.cpp ${sheet.base}`]);
-    const patches = (await readdir(path.join(patchDir, 'patches'))).filter((name) => /^\d{4}-.*\.patch$/.test(name)).sort();
-    await git(['am', '-q', ...patches.map((name) => path.join(patchDir, 'patches', name))]);
-    const tree = (await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir })).stdout.trim();
-    if (tree !== sheet.tree) throw new Error(`${sheet.label} : les sources obtenues ne sont pas celles publiées (arbre ${tree.slice(0, 12)}, attendu ${sheet.tree.slice(0, 12)})`);
-    await rm(patchDir, { recursive: true, force: true });
-    for (const file of own.files) {
-      onLog(`Correctif de Harn : ${path.basename(file)}`);
-      await git(['apply', file]);
+    if (!sheet.base) {
+      const archive = await fetchSource(sheet.repo, sheet.ref, 'sources');
+      const unpacked = path.join(parent, `${sheet.repo.split('/')[1]}-${sheet.ref}`);
+      for (const dir of [repoDir, unpacked]) await rm(dir, { recursive: true, force: true });
+      await extract(archive, parent);
+      await rename(unpacked, repoDir);
+    } else {
+      const baseArchive = await fetchSource('ggml-org/llama.cpp', sheet.base, 'base');
+      const patchArchive = await fetchSource(sheet.repo, sheet.ref, 'correctifs');
+      const unpacked = path.join(parent, `llama.cpp-${sheet.base}`);
+      const patchDir = path.join(parent, `${sheet.repo.split('/')[1]}-${sheet.ref}`);
+      for (const dir of [repoDir, unpacked, patchDir]) await rm(dir, { recursive: true, force: true });
+      await extract(baseArchive, parent);
+      await extract(patchArchive, parent);
+      await rename(unpacked, repoDir);
+      // git am n'exécute rien : appliqué hors de la bulle, sur un dépôt créé pour l'occasion.
+      const git = (args) => runLogged('git', ['-c', 'user.name=harn', '-c', 'user.email=harn@localhost', '-c', 'commit.gpgsign=false', ...args],
+        { cwd: repoDir, env: { ...process.env, GIT_COMMITTER_NAME: 'harn', GIT_COMMITTER_EMAIL: 'harn@localhost' } }, onLog);
+      await git(['init', '-q']);
+      // -f : quelques fichiers suivis par llama.cpp tombent sous son propre .gitignore (build-*, *.log).
+      await git(['add', '-A', '-f']);
+      await git(['commit', '-q', '-m', `llama.cpp ${sheet.base}`]);
+      const patches = (await readdir(path.join(patchDir, 'patches'))).filter((name) => /^\d{4}-.*\.patch$/.test(name)).sort();
+      await git(['am', '-q', ...patches.map((name) => path.join(patchDir, 'patches', name))]);
+      const tree = (await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoDir })).stdout.trim();
+      if (tree !== sheet.tree) throw new Error(`${sheet.label} : les sources obtenues ne sont pas celles publiées (arbre ${tree.slice(0, 12)}, attendu ${sheet.tree.slice(0, 12)})`);
+      await rm(patchDir, { recursive: true, force: true });
+      for (const file of own.files) {
+        onLog(`Correctif de Harn : ${path.basename(file)}`);
+        await git(['apply', file]);
+      }
     }
     // Le clang de ROCm range ses en-têtes après /usr/include : sans -isystem, ceux du ROCm de la
     // distribution (Ubuntu 26.04 : 7.1, dans /usr/include/hip) passent devant et la compilation échoue.
@@ -355,6 +369,9 @@ export async function buildRdnaBoosts(sheet, hardware, onLog = () => {}) {
     };
     onLog(`Configuration (cmake, HIP ${target}, ROCm ${ROCM.version})`);
     await step(['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_HIP=ON', `-DGPU_TARGETS=${target}`, '-DLLAMA_CURL=OFF', '-DGGML_NATIVE=ON',
+      // L'interface web précompilée se télécharge pendant la compilation : la bulle n'a pas de réseau,
+      // et llama-server tourne ici sans elle (--no-webui).
+      '-DLLAMA_USE_PREBUILT_UI=OFF',
       `-DCMAKE_HIP_COMPILER=${path.join(rocm, 'llvm', 'bin', 'clang++')}`, `-DCMAKE_HIP_COMPILER_ROCM_ROOT=${rocm}`, `-DCMAKE_PREFIX_PATH=${rocm}`,
       `-Dhip_DIR=${path.join(rocm, 'lib', 'cmake', 'hip')}`, `-DCMAKE_HIP_FLAGS=--rocm-path=${rocm} -isystem ${path.join(rocm, 'include')}`,
       `-DCMAKE_CXX_FLAGS=-isystem ${path.join(rocm, 'include')}`], { cwd: repoDir });

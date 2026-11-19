@@ -59,12 +59,15 @@ function sharedCapacity(model, hardware, desktopGiB) {
 
 function contextIn(model, budget) {
   const weights = weightsOf(model);
+  const cap = model.profile?.maxContext ?? null;
   if (budget <= 0 || !model.kvBytesPerToken) return { context: 0, kv: 'q8_0', weightsGiB: weights };
   // q8_0 d'abord ; q4_0 seulement s'il faut ça pour atteindre 100k (le K quantifié coûte plus
   // en qualité que le V, et q4_0 est plus lent que q8_0 en profondeur sur le build officiel).
   for (const kv of ['q8_0', 'q4_0']) {
     const tokens = round((budget * GiB) / model.kvBytesPerToken[kv]);
-    if (tokens >= OBJECTIVE.minContext || kv === 'q4_0') return { context: Math.min(OBJECTIVE.maxContext, tokens), kv, weightsGiB: weights };
+    // Une architecture plafonnée (gguf.mjs, CONTEXT_CAPS) : son plafond, en KV q8_0 s'il y tient.
+    if (cap && tokens >= cap) return { context: cap, kv, weightsGiB: weights };
+    if (tokens >= OBJECTIVE.minContext || kv === 'q4_0') return { context: Math.min(OBJECTIVE.maxContext, cap ?? Infinity, tokens), kv, weightsGiB: weights };
   }
 }
 
@@ -204,7 +207,7 @@ export function assess(model, hardware) {
   // autant de contexte que la carte et la RAM ensemble en laissent, 32k au moins.
   const shared = sharedCapacity(model, hardware, desktopGiB);
   if (shared.context >= OBJECTIVE.floorContext || model.engine === 'prism') {
-    const context = Math.max(OBJECTIVE.floorContext, shared.context);
+    const context = Math.min(model.profile?.maxContext ?? Infinity, Math.max(OBJECTIVE.floorContext, shared.context));
     const tps = backend.gpu && model.engine !== 'prism' ? sharedTps(model, profile, shared.weightsGiB, shared.gpuShare) : null;
     return finalize({ fit: 'partial', reasons: ['une partie du modèle tournera sur le processeur, plus lentement'], context, kv: shared.kv, tps });
   }

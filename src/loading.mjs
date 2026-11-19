@@ -294,7 +294,7 @@ export async function loadWithHeadroom(model, tuning, { alone = true, freeMore =
   const runtimeId = `${kind}-${current.backend}`;
   const runtime = getState().runtimes[runtimeId];
   if (!ownLauncher(model) && runtime?.serverPath) {
-    const devices = await listDevices(runtime.serverPath, runtime.dir);
+    const devices = await listDevices(runtime.serverPath, runtime.dir, { libs: runtime.libs, isolated: Boolean(engineSheet(current.fork)?.isolated) });
     update((s) => { if (s.runtimes[runtimeId]) s.runtimes[runtimeId].devices = devices; });
   }
   for (let attempt = 0; attempt < 14; attempt += 1) {

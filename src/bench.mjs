@@ -252,8 +252,10 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   const perToken = model.kvBytesPerToken;
   if (gpu && perToken?.f16 && perToken?.q8_0 && ['f16', 'q8_0'].includes(best.tuning.kv) && !best.tuning.kvV && best.headroomMiB != null) {
     const other = best.tuning.kv === 'f16' ? 'q8_0' : 'f16';
-    const otherContext = Math.min(OBJECTIVE.maxContext, Math.floor((best.headroomMiB - HEADROOM_MIN_MIB + best.tuning.context * perToken[best.tuning.kv] / 2 ** 20) / (perToken[other] / 2 ** 20) / 4096) * 4096);
-    if (otherContext >= OBJECTIVE.minContext) {
+    // Une architecture plafonnée (gguf.mjs, CONTEXT_CAPS) se compare à son plafond, jamais au-delà.
+    const cap = model.profile?.maxContext ?? Infinity;
+    const otherContext = Math.min(OBJECTIVE.maxContext, cap, Math.floor((best.headroomMiB - HEADROOM_MIN_MIB + best.tuning.context * perToken[best.tuning.kv] / 2 ** 20) / (perToken[other] / 2 ** 20) / 4096) * 4096);
+    if (otherContext >= Math.min(OBJECTIVE.minContext, cap)) {
       const loads = Math.min(best.tuning.context, otherContext) >= LONG_CONTEXT ? ['code', 'prose', 'depth', 'long'] : ['code', 'prose', 'depth'];
       const reference = await trial('KV en contexte long', best.tuning, loads);
       const candidate = await trial('KV en contexte long', { ...best.tuning, kv: other, context: otherContext }, loads);

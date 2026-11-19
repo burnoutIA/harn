@@ -387,7 +387,7 @@ async function api(req, res, url) {
   if (url.pathname === '/api/engines/find') {
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
     const body = await new Response(req).json().catch(() => ({}));
-    return json(res, 200, await proposeEngine({ modelId: body.modelId ?? null, arch: body.arch ?? null, name: body.name ?? null }));
+    return json(res, 200, await proposeEngine({ modelId: body.modelId ?? null, arch: body.arch ?? null, name: body.name ?? null, repo: typeof body.repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(body.repo) ? body.repo : null }));
   }
   // Ce que l'utilisateur fait surtout (code, texte) : pèse la moyenne des prochains bancs.
   if (url.pathname === '/api/prefs') {

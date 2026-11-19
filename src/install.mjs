@@ -11,7 +11,7 @@ import { buildEntry, inspectRepo, registerModel, unregisterModel } from './custo
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { CHALLENGE_STACK_DIRS, strataTakes } from './runtimes.mjs';
-import { addEngine, archMissing, canBuild, dropUnusedEngines, enginesFor, engineSheet, ensureEngine, findEngine } from './engines.mjs';
+import { addEngine, archMissing, buildable, dropUnusedEngines, enginesFor, engineSheet, ensureEngine, findEngine } from './engines.mjs';
 import { busyWith, withGpu } from './gpu-queue.mjs';
 import { runtimeKind } from './loading.mjs';
 import { refreshHardware } from './machine-state.mjs';
@@ -113,7 +113,12 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     if (mmproj && !strata && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
     // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.
     const engines = strata ? null : await enginesFor(report.profile?.arch);
-    if (engines && !engines.length) throw new Error(archMissing(report.profile.arch));
+    // Aucun moteur ne connaît l'architecture : on en cherche un (PR, fork cité par la fiche). Sa
+    // compilation attend l'accord de l'utilisateur dans la fenêtre ; l'installation sera à relancer.
+    if (engines && !engines.length) {
+      const proposal = await proposeEngine({ arch: report.profile.arch, name: report.profile.name ?? report.repo.split('/')[1], repo: report.repo }).catch(() => null);
+      throw new Error(`${archMissing(report.profile.arch)}${proposal ? `. ${proposal.message}` : ''}${proposal?.status === 'approval' ? ' Une fois la demande acceptée, relancez cette installation : le moteur se compilera avant le téléchargement.' : ''}`);
+    }
     const { id } = buildEntry({ repo: report.repo, quant: chosen, profile: report.profile });
     if (getState().models[id]?.installedAt) throw new Error(`Ce modèle est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
     const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, sampling, strata });
@@ -239,22 +244,23 @@ async function dirSize(target) {
 // officielle plus récente (installée sans demander, c'est le moteur de tous les jours), sinon une
 // PR de llama.cpp qui l'ajoute. Une PR est du code que personne n'a encore relu : elle n'est
 // compilée qu'après l'accord de l'utilisateur, donné par un clic dans la fenêtre de Harn.
-export async function proposeEngine({ modelId = null, arch = null, name = null } = {}) {
+export async function proposeEngine({ modelId = null, arch = null, name = null, repo = null } = {}) {
   const model = modelId ? modelById(modelId) : null;
   arch ??= model?.profile?.arch;
   name ??= model ? displayName(model) : null;
+  repo ??= model?.repo ?? null;
   if (!arch) throw Object.assign(new Error('Architecture du modèle inconnue'), { status: 400 });
   const exclude = Object.keys((modelId && getState().models[modelId]?.engineFailures) ?? {});
-  const found = await findEngine(arch, { name, exclude });
-  if (!found) return { status: 'none', message: `Aucun ${exclude.length ? 'autre ' : ''}moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition dans llama.cpp qui la connaisse${exclude.length ? ' et que ce fichier n’ait pas déjà mise en échec' : ''}. Harn le proposera dès qu’il en existera un.` };
+  const found = await findEngine(arch, { name, exclude, repo });
+  if (!found) return { status: 'none', message: `Aucun ${exclude.length ? 'autre ' : ''}moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition dans llama.cpp, ni fork cité par la fiche du modèle qui la connaisse${exclude.length ? ' et que ce fichier n’ait pas déjà mise en échec' : ''}. Harn le proposera dès qu’il en existera un.` };
   // Ensuite : régler le modèle s'il est déjà là, sinon revoir la veille, qui le proposera.
   const after = () => (modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
   if (found.kind === 'official') {
     ensureEngine(found.candidate).then(after).catch(() => {});
     return { status: 'official', message: `${found.label} sait charger ce modèle : mise à jour du moteur, puis réglage.` };
   }
-  if (!canBuild(getState().hardware)) {
-    return { status: 'unbuildable', message: `${found.label} sait charger ce modèle, mais il faut le compiler : pour l’instant, Linux avec une carte NVIDIA et les outils de compilation.` };
+  if (!buildable(getState().hardware)) {
+    return { status: 'unbuildable', message: `${found.label} sait charger ce modèle, mais il faut le compiler : pour l’instant, Linux avec une carte NVIDIA et les outils de compilation, ou une Radeon RDNA4 avec bubblewrap (${SANDBOX_INSTALL}).` };
   }
   const { sheet } = found;
   // Déjà accepté une fois (pour un autre modèle de la même architecture) : pas de nouvelle demande.
@@ -263,7 +269,9 @@ export async function proposeEngine({ modelId = null, arch = null, name = null }
   requestApproval({
     kind: 'engine',
     title: `Compiler ${sheet.label} pour ${name ?? arch}${isolated ? '' : ' (sans isolation)'} ?`,
-    detail: `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ». ${isolated
+    detail: `${sheet.state === 'fork'
+      ? `Fork de llama.cpp par ${sheet.author} (${sheet.url}), que la fiche de ${sheet.citedBy} demande pour charger ce modèle. Dernier commit : « ${sheet.title} ». Ce fork n’est pas llama.cpp`
+      : `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'}`} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ». ${isolated
       ? 'Il est compilé et lancé isolé : sans réseau, sans accès à vos fichiers, seulement ses sources, le modèle et la carte graphique.'
       : `Attention : il tournerait sans isolation, avec accès à vos fichiers et au réseau, car bubblewrap manque. Pour l’isoler, refusez, installez-le (${SANDBOX_INSTALL}) et relancez Harn.`}`,
     run: () => { addEngine(sheet).then(after).catch(() => {}); },

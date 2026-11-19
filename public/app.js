@@ -917,7 +917,7 @@ function hubSection() {
   const empty = !items.length && !updates.length ? `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de nouveau ces 30 derniers jours qui tourne bien sur cette machine.' : 'Harn regarde une fois par jour les modèles sortis ou mis à jour sur Hugging Face, et ne garde que ceux qui tournent bien ici.'}</p>` : '';
   // Écartés faute de moteur : on les nomme, pour qu'un modèle attendu ne disparaisse pas sans raison.
   const missing = (w.items ?? []).filter((i) => i.engineMissing);
-  const noEngine = missing.length ? `<p class="hub-missing">${icon.info}<span><b>Pas encore de moteur pour ${missing.length === 1 ? 'ce modèle' : `ces ${missing.length} modèles`}</b> : ${missing.map((i) => `<a href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">${esc(i.name)}</a> (architecture « ${esc(i.engineMissing)} », <button class="link" data-action="engine-find" data-arch="${esc(i.engineMissing)}" data-name="${esc(i.name)}">chercher un moteur</button>)`).join(', ')}. llama.cpp ne sait pas encore les charger.</span></p>` : '';
+  const noEngine = missing.length ? `<p class="hub-missing">${icon.info}<span><b>Pas encore de moteur pour ${missing.length === 1 ? 'ce modèle' : `ces ${missing.length} modèles`}</b> : ${missing.map((i) => `<a href="https://huggingface.co/${esc(i.repo)}" target="_blank" rel="noopener">${esc(i.name)}</a> (architecture « ${esc(i.engineMissing)} », <button class="link" data-action="engine-find" data-arch="${esc(i.engineMissing)}" data-name="${esc(i.name)}" data-repo="${esc(i.repo)}">chercher un moteur</button>)`).join(', ')}. llama.cpp ne sait pas encore les charger.</span></p>` : '';
   return `<div>${head}<div style="display:grid;gap:12px;margin-top:16px">${upd}${empty}${cards ? `<div class="models">${cards}</div>` : ''}${noEngine}</div></div>`;
 }
 
@@ -1778,7 +1778,7 @@ app.addEventListener('click', async (event) => {
     }
     if (action === 'engine-find') {
       toast('Recherche d’un moteur…');
-      const r = await post('/api/engines/find', id ? { modelId: id } : { arch: button.dataset.arch, name: button.dataset.name });
+      const r = await post('/api/engines/find', id ? { modelId: id } : { arch: button.dataset.arch, name: button.dataset.name, repo: button.dataset.repo });
       toast(r.message);
     }
     if (action === 'bench') { await post(`/api/models/${id}/bench`); toast('Nouvelle mesure en cours'); }

@@ -127,6 +127,13 @@ function normalizeSampling(sampling) {
 }
 
 // strata : un Flash-Next que Strata sait servir (voir installStrataPack) plutôt que llama.cpp.
+// Ce que la fiche d'une architecture impose et que le GGUF ne dit pas. Olala v1.0 mini (OVHai) :
+// échantillonnage « temperature=0.8, top_p=0.9, top_k=40 », et quatre niveaux de raisonnement,
+// dont « disabled » pour répondre sans réfléchir (son gabarit ne connaît pas enable_thinking).
+const ARCH_DEFAULTS = {
+  olala: { sampling: { temperature: 0.8, top_p: 0.9, top_k: 40 }, reasoningLevels: ['disabled', 'low', 'medium', 'high'] },
+};
+
 export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, sampling = null, name = null, tagline = null, strata = false }) {
   const id = `${repo.split('/')[1]}-${quant.quant}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const bytes = quant.bytes;
@@ -152,8 +159,8 @@ export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = nul
     vision: Boolean(mmproj),
     mtp: profile.mtp || Boolean(mtpDraft),
     moe: profile.experts ? { experts: profile.experts, used: profile.expertsUsed } : null,
-    sampling: normalizeSampling({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, ...(sampling ?? {}) }),
-    reasoningLevels: ['low', 'medium', 'xhigh'],
+    sampling: normalizeSampling({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, ...(ARCH_DEFAULTS[profile.arch]?.sampling ?? {}), ...(sampling ?? {}) }),
+    reasoningLevels: ARCH_DEFAULTS[profile.arch]?.reasoningLevels ?? ['low', 'medium', 'xhigh'],
     evidence: null,
     profile,
   };
