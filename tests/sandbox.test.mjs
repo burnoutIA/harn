@@ -46,7 +46,7 @@ test('moteur isolé : répond, mais ni fichiers, ni dossier personnel, ni résea
   writeFileSync(path.join(DIRS.models, 't-sandbox', 'm.gguf'), 'GGUF');
   update((s) => {
     s.hardware = { os: { platform: 'linux' }, cpu: { physical: 4 }, primary: { vendor: 'nvidia', computeCapability: 8.6 } };
-    s.engines = { 'llama-pr-test': { id: 'llama-pr-test', label: 'PR de test', repo: 'x/y', ref: 'abc', onlyArchs: ['test'], isolated: true } };
+    s.addedEngines = { 'llama-pr-test': { id: 'llama-pr-test', label: 'PR de test', repo: 'x/y', ref: 'abc', onlyArchs: ['test'], isolated: true } };
     s.runtimes['llama-pr-test-cuda12'] = { kind: 'llama-pr-test', backend: 'cuda12', dir, serverPath };
     s.models['t-sandbox'] = { installedAt: new Date().toISOString(), files: ['m.gguf'] };
   });

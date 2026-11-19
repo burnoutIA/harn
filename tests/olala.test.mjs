@@ -56,3 +56,29 @@ test('Olala : niveaux de raisonnement et échantillonnage de sa fiche', async ()
   assert.equal(shapeRequest({ reasoning_effort: 'high' }, qwen).chat_template_kwargs.reasoning_effort, 'xhigh');
   assert.equal(shapeRequest({ reasoning_effort: 'off' }, qwen).chat_template_kwargs.enable_thinking, false);
 });
+
+test('moteurs ajoutés : registre à part, survivent au redémarrage, orphelins isolés', async () => {
+  const { migrate } = await import('../src/migrations.mjs');
+  const fork = { id: 'fork-ovhai-llm-llama-cpp', label: 'llama.cpp OVHai-LLM', repo: 'OVHai-LLM/llama.cpp', ref: 'abc', onlyArchs: ['olala'], isolated: true };
+  const migrated = migrate({ version: 5, engines: { [fork.id]: fork, 'qwen3-8-27b': { status: 'ready' } }, profiles: {} });
+  assert.deepEqual(Object.keys(migrated.addedEngines), [fork.id]);
+  assert.deepEqual(Object.keys(migrated.engines), ['qwen3-8-27b'], 'les modèles chargés restent où ils sont');
+
+  const { engineSheet, dropUnusedEngines } = await import('../src/engines.mjs');
+  const { update } = await import('../src/state.mjs');
+  // Un fork compilé dont la fiche a disparu : isolé, jamais proposé.
+  const orphan = engineSheet(fork.id);
+  assert.equal(orphan.isolated, true);
+  assert.equal(orphan.eligible({}), false);
+  assert.equal(engineSheet('llama-pr-test').isolated, true, 'même hors du format des identifiants : isolé');
+  // Le ménage : le fork encore réglé sur un modèle installé reste, Strata n'est jamais touché.
+  update((s) => {
+    s.models = { olala: { installedAt: 'x' } };
+    s.profiles = { olala: { tuning: { fork: fork.id } } };
+    s.runtimes = { [`${fork.id}-hip`]: { kind: fork.id }, 'strata-x': { kind: 'strata' }, 'fork-autre-hip': { kind: 'fork-autre' } };
+  });
+  const { dropped } = await dropUnusedEngines();
+  assert.deepEqual(dropped, ['fork-autre']);
+  const { getState } = await import('../src/state.mjs');
+  assert.deepEqual(Object.keys(getState().runtimes).sort(), [`${fork.id}-hip`, 'strata-x']);
+});

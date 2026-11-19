@@ -3,7 +3,7 @@
 // Ajouter une migration : incrémenter SCHEMA_VERSION et décrire le passage à cette version.
 import { verbosityLabel } from './iq-test.mjs';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 const MIGRATIONS = {
   // v2 : `layers` explicite dans chaque réglage. Avant, une cible --fit relevée (> 1 Gio)
@@ -36,6 +36,15 @@ const MIGRATIONS = {
     for (const profile of Object.values(state.profiles ?? {})) {
       const tuning = profile.tuning;
       if (tuning?.spec?.type === 'none' && !tuning.strataArm && !tuning.strataConfig) tuning.spec = { type: 'ngram' };
+    }
+  },
+  // v6 : les moteurs ajoutés (PR, fork) quittent state.engines, qui liste les modèles chargés et
+  // repart vide à chaque démarrage, pour state.addedEngines. Une fiche se reconnaît à onlyArchs.
+  6: (state) => {
+    for (const [id, entry] of Object.entries(state.engines ?? {})) {
+      if (!Array.isArray(entry?.onlyArchs)) continue;
+      state.addedEngines = { ...state.addedEngines, [id]: entry };
+      delete state.engines[id];
     }
   },
 };

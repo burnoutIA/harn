@@ -98,15 +98,23 @@ const BUILTIN = {
   },
 };
 
-// Une fiche, intégrée ou ajoutée avec l'accord de l'utilisateur (state.engines : PR, fork). Les
+// Une fiche, intégrée ou ajoutée avec l'accord de l'utilisateur (state.addedEngines : PR, fork). Les
 // fiches ajoutées ne servent qu'aux architectures pour lesquelles on les a cherchées.
+// (state.engines, lui, liste les modèles chargés et repart vide à chaque démarrage : y ranger les
+// fiches les effaçait, et un fork compilé tournait ensuite hors de la bulle, faute de fiche.)
+const addedSheets = () => getState().addedEngines ?? {};
 export function engineSheet(id, hardware = getState().hardware) {
   if (!id) return BUILTIN.llama;
   if (BUILTIN[id]) return BUILTIN[id];
-  const added = getState().engines?.[id];
-  return added && { ...added, source: 'build', cudaArch: cudaArchOf(hardware), eligible: buildable };
+  const added = addedSheets()[id];
+  if (added) return { ...added, source: 'build', cudaArch: cudaArchOf(hardware), eligible: buildable };
+  // Un moteur hors de la liste intégrée dont la fiche manque (accord perdu) : code non relu, donc
+  // isolé, et jamais proposé de lui-même. Un nouvel accord le remet au registre.
+  return { id, label: id, source: 'build', isolated: true, orphan: true, onlyArchs: [], eligible: () => false };
 }
-const sheets = () => [...Object.keys(BUILTIN), ...Object.keys(getState().engines ?? {})].map((id) => engineSheet(id));
+// Les identifiants que findEngine donne aux moteurs ajoutés : seuls ceux-là sont nettoyés sans fiche.
+const ADDED_ID = /^(llama-pr-\d+|fork-[a-z0-9-]+)$/;
+const sheets = () => [...Object.keys(BUILTIN), ...Object.keys(addedSheets())].map((id) => engineSheet(id));
 
 export const parseArchs = (source) => [...source.matchAll(/\{\s*LLM_ARCH_[A-Z0-9_]+,\s*"([^"]+)"\s*\}/g)].map((m) => m[1]);
 
@@ -307,7 +315,7 @@ export async function findEngine(arch, { name = null, exclude = [], repo = null 
 // isolated : compilé et lancé dans la bulle (sandbox.mjs) si bubblewrap est là au moment de l'accord.
 export async function addEngine(sheet) {
   const isolated = await sandboxAvailable();
-  update((s) => { s.engines = { ...s.engines, [sheet.id]: { ...sheet, isolated, approvedAt: new Date().toISOString() } }; });
+  update((s) => { s.addedEngines = { ...s.addedEngines, [sheet.id]: { ...sheet, isolated, approvedAt: new Date().toISOString() } }; });
   update((s) => { s.engineArchs = { ...s.engineArchs, [`${sheet.id}@${sheet.ref}`]: sheet.onlyArchs }; });
 }
 
@@ -325,16 +333,22 @@ async function sizeOf(target) {
 
 export async function dropUnusedEngines() {
   const state = getState();
-  const archsInUse = new Set(Object.keys(state.models ?? {}).filter((id) => state.models[id].installedAt).map((id) => modelById(id)?.profile?.arch).filter(Boolean));
+  const installed = Object.keys(state.models ?? {}).filter((id) => state.models[id].installedAt);
+  const archsInUse = new Set(installed.map((id) => modelById(id)?.profile?.arch).filter(Boolean));
+  const forksInUse = new Set(installed.map((id) => state.profiles?.[id]?.tuning?.fork).filter(Boolean));
+  // Les fiches ajoutées, et les moteurs compilés restés sans fiche (voir engineSheet).
+  const orphans = [...new Set(Object.values(state.runtimes ?? {}).map((r) => r.kind))]
+    .filter((kind) => kind && ADDED_ID.test(kind) && !addedSheets()[kind] && !forksInUse.has(kind))
+    .map((id) => ({ id, label: id, onlyArchs: [] }));
   const dropped = [];
   let bytes = 0;
-  for (const sheet of Object.values(state.engines ?? {})) {
-    if ((sheet.onlyArchs ?? []).some((arch) => archsInUse.has(arch))) continue;
+  for (const sheet of [...Object.values(addedSheets()), ...orphans]) {
+    if ((sheet.onlyArchs ?? []).some((arch) => archsInUse.has(arch)) || forksInUse.has(sheet.id)) continue;
     const dir = path.join(DIRS.runtime, sheet.id);
     const archives = (await readdir(DIRS.downloads).catch(() => [])).filter((name) => name.startsWith(`${sheet.id}-`)).map((name) => path.join(DIRS.downloads, name));
     for (const target of [dir, ...archives]) { bytes += await sizeOf(target); await rm(target, { recursive: true, force: true }); }
     update((s) => {
-      delete s.engines[sheet.id];
+      if (s.addedEngines) delete s.addedEngines[sheet.id];
       for (const key of Object.keys(s.runtimes ?? {})) if (key.startsWith(`${sheet.id}-`)) delete s.runtimes[key];
       for (const key of Object.keys(s.engineArchs ?? {})) if (key.startsWith(`${sheet.id}@`)) delete s.engineArchs[key];
       for (const key of Object.keys(s.downloads ?? {})) if (key === `runtime:${sheet.id}`) delete s.downloads[key];

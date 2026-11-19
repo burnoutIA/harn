@@ -23,6 +23,7 @@ const initial = () => ({
   profiles: {},   // id du modèle → { recipe, bench: { arms: [...], winner, at }, measured }
   active: null,   // le dernier modèle servi : { modelId, status, since, endpoint, error… }
   engines: {},    // les modèles chargés, un moteur chacun (engine.mjs)
+  addedEngines: {}, // moteurs ajoutés avec l'accord de l'utilisateur : PR, fork (engines.mjs)
   pi: { installed: false, version: null, lastLaunch: null },
   lan: false,     // API ouverte au réseau local (port à part, clé exigée)
   approvals: [],  // demandes de pi en attente d'un clic de l'utilisateur (approvals.mjs)

@@ -264,7 +264,7 @@ export async function proposeEngine({ modelId = null, arch = null, name = null, 
   }
   const { sheet } = found;
   // Déjà accepté une fois (pour un autre modèle de la même architecture) : pas de nouvelle demande.
-  if (getState().engines?.[sheet.id]) { after(); return { status: 'known', message: `${found.label} est déjà installé : réglage du modèle avec lui.` }; }
+  if (getState().addedEngines?.[sheet.id]) { after(); return { status: 'known', message: `${found.label} est déjà installé : réglage du modèle avec lui.` }; }
   const isolated = await sandboxAvailable();
   requestApproval({
     kind: 'engine',

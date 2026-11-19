@@ -78,7 +78,8 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   if (!startFrom && !ownLauncher(model) && estimated > (startTuning.context ?? 0)) startTuning.context = estimated;
   // Un moteur compilé par Harn dont les sources ont changé (correctif ajouté ou modifié) est recompilé
   // avant toute mesure : sinon le banc mesurerait l'ancien binaire. Sans changement, rien à faire.
-  if (!startFrom && startTuning.fork && engineSheet(startTuning.fork)?.source === 'build') {
+  // Un moteur sans fiche (orphelin, voir engineSheet) n'a plus de sources connues : on le garde tel quel.
+  if (!startFrom && startTuning.fork && engineSheet(startTuning.fork)?.source === 'build' && !engineSheet(startTuning.fork).orphan) {
     const sheet = engineSheet(startTuning.fork);
     onProgress(`${sheet.label} · préparation du moteur`);
     await ensureEngine({ id: sheet.id }, { hardware, onLog: (text) => {
