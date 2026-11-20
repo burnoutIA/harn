@@ -60,15 +60,15 @@ export function shapeRequest(body, model) {
   if (model.engine !== 'strata' && model.reasoning) {
     const kwargs = { ...(body.chat_template_kwargs ?? {}) };
     const asked = body.reasoning_effort ?? body.reasoning?.effort;
-    // Un gabarit qui a son propre niveau « disabled » (Olala) : il s'en sert pour couper la réflexion,
-    // et son niveau le plus haut s'appelle high.
-    const ownOff = model.reasoningLevels?.includes('disabled');
+    // Les niveaux que le gabarit du modèle déclare (lus sur sa fiche) : un niveau « disabled »
+    // (Olala) coupe la réflexion à la place d'enable_thinking, et sans xhigh le plus haut est high.
+    const levels = model.reasoningLevels ?? [];
     if (asked === 'none' || asked === 'off' || asked === 'disabled') {
-      if (ownOff) kwargs.reasoning_effort = 'disabled';
+      if (levels.includes('disabled')) kwargs.reasoning_effort = 'disabled';
       else kwargs.enable_thinking = false;
     } else if (!kwargs.reasoning_effort) {
       const effort = EFFORT[asked] ?? 'medium';
-      kwargs.reasoning_effort = ownOff && effort === 'xhigh' ? 'high' : effort;
+      kwargs.reasoning_effort = effort === 'xhigh' && !levels.includes('xhigh') && levels.includes('high') ? 'high' : effort;
     }
     shaped.chat_template_kwargs = kwargs;
     delete shaped.reasoning_effort;

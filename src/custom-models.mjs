@@ -127,14 +127,21 @@ function normalizeSampling(sampling) {
 }
 
 // strata : un Flash-Next que Strata sait servir (voir installStrataPack) plutôt que llama.cpp.
-// Ce que la fiche d'une architecture impose et que le GGUF ne dit pas. Olala v1.0 mini (OVHai) :
-// échantillonnage « temperature=0.8, top_p=0.9, top_k=40 », et quatre niveaux de raisonnement,
-// dont « disabled » pour répondre sans réfléchir (son gabarit ne connaît pas enable_thinking).
-const ARCH_DEFAULTS = {
-  olala: { sampling: { temperature: 0.8, top_p: 0.9, top_k: 40 }, reasoningLevels: ['disabled', 'low', 'medium', 'high'] },
-};
+// card : ce que la fiche du modèle dit et que le GGUF ne dit pas, lu par pi (readModelCard) :
+// maxContext (Olala : le GGUF annonce 100 000, la fiche « -c at most 32,768 »), les niveaux de
+// raisonnement de son gabarit (Olala : disabled, low, medium, high), et les mises en garde à garder
+// avec le modèle (« use bf16 on GPUs »).
+export const REASONING_LEVELS = ['disabled', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export function cardFacts(card) {
+  if (!card) return null;
+  const maxContext = Number.isInteger(card.maxContext) && card.maxContext >= 2048 && card.maxContext <= 1 << 21 ? card.maxContext : null;
+  const levels = Array.isArray(card.reasoningLevels) ? card.reasoningLevels.map(String).filter((l) => REASONING_LEVELS.includes(l)) : [];
+  const notes = Array.isArray(card.notes) ? card.notes.map((n) => String(n).slice(0, 300)).filter(Boolean).slice(0, 8) : [];
+  return { maxContext, reasoningLevels: levels.length ? levels : null, notes: notes.length ? notes : null };
+}
 
-export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, sampling = null, name = null, tagline = null, strata = false }) {
+export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, sampling = null, name = null, tagline = null, strata = false, card = null }) {
+  const facts = cardFacts(card);
   const id = `${repo.split('/')[1]}-${quant.quant}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const bytes = quant.bytes;
   const weightsGiB = bytes / 1024 ** 3;
@@ -159,10 +166,11 @@ export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = nul
     vision: Boolean(mmproj),
     mtp: profile.mtp || Boolean(mtpDraft),
     moe: profile.experts ? { experts: profile.experts, used: profile.expertsUsed } : null,
-    sampling: normalizeSampling({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, ...(ARCH_DEFAULTS[profile.arch]?.sampling ?? {}), ...(sampling ?? {}) }),
-    reasoningLevels: ARCH_DEFAULTS[profile.arch]?.reasoningLevels ?? ['low', 'medium', 'xhigh'],
+    sampling: normalizeSampling({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, ...(sampling ?? {}) }),
+    reasoningLevels: facts?.reasoningLevels ?? ['low', 'medium', 'xhigh'],
+    cardNotes: facts?.notes ?? undefined,
     evidence: null,
-    profile,
+    profile: facts?.maxContext ? { ...profile, maxContext: facts.maxContext } : profile,
   };
   if (!strata) return entry;
   // Sous Strata : sa propre tête MTP et pas de vision pour l'instant ; les experts (les deux tiers

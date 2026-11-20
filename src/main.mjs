@@ -13,10 +13,10 @@ import { DIRS, PORTS } from './paths.mjs';
 import { APPEND_SYSTEM, configurePi, ensureAppendSystem, ketchSearch, launchPi, openInEditor } from './pi.mjs';
 import { installKetch } from './runtimes.mjs';
 import { proposeEngine } from './setup.mjs';
-import { dropUnusedEngines } from './engines.mjs';
+import { dropUnusedEngines, readModelCard } from './engines.mjs';
 import { sandboxAvailable } from './sandbox.mjs';
 import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
-import { inspectRepo, loadCustomModels } from './custom-models.mjs';
+import { inspectRepo, loadCustomModels, parseRepo } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
 import { applyCheck } from './system-checks.mjs';
@@ -193,6 +193,11 @@ async function api(req, res, url) {
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/events') return events(req, res);
+  // Un identifiant inconnu : on le dit, avec les identifiants valables (pi en devinait un).
+  if (req.method === 'GET' && parts[1] === 'models' && parts[3] === 'log' && !modelById(parts[2])) {
+    const known = Object.keys(getState().models ?? {});
+    return json(res, 404, { error: `Modèle inconnu : « ${parts[2]} ». Identifiants des modèles de cette machine : ${known.join(', ') || 'aucun'}` });
+  }
   if (req.method === 'GET' && parts[1] === 'models' && parts[3] === 'log' && modelById(parts[2])) {
     const text = await readFile(installLogPath(parts[2]), 'utf8').catch(() => '');
     const entry = getState().models[parts[2]] ?? {};
@@ -416,6 +421,12 @@ async function api(req, res, url) {
       return json(res, 500, { error: error.message });
     }
   }
+  // La fiche d'un modèle en texte, avec celle de son modèle de base et les dépôts GitHub cités :
+  // pi y lit ce que le GGUF ne dit pas (moteur requis, limite de contexte, réglages, mises en garde).
+  if (url.pathname === '/api/hf/card') {
+    const body = await new Response(req).json().catch(() => ({}));
+    try { return json(res, 200, await readModelCard(parseRepo(body.url ?? ''))); } catch (error) { return json(res, 400, { error: error.message }); }
+  }
   if (url.pathname === '/api/hf/inspect') {
     const body = await new Response(req).json().catch(() => ({}));
     try { return json(res, 200, await inspectForMachine(body.url)); } catch (error) { return json(res, 400, { error: error.message }); }
@@ -424,7 +435,9 @@ async function api(req, res, url) {
     // Depuis notre page : lancement immédiat. Depuis pi (outil MCP) : une demande que
     // l'utilisateur accepte ou refuse dans la fenêtre. L'avancement se lit sur /api/custom/job.
     const body = await new Response(req).json().catch(() => ({}));
-    const options = { url: body.url, quant: body.quant, mmproj: body.mmproj ?? null, sampling: body.sampling ?? null };
+    const options = { url: body.url, quant: body.quant, mmproj: body.mmproj ?? null, sampling: body.sampling ?? null,
+      name: typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 80) : null,
+      card: body.card && typeof body.card === 'object' ? body.card : null };
     if (fromOurPage(req)) {
       try { installCustom(options); return json(res, 202, customJobState()); } catch (error) { return json(res, 409, { error: error.message }); }
     }

@@ -15,6 +15,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Adresse du dépôt, ex. https://huggingface.co/auteur/modele-GGUF' } }, required: ['url'] },
   },
   {
+    name: 'read_model_card',
+    description: 'La fiche (README) du dépôt Hugging Face en texte, celle du modèle de base qu’elle déclare, et les dépôts GitHub qu’elles citent (llamaCppFork : un fork de llama.cpp, souvent le moteur exigé par une architecture récente). C’est là que l’auteur dit ce que le GGUF ne dit pas : moteur requis, limite réelle de contexte, échantillonnage, niveaux de raisonnement, quantifications déconseillées selon le matériel. À lire en entier avant de choisir.',
+    inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Adresse du dépôt, ex. https://huggingface.co/auteur/modele-GGUF' } }, required: ['url'] },
+  },
+  {
     name: 'install_model',
     description: 'Installe une quantification choisie : la télécharge (ou reprend le fichier s’il est déjà sur cette machine, ce que dit alreadyOnDisk dans inspect_model_repo), la règle et la mesure (banc par étapes), puis lance le banc d’intelligence. Harn affiche d’abord la demande (dépôt, taille, licence) dans sa fenêtre : rien ne démarre avant que l’utilisateur clique sur Accepter. Préviens-le avant d’appeler l’outil. Bloque jusqu’à la fin (plusieurs minutes) et rend les résultats.',
     inputSchema: {
@@ -24,6 +29,10 @@ const TOOLS = [
         quant: { type: 'string', description: 'Nom exact de la quantification, tel que rendu par inspect_model_repo (ex. UD-IQ4_XS)' },
         mmproj: { type: 'string', description: 'Fichier projecteur vision à installer (optionnel ; à omettre si l’auteur dit que la vision est incompatible avec MTP)' },
         sampling: { type: 'object', description: 'Réglages d’échantillonnage recommandés par l’auteur : temperature, top_p, top_k, min_p, presence_penalty, repeat_penalty', additionalProperties: { type: 'number' } },
+        name: { type: 'string', description: 'Nom lisible du modèle, tiré de la fiche (le nom écrit dans le GGUF est parfois celui d’un essai d’entraînement)' },
+        max_context: { type: 'integer', description: 'Contexte maximal que la fiche autorise, s’il est plus bas que celui du GGUF (ex. « -c at most 32768 »). Harn ne le dépassera pas, banc compris.' },
+        reasoning_levels: { type: 'array', items: { type: 'string', enum: ['disabled', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] }, description: 'Les valeurs de reasoning_effort que le gabarit du modèle accepte, selon la fiche (ex. disabled, low, medium, high). Sans indication : à omettre.' },
+        notes: { type: 'array', items: { type: 'string' }, description: 'Mises en garde de la fiche à garder avec le modèle, une phrase chacune (ex. « BF16 recommandé sur GPU : les quantifications peuvent produire des NaN »).' },
       },
       required: ['url', 'quant'],
     },
@@ -118,6 +127,7 @@ async function waitApproval(id, token) {
 
 async function call(name, args, token) {
   if (name === 'inspect_model_repo') return text(await api('POST', '/api/hf/inspect', { url: args.url }));
+  if (name === 'read_model_card') return text(await api('POST', '/api/hf/card', { url: args.url }));
   if (name === 'harn_status') return text(await api('GET', '/api/status'));
   if (name === 'read_install_log') return text(await api('GET', `/api/models/${encodeURIComponent(args.model_id)}/log`));
   if (name === 'retry_install') {
@@ -139,7 +149,8 @@ async function call(name, args, token) {
     }
   }
   if (name === 'install_model') {
-    const asked = await api('POST', '/api/custom/install', { url: args.url, quant: args.quant, mmproj: args.mmproj, sampling: args.sampling });
+    const card = { maxContext: args.max_context, reasoningLevels: args.reasoning_levels, notes: args.notes };
+    const asked = await api('POST', '/api/custom/install', { url: args.url, quant: args.quant, mmproj: args.mmproj, sampling: args.sampling, name: args.name, card });
     const refused = asked.approval ? await waitApproval(asked.approval, token) : null;
     if (refused) return text(refused, true);
     let step = 0;
@@ -148,7 +159,8 @@ async function call(name, args, token) {
       await new Promise((resolve) => setTimeout(resolve, 5000));
       const job = await api('GET', '/api/custom/job').catch(() => null);
       if (!job) continue;
-      if (!job.running) return job.error ? text(`Échec : ${job.error}`, true) : text(job.result);
+      // Un statut explicite : l'installation a réussi (status: installed, avec model_id) ou échoué.
+      if (!job.running) return job.error ? text(`ÉCHEC de l’installation : ${job.error}`, true) : text({ ...job.result, status: 'installed', model_id: job.result?.id });
       const status = job.step === 'download' ? await api('GET', '/api/status').catch(() => null) : null;
       const download = status?.downloads?.[0];
       const message = download ? `Téléchargement ${download.percent ?? '?'} % (${download.speedMBps ?? '?'} Mo/s)` : job.detail;

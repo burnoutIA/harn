@@ -106,11 +106,6 @@ export async function readGgufFile(file) {
   throw new Error('En-tête GGUF trop grand');
 }
 
-// Contexte au-delà duquel une architecture ne tient plus, quand le GGUF en annonce davantage.
-// Olala v1.0 mini (OVHai, hybride Mamba3 + MoE) : le GGUF dit 100 000, la fiche « -c at most
-// 32,768 », et un modèle récurrent ne fait pas glisser son contexte : un prompt plus long échoue.
-const CONTEXT_CAPS = { olala: 32768 };
-
 // Ce qui compte pour l'inférence, tiré des métadonnées.
 export function profileFromMetadata({ meta }) {
   const arch = meta['general.architecture'];
@@ -143,7 +138,6 @@ export function profileFromMetadata({ meta }) {
     sizeLabel: meta['general.size_label'] ?? null,
     layers,
     contextLength: get('context_length') ?? null,
-    maxContext: CONTEXT_CAPS[arch] ?? null,
     experts,
     expertsUsed: used,
     mtp: (get('nextn_predict_layers') ?? 0) > 0,

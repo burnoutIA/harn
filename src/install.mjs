@@ -96,9 +96,11 @@ export async function inspectForMachine(url) {
 // Installer un modèle choisi : enregistrement, téléchargement, banc, test d'intelligence, puis
 // retour au modèle qui servait avant (pi tourne dessus). Une seule installation à la fois.
 let customJob = null;
+const ENGINE_APPROVAL_TIMEOUT_MS = 30 * 60_000;
 let jobState = null;
 export const customJobState = () => jobState;
-export function installCustom({ url, quant, mmproj = null, sampling = null }) {
+// name, card : ce que pi a lu sur la fiche du modèle (custom-models.mjs, cardFacts).
+export function installCustom({ url, quant, mmproj = null, sampling = null, name = null, card = null }) {
   if (customJob) throw new Error('Une installation est déjà en cours');
   jobState = { running: true, startedAt: Date.now(), url, quant, step: 'inspect', detail: 'Analyse du dépôt', result: null, error: null };
   const onProgress = ({ step, detail }) => { jobState = { ...jobState, step, detail }; };
@@ -114,14 +116,26 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.
     const engines = strata ? null : await enginesFor(report.profile?.arch);
     // Aucun moteur ne connaît l'architecture : on en cherche un (PR, fork cité par la fiche). Sa
-    // compilation attend l'accord de l'utilisateur dans la fenêtre ; l'installation sera à relancer.
+    // compilation attend l'accord de l'utilisateur dans la fenêtre ; une fois donné, l'installation
+    // continue d'elle-même (le moteur se compile avant le téléchargement).
     if (engines && !engines.length) {
-      const proposal = await proposeEngine({ arch: report.profile.arch, name: report.profile.name ?? report.repo.split('/')[1], repo: report.repo }).catch(() => null);
-      throw new Error(`${archMissing(report.profile.arch)}${proposal ? `. ${proposal.message}` : ''}${proposal?.status === 'approval' ? ' Une fois la demande acceptée, relancez cette installation : le moteur se compilera avant le téléchargement.' : ''}`);
+      let decided;
+      const decision = new Promise((resolve) => { decided = resolve; });
+      const proposal = await proposeEngine({ arch: report.profile.arch, name: name ?? report.repo.split('/')[1], repo: report.repo, onAccept: () => decided(true), onRefuse: (error) => decided(error ?? false) }).catch((error) => ({ status: 'error', message: error.message }));
+      if (proposal.status === 'approval' || proposal.status === 'official') {
+        onProgress({ step: 'engine', detail: proposal.status === 'official' ? proposal.message : `${proposal.message} En attente de votre accord dans la fenêtre de Harn.` });
+        const timeout = setTimeout(() => decided(null), ENGINE_APPROVAL_TIMEOUT_MS);
+        const accepted = await decision.finally(() => clearTimeout(timeout));
+        if (accepted instanceof Error) throw new Error(`${archMissing(report.profile.arch)} : la mise à jour du moteur a échoué (${accepted.message}).`);
+        if (accepted === false) throw new Error(`${archMissing(report.profile.arch)} : compilation du moteur refusée.`);
+        if (accepted === null) throw new Error(`${archMissing(report.profile.arch)} : ${proposal.status === 'official' ? 'la mise à jour du moteur n’a pas abouti' : 'pas de réponse à la demande de compilation'} au bout de ${ENGINE_APPROVAL_TIMEOUT_MS / 60_000} min.`);
+      } else if (proposal.status !== 'known') {
+        throw new Error(`${archMissing(report.profile.arch)}. ${proposal.message}`);
+      }
     }
     const { id } = buildEntry({ repo: report.repo, quant: chosen, profile: report.profile });
     if (getState().models[id]?.installedAt) throw new Error(`Ce modèle est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
-    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, sampling, strata });
+    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, sampling, strata, name, card });
     const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
     await refreshHardware();
     const onDisk = chosen.files.every((file) => report.local[file.name]);
@@ -134,7 +148,7 @@ export function installCustom({ url, quant, mmproj = null, sampling = null }) {
     onProgress({ step: 'analysis', detail: 'Analyse des mesures par l’IA locale' });
     await runAnalysis().finally(() => setPhase(entry.id, null));
     const profile = getState().profiles[entry.id];
-    const result = { id: entry.id, name: displayName(entry), tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity } };
+    const result = { status: 'installed', id: entry.id, name: displayName(entry), tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity }, cardNotes: entry.cardNotes ?? null };
     if (before && before !== entry.id) {
       onProgress({ step: 'restore', detail: 'Retour au modèle précédent' });
       await activate(before).catch(() => {});
@@ -244,7 +258,9 @@ async function dirSize(target) {
 // officielle plus récente (installée sans demander, c'est le moteur de tous les jours), sinon une
 // PR de llama.cpp qui l'ajoute. Une PR est du code que personne n'a encore relu : elle n'est
 // compilée qu'après l'accord de l'utilisateur, donné par un clic dans la fenêtre de Harn.
-export async function proposeEngine({ modelId = null, arch = null, name = null, repo = null } = {}) {
+// onAccept / onRefuse : prévenus de la décision (une installation en cours qui attend son moteur) ;
+// onRefuse reçoit l'erreur quand une mise à jour du moteur officiel échoue.
+export async function proposeEngine({ modelId = null, arch = null, name = null, repo = null, onAccept = null, onRefuse = null } = {}) {
   const model = modelId ? modelById(modelId) : null;
   arch ??= model?.profile?.arch;
   name ??= model ? displayName(model) : null;
@@ -254,9 +270,9 @@ export async function proposeEngine({ modelId = null, arch = null, name = null, 
   const found = await findEngine(arch, { name, exclude, repo });
   if (!found) return { status: 'none', message: `Aucun ${exclude.length ? 'autre ' : ''}moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition dans llama.cpp, ni fork cité par la fiche du modèle qui la connaisse${exclude.length ? ' et que ce fichier n’ait pas déjà mise en échec' : ''}. Harn le proposera dès qu’il en existera un.` };
   // Ensuite : régler le modèle s'il est déjà là, sinon revoir la veille, qui le proposera.
-  const after = () => (modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
+  const after = () => (onAccept ? Promise.resolve(onAccept()) : modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
   if (found.kind === 'official') {
-    ensureEngine(found.candidate).then(after).catch(() => {});
+    ensureEngine(found.candidate).then(after).catch((error) => onRefuse?.(error));
     return { status: 'official', message: `${found.label} sait charger ce modèle : mise à jour du moteur, puis réglage.` };
   }
   if (!buildable(getState().hardware)) {
@@ -275,6 +291,7 @@ export async function proposeEngine({ modelId = null, arch = null, name = null, 
       ? 'Il est compilé et lancé isolé : sans réseau, sans accès à vos fichiers, seulement ses sources, le modèle et la carte graphique.'
       : `Attention : il tournerait sans isolation, avec accès à vos fichiers et au réseau, car bubblewrap manque. Pour l’isoler, refusez, installez-le (${SANDBOX_INSTALL}) et relancez Harn.`}`,
     run: () => { addEngine(sheet).then(after).catch(() => {}); },
+    refuse: () => onRefuse?.(),
   });
   return { status: 'approval', message: `${found.label} sait charger ce modèle : acceptez la demande pour le compiler.` };
 }

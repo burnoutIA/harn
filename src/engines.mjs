@@ -239,16 +239,53 @@ export async function alternates(model, tuning, profile, hardware = getState().h
 const gh = (route) => github(route);
 const HF = 'https://huggingface.co';
 
+// La fiche (README) d'un dépôt Hugging Face, et le modèle de base qu'elle déclare.
+const cardOf = async (id) => {
+  const response = await fetch(`${HF}/${id}/raw/main/README.md`, { headers: { 'User-Agent': 'harn' }, signal: AbortSignal.timeout(20_000) }).catch(() => null);
+  return response?.ok ? response.text() : '';
+};
+const baseModelOf = (text) => text.match(/^base_model:\s*(?:-\s*)?([\w.-]+\/[\w.-]+)\s*$/m)?.[1] ?? null;
+
 // Les dépôts GitHub cités par la fiche d'un modèle (et celle de son modèle de base, souvent la
 // seule à parler du moteur), dans l'ordre où ils apparaissent.
 async function citedRepos(repo) {
-  const card = async (id) => {
-    const response = await fetch(`${HF}/${id}/raw/main/README.md`, { headers: { 'User-Agent': 'harn' }, signal: AbortSignal.timeout(20_000) }).catch(() => null);
-    return response?.ok ? response.text() : '';
-  };
-  const text = await card(repo);
-  const base = text.match(/^base_model:\s*(?:-\s*)?([\w.-]+\/[\w.-]+)\s*$/m)?.[1];
-  return cardRepos(`${text}\n${base && base !== repo ? await card(base) : ''}`);
+  const text = await cardOf(repo);
+  const base = baseModelOf(text);
+  return cardRepos(`${text}\n${base && base !== repo ? await cardOf(base) : ''}`);
+}
+
+// Une fiche lisible par un LLM : sans les images ni le balisage HTML (les icônes en data: URI
+// pèsent des dizaines de kilo-octets), bornée en longueur.
+const CARD_MAX_CHARS = 40_000;
+export function readableCard(text) {
+  const clean = text
+    .replace(/data:[^\s"')]+/g, '')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h\d)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return clean.length > CARD_MAX_CHARS ? `${clean.slice(0, CARD_MAX_CHARS)}\n\n[… fiche tronquée à ${CARD_MAX_CHARS} caractères]` : clean;
+}
+
+// Pour pi : la fiche du dépôt et celle de son modèle de base, en texte, et les dépôts GitHub
+// qu'elles citent (un fork de llama.cpp y est signalé : c'est souvent le moteur qu'il faut).
+export async function readModelCard(repo) {
+  const text = await cardOf(repo);
+  if (!text) throw new Error(`Fiche introuvable sur huggingface.co/${repo}`);
+  const base = baseModelOf(text);
+  const baseText = base && base !== repo ? await cardOf(base) : '';
+  const cited = cardRepos(`${text}\n${baseText}`).slice(0, 8);
+  const github = await Promise.all(cited.map(async (full) => {
+    const info = await gh(`/repos/${full}`).catch(() => null);
+    return { repo: full, exists: Boolean(info), llamaCppFork: info?.parent?.full_name === BUILTIN.llama.repo, description: info?.description ?? null, pushedAt: info?.pushed_at ?? null };
+  }));
+  return { repo, card: readableCard(text), baseModel: base, baseCard: baseText ? readableCard(baseText) : null, github };
 }
 export function cardRepos(text) {
   const found = [...text.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?=[\/)\]\s"'#?<]|$)/g)].map(([, owner, name]) => `${owner}/${name}`);

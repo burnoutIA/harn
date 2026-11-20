@@ -5,8 +5,13 @@ description: Installer, régler et évaluer un nouveau modèle d'IA locale depui
 
 # Installer un modèle avec Harn
 
-Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspect_model_repo`,
-`install_model`, `harn_status`, `test_intelligence`. Tu fais le jugement, Harn exécute.
+Harn est le serveur d'IA locale de cette machine. Il sait télécharger, régler, mesurer et
+compiler un moteur. Il ne sait pas **lire** : la fiche d'un modèle dit souvent ce que le fichier
+ne dit pas (moteur à utiliser, vraie limite de contexte, réglages, pièges selon le matériel).
+C'est ton travail. Sans toi, Harn installe à l'aveugle avec des valeurs par défaut.
+
+Tes outils : `read_model_card`, `inspect_model_repo`, `install_model`, `read_install_log`,
+`harn_status`, `test_intelligence`, et la recherche web ketch (`search` pour chercher, `scrape` pour lire une page, `code` pour du code open source).
 
 ## L'objectif à servir
 
@@ -15,64 +20,99 @@ Harn est le serveur d'IA locale de cette machine. Tu as ses outils MCP : `inspec
 - La vitesse la plus haute possible : sous 40 tok/s, c'est lent.
 - Ne jamais sacrifier la marge mémoire de la carte graphique.
 
-## Procédure
+## 1. Enquêter avant de choisir
 
-1. **Analyser.** Appelle `inspect_model_repo` avec l'adresse. Lis : architecture, MoE ou dense,
-   présence MTP, licence, accès restreint, fichiers vision, indications du README, et le verdict
-   de chaque quantification sur cette machine.
+Appelle `read_model_card` et `inspect_model_repo`. Lis la fiche **en entière**, celle du modèle
+de base aussi, puis note ce qui compte pour cette machine :
 
-2. **Choisir la quantification.**
-   - Garde celles dont `verdict.fit` vaut `full` et `meetsObjective` vaut `true`.
-   - Parmi elles, prends la plus grosse : plus de bits = plus de qualité, tant que l'objectif
-     tient. Préfère les quantifications « UD » ou imatrix à taille égale.
-   - Si aucune n'atteint l'objectif, prends celle qui tient au moins 100k et va le plus vite,
-     et dis clairement ce qui manque.
-   - Évite les quantifications 1 et 2 bits quand une 3 ou 4 bits tient.
-   - `partial` veut dire qu'une partie tournera sur le processeur : beaucoup plus lent. Ne le
-     propose que si rien d'autre ne tient, en le disant.
+- **Le moteur.** Une architecture récente peut exiger un fork de llama.cpp (« needs our llama.cpp
+  fork », « not supported upstream yet »). `read_model_card` liste les dépôts GitHub cités ;
+  `llamaCppFork: true` en signale un. Harn le trouve et propose de le compiler : ce que tu dois
+  comprendre, c'est **pour quel matériel** l'auteur l'a écrit (CUDA, Metal, CPU, ROCm), et le dire.
+- **La limite réelle de contexte.** Le GGUF annonce parfois plus que ce que le modèle tient
+  (« -c at most 32,768 », fenêtre glissante, contexte d'entraînement). Si la fiche donne une
+  limite plus basse, elle devient `max_context`.
+- **Les réglages.** Échantillonnage recommandé (température, top_p, top_k, min_p, pénalités) pour
+  le raisonnement ou le code ; les niveaux de raisonnement du gabarit (`reasoning_effort` : par
+  exemple disabled / low / medium / high) deviennent `reasoning_levels`.
+- **Les mises en garde.** Quantification déconseillée sur GPU (« use bf16 on GPUs », NaN avec
+  certaines quantifications), vision incompatible avec MTP, gabarit à corriger… Chacune devient une
+  phrase de `notes`, et pèse sur ton choix.
+- **Le vrai nom.** Si le nom donné par `inspect_model_repo` ressemble à un essai d'entraînement
+  (« CODE_FINAL Step220… »), prends celui de la fiche pour `name`.
+- **Ce que l'auteur a mesuré.** Ses benchmarks et ses vitesses, avec le matériel : ils te
+  serviront à juger le résultat à l'étape 5.
 
-3. **Choisir les réglages.**
-   - Échantillonnage : reprends les valeurs recommandées par l'auteur pour le mode raisonnement
-     ou code (`temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`). Sans indication,
-     n'en passe pas : Harn met des valeurs sûres.
-   - Vision : n'ajoute un `mmproj` que si l'auteur ne dit pas qu'il est incompatible avec MTP.
-     Si les deux sont incompatibles, garde MTP (la vitesse) et signale-le.
+Si la fiche est muette sur un point qui compte (moteur, limite de contexte), cherche avec ketch
+la page du fork, son README, une discussion sur le modèle. Cite ce que tu as trouvé.
 
-4. **Demander la confirmation.** Présente en quelques lignes : le modèle, la quantification,
-   la taille à télécharger, le contexte et la vitesse estimés, la licence, ce que tu laisses de
-   côté (vision…). Demande « Je lance le téléchargement ? ». N'appelle `install_model` qu'après
-   un oui explicite. Harn affiche ensuite la demande dans sa fenêtre (dépôt, taille, licence) :
-   préviens l'utilisateur qu'il doit cliquer sur Accepter, rien ne démarre avant.
+## 2. Choisir la quantification
 
-5. **Installer.** Appelle `install_model`. L'outil bloque plusieurs minutes (téléchargement,
-   banc, banc d'intelligence, analyse) : c'est normal. Pendant ce temps, la carte graphique
-   appartient au modèle mesuré. À la fin, Harn recharge le modèle précédent (celui sur lequel tu
-   tournes).
+- Respecte d'abord les mises en garde de la fiche pour ce matériel : si elle recommande BF16 sur
+  GPU et que BF16 tient, prends BF16, même si une quantification plus petite a un meilleur verdict.
+- Sinon, parmi les quantifications dont `verdict.fit` vaut `full` et `meetsObjective` vaut `true`,
+  prends la plus grosse. Préfère « UD » ou imatrix à taille égale.
+- Aucune n'atteint l'objectif : celle qui tient au moins 100k et va le plus vite, en disant ce qui
+  manque. Avec une limite de contexte plus basse sur la fiche, l'objectif de 100k est hors d'atteinte :
+  dis-le, et juge sur l'intelligence et la vitesse.
+- Évite 1 et 2 bits quand une 3 ou 4 bits tient. `partial` (une partie sur le processeur) seulement
+  si rien d'autre ne tient, en le disant.
+- Vision : un `mmproj` seulement si l'auteur ne le dit pas incompatible avec MTP. Si les deux le sont,
+  garde MTP et signale-le.
 
-6. **Rendre compte.** Donne la vitesse mesurée, le réglage retenu, le contexte, la note du banc
-   d'intelligence et son détail (palier atteint en outils, code, raisonnement, long contexte, honnêteté ; réflexion), et compare au modèle actuel (`harn_status`). Recommande de l'adopter ou non
-   selon l'objectif. L'utilisateur l'active d'un clic dans Harn (vue Modèles).
+## 3. Demander la confirmation
+
+En quelques lignes : le modèle, la quantification et pourquoi, la taille, le contexte et la vitesse
+estimés, la licence, **le moteur** (officiel ou fork, et pour quel matériel), **ce que tu as tiré de
+la fiche** (limite de contexte, réglages, mises en garde), ce que tu laisses de côté. Demande
+« Je lance ? ». N'appelle `install_model` qu'après un oui explicite.
+
+Préviens que Harn affichera une demande dans sa fenêtre, et une seconde s'il faut compiler un
+moteur (code non relu, compilé et lancé isolé). Rien ne démarre avant que l'utilisateur accepte.
+
+## 4. Installer
+
+Appelle `install_model` avec tout ce que tu as tiré de la fiche : `sampling`, `name`,
+`max_context`, `reasoning_levels`, `notes`. L'outil bloque de longues minutes (compilation éventuelle
+du moteur, 10 à 20 min, puis téléchargement, banc, test d'intelligence) : c'est normal.
+
+Lis le résultat tel qu'il est : `status: "installed"` veut dire que c'est réussi, avec `model_id`.
+Un échec commence par « ÉCHEC ». Ne conclus jamais à un échec sur un résultat `installed`. Pour un
+échec, appelle `read_install_log` avec l'identifiant exact (`model_id`, ou celui que l'erreur liste),
+jamais un identifiant deviné, puis passe au skill `depanner-une-installation`.
+
+## 5. Juger le résultat, ne pas seulement le recopier
+
+Donne la vitesse, le contexte retenu, la note d'intelligence et son détail par domaine, le marqueur
+de réflexion, et compare au modèle actif (`harn_status`). Puis **critique** :
+
+- Le résultat colle-t-il à ce que l'auteur annonce, pour un matériel comparable ? Un écart net
+  demande une explication.
+- Le test s'est-il fait dans les conditions de la fiche ? Le banc d'intelligence tourne à
+  température 0 pour tous les modèles (comparaison équitable) ; un modèle qui réfléchit peut boucler
+  en glouton. Des réponses coupées (« bavard », réponses tronquées) ou un domaine à 0 sont des signaux.
+- Une mise en garde de la fiche s'applique-t-elle à ce qui a été installé (quantification sur GPU,
+  limite de contexte) ?
+
+Sépare clairement ce qui est **mesuré** de ce que tu **supposes**. Si un doute peut changer la
+recommandation, propose un essai précis (une autre quantification, un nouveau test) et ce qu'il
+coûte, au lieu de conclure. Recommande ensuite d'adopter le modèle ou non ; l'utilisateur l'active
+d'un clic dans Harn (vue Modèles).
+
+Le carnet de la machine (`docs/machines/…`) : n'y écris que des faits mesurés, datés, sans en tirer
+de conclusion que la mesure ne permet pas.
 
 ## Limites à dire franchement
 
 - Un modèle d'images (FLUX, Qwen-Image, Z-Image…) ne passe pas par ici : skill
-  `installer-un-modele-images`, outils `inspect_image_repo` et `install_image_model`.
-
-- Harn ne sert que des fichiers GGUF. Un dépôt sans GGUF ne s'installe pas ici.
-- Un dépôt à accès restreint (`gated`) ne se télécharge pas : Harn n'a pas de jeton Hugging Face.
-  Il s'installe quand même si son fichier est déjà sur la machine (`alreadyOnDisk` dans
-  `inspect_model_repo`) : même procédure, `install_model` reprend le fichier sans rien télécharger.
-  Sinon, dis à l'utilisateur de placer le fichier dans le dossier `models/` de Harn.
-- Un Flash-Next (`engine: strata` dans `inspect_model_repo`) est servi par Strata : bien plus
-  rapide que llama.cpp sur ces modèles, mais sans vision par cette voie. Dis-le si l'utilisateur
-  comptait sur les images.
-- Un outil de Harn qui échoue : rends son message à l'utilisateur et arrête-toi là. N'écris pas de
-  script pour lire ou analyser toi-même un fichier de modèle : ils font des dizaines de
-  gigaoctets, et un script maladroit remplit la mémoire de la machine.
-- Une architecture trop récente peut ne pas se charger avec le moteur installé : l'erreur du banc
-  le dira. Signale-le plutôt que de réessayer.
-- Le banc d'intelligence (test adaptatif par paliers : plancher, difficile, limite, en cinq domaines)
-  donne une note commune à tous les modèles. 100 : tous les paliers limite réussis ; un domaine
-  réussi en entier passe au palier expert, jusqu'à 125. Ce n'est pas un benchmark public, mais il
-  départage bien.
-  Signale aussi le marqueur de réflexion : un modèle « bavard » répond plus lentement à l'usage.
+  `installer-un-modele-images`.
+- Harn ne sert que des fichiers GGUF.
+- Un dépôt à accès restreint (`gated`) ne se télécharge pas (pas de jeton Hugging Face), sauf si
+  son fichier est déjà sur la machine (`alreadyOnDisk`) : `install_model` le reprend.
+- Un Flash-Next (`engine: strata`) est servi par Strata, sans vision par cette voie.
+- N'écris pas de script pour lire ou analyser toi-même un fichier de modèle : ils font des dizaines
+  de gigaoctets, et un script maladroit remplit la mémoire de la machine. La fiche et les outils
+  suffisent. Ne compile pas de moteur toi-même : Harn le fait, isolé, après accord.
+- Le banc d'intelligence (paliers plancher, difficile, limite, expert, en cinq domaines) donne une
+  note commune à tous les modèles : 100 pour tous les paliers limite réussis, jusqu'à 125. Ce n'est
+  pas un benchmark public, mais il départage bien.
