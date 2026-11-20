@@ -133,7 +133,7 @@ se partagent la carte, ou plusieurs clients un même modèle, l'accueil le signa
 
 Les modèles d'une autre machine Harn du réseau s'utilisent ici sous le nom `modele@machine`
 (`qwen-27b@pc2`). Pour en ajouter une : sur elle, ouvrir l'API au réseau local et créer une clé ;
-ici, Machine → Autres machines Harn, avec son nom, son adresse (`http://192.168.1.38:4748/v1`) et
+ici, Machine → Autres machines Harn, avec son nom, son adresse (`http://192.168.1.20:4748/v1`) et
 cette clé. Une requête sans `@` part là où le modèle sera servi le plus tôt. Chaque machine
 gère sa carte et ses sessions ; une requête venue d'une autre machine n'est jamais renvoyée plus
 loin.
