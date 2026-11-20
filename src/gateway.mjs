@@ -21,6 +21,9 @@ export function setActivator(fn, busy = () => null, free = async () => {}) { act
 // machine Harn qui n'a pas de voix à elle (peers.mjs) ou tout autre client.
 let voice = null;
 export function setVoice(api) { voice = api; }
+// Les images, pour les clients OpenAI (POST /v1/images/generations) : branchées par main.mjs.
+let images = null;
+export function setImages(api) { images = api; }
 
 // Les niveaux de Qwen3.8 sont low / medium / xhigh. Le défaut du gabarit est xhigh, le plus
 // bavard : sur un run long il épuise le budget de sortie en pleine réflexion et rend une
@@ -181,6 +184,33 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   let body = null;
   if (raw.length && (req.headers['content-type'] ?? '').includes('json')) {
     try { body = JSON.parse(raw); } catch { return sendJson(res, 400, { error: { message: 'JSON invalide' } }, cors); }
+  }
+
+  // Les images, au format d'OpenAI : la description, la taille, l'image en base64. Le modèle
+  // d'images est chargé pour la demande (la carte lui est prêtée), puis rendu au modèle de texte.
+  if (req.method === 'POST' && url.pathname === '/v1/images/generations') {
+    if (!images) return sendJson(res, 503, { error: { message: 'Pas d’images dans ce Harn' } }, cors);
+    const prompt = String(body?.prompt ?? '').trim();
+    if (!prompt) return sendJson(res, 400, { error: { message: 'prompt : la description de l’image', type: 'invalid_request_error' } }, cors);
+    if (body?.response_format && body.response_format !== 'b64_json') return sendJson(res, 400, { error: { message: 'Seul response_format « b64_json » est servi', type: 'invalid_request_error' } }, cors);
+    let width = 1024, height = 1024;
+    if (body?.size && body.size !== 'auto') {
+      const m = /^(\d+)x(\d+)$/.exec(String(body.size));
+      if (!m) return sendJson(res, 400, { error: { message: 'size : LARGEURxHAUTEUR, ex. 1024x1024', type: 'invalid_request_error' } }, cors);
+      [width, height] = [Number(m[1]), Number(m[2])];
+    }
+    const n = Math.min(Math.max(1, Number(body?.n ?? 1) || 1), 4);
+    try {
+      const data = [];
+      let made = null;
+      for (let i = 0; i < n; i++) {
+        made = await images.generate({ model: body?.model || null, prompt, negative: body?.negative_prompt ?? null, width, height, seed: body?.seed ?? null });
+        data.push({ b64_json: made.b64, revised_prompt: prompt });
+      }
+      return sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data, model: made.model, size: `${made.width}x${made.height}`, seed: made.seed, seconds: made.seconds, warnings: made.warnings ?? [] }, cors);
+    } catch (error) {
+      return sendJson(res, error.status ?? 500, { error: { message: error.message } }, cors);
+    }
   }
 
   // La voix. Venue d'une autre machine (réseau local ou X-Harn-Hop) : servie avec celle d'ici.

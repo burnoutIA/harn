@@ -1,12 +1,12 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { MODELS, displayName, modelById, totalBytes, variantOf } from './catalog.mjs';
 import { globalRating, paramsOf } from './rating.mjs';
 import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
-import { handleV1, setActivator, setVoice } from './gateway.mjs';
+import { handleV1, setActivator, setImages, setVoice } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { updateSharing } from './placement.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -578,6 +578,18 @@ async function main() {
   await internalKey();
   setActivator(activate, busyWith, gpuFree);
   setVoice({ speak, start: startVoice, report: voiceReport });
+  // Les images des clients OpenAI (/v1/images/generations) : faites dans un dossier à part, renvoyées
+  // en base64, puis effacées (le client les garde, Harn ne les accumule pas).
+  setImages({
+    generate: async (options) => {
+      const made = await generateImage({ ...options, workspace: path.join(DIRS.workspace, '.api-images'), who: 'api' });
+      try {
+        return { ...made, b64: (await readFile(made.file)).toString('base64') };
+      } finally {
+        await rm(made.file, { force: true });
+      }
+    },
+  });
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
