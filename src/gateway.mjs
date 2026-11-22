@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders, setEngine } from './engine.mjs';
@@ -18,7 +19,7 @@ let busyWith = () => null;
 let gpuFree = async () => {};
 export function setActivator(fn, busy = () => null, free = async () => {}) { activate = fn; busyWith = busy; gpuFree = free; }
 // La voix (voice.mjs), branchée par main.mjs : /v1/audio/speech au format OpenAI, pour une autre
-// machine Harn qui n'a pas de voix à elle (peers.mjs) ou tout autre client.
+// machine Harn qui n'a pas ce modèle de voix (peers.mjs) ou tout autre client.
 let voice = null;
 export function setVoice(api) { voice = api; }
 // Les images, pour les clients OpenAI (POST /v1/images/generations) : branchées par main.mjs.
@@ -146,6 +147,50 @@ async function bestMachine(modelId) {
 const relayed = new Map();
 const relayedOf = (modelId) => relayed.get(modelId) ?? 0;
 
+// La parole en flux (WebSocket /v1/audio/speech/stream de vLLM-Omni) : le texte entre au fil de
+// l'eau, l'audio sort au fil de la génération. La passerelle vérifie la clé, démarre le modèle
+// (?model=…, sinon la voix des agents), puis relie le client au flux du moteur, ici ou sur la
+// machine reliée qui a le modèle. Les messages passent tels quels (session.config avec l'extrait
+// et son texte, input.text…). Le client qui ferme coupe le flux du moteur : la génération s'arrête.
+const STREAM_PATH = '/v1/audio/speech/stream';
+const FORWARDED = ['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions', 'sec-websocket-protocol'];
+const refuse = (socket, status, message) => {
+  socket.end(`HTTP/1.1 ${status} ${message.replace(/[\r\n]/g, ' ')}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n${JSON.stringify({ error: { message } })}`);
+};
+export async function handleV1Upgrade(req, socket, head, { lan = false } = {}) {
+  socket.on('error', () => {});
+  const url = new URL(req.url, 'http://x');
+  const pathKey = extractPathKey(url.pathname);
+  if (pathKey.pathname !== STREAM_PATH || (req.headers.upgrade ?? '').toLowerCase() !== 'websocket') return refuse(socket, 404, 'Introuvable');
+  const token = pathKey.token ?? bearerToken(req.headers);
+  const decision = await authorize(token, { lan });
+  if (!decision.ok) {
+    console.warn(`[harn] accès refusé (flux de parole) depuis ${req.socket.remoteAddress} : ${decision.message} (clé : ${fingerprint(token)})`);
+    return refuse(socket, decision.status, decision.message);
+  }
+  if (!voice?.stream) return refuse(socket, 503, 'Pas de voix dans ce Harn');
+  let target;
+  try {
+    target = await voice.stream({ model: url.searchParams.get('model'), here: lan || Boolean(req.headers['x-harn-hop']) });
+  } catch (error) {
+    return refuse(socket, error.status ?? 500, error.message);
+  }
+  if (socket.destroyed) return target.release();
+  const upstream = net.connect(target.port, target.host);
+  const done = () => { target.release(); upstream.destroy(); socket.destroy(); };
+  upstream.once('connect', () => {
+    const headers = FORWARDED.filter((name) => req.headers[name]).map((name) => `${name}: ${req.headers[name]}`);
+    for (const [name, value] of Object.entries(target.headers ?? {})) headers.push(`${name}: ${value}`);
+    upstream.write(`GET ${target.path} HTTP/1.1\r\nhost: ${target.host}:${target.port}\r\n${headers.join('\r\n')}\r\n\r\n`);
+    if (head?.length) upstream.write(head);
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+  upstream.once('error', (error) => { if (!socket.destroyed && !upstream.bytesRead) refuse(socket, 502, `Le moteur de voix ne répond pas : ${error.message}`); done(); });
+  upstream.once('close', done);
+  socket.once('close', done);
+}
+
 export async function handleV1(req, res, url, { lan = false } = {}) {
   const cors = lan ? { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Harn-Parallel-Granted' } : {};
   if (lan && req.method === 'OPTIONS') {
@@ -168,8 +213,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList(), cors);
   // Ce qu'un autre Harn regarde à chaque relevé : la voix d'ici seulement, jamais celle d'un pair.
   if (req.method === 'GET' && url.pathname === '/v1/audio/voices') {
-    const report = voice?.report() ?? {};
-    return sendJson(res, 200, { installed: Boolean(report.installed), voices: report.voices ?? [], status: report.status ?? null }, cors);
+    return sendJson(res, 200, voice?.offer() ?? { installed: false, models: [], voices: [], status: null }, cors);
   }
   if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
     const found = modelsList().data.find((m) => m.id === decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
@@ -221,11 +265,14 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
     const here = lan || Boolean(req.headers['x-harn-hop']);
     try {
       if (url.pathname.endsWith('/start')) {
-        await voice.start({ here });
+        await voice.start({ here, model: body?.model ?? null });
         return sendJson(res, 200, { ok: true }, cors);
       }
       if (body?.response_format && body.response_format !== 'opus') return sendJson(res, 400, { error: { message: 'Seul response_format « opus » est servi (messages vocaux Ogg/Opus)' } }, cors);
-      const audio = await voice.speak(body?.input, body?.voice ?? undefined, { here });
+      // model, voice, language : facultatifs (le choix des agents sinon). ref_audio et ref_text :
+      // la voix clonée d'une autre machine, pour un modèle qui imite un extrait.
+      const options = { model: body?.model ?? null, voice: body?.voice ?? null, language: body?.language ?? null, ref_audio: body?.ref_audio ?? null, ref_text: body?.ref_text ?? null };
+      const audio = await voice.speak(body?.input, Object.fromEntries(Object.entries(options).filter(([, value]) => value !== null)), { here });
       res.writeHead(200, { ...cors, 'content-type': 'audio/ogg', 'content-length': audio.length });
       return res.end(audio);
     } catch (error) {

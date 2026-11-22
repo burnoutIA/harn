@@ -4,6 +4,7 @@ import { requestApproval } from './approvals.mjs';
 import { imagePathsInUse } from './images.mjs';
 import { DIRS } from './paths.mjs';
 import { bus, getState, update } from './state.mjs';
+import { voicePathsInUse } from './voice.mjs';
 
 // Le ménage de models/ : au démarrage, les fichiers qu'aucun modèle ne réclame (copies laissées à
 // la racine, doublons, modèles d'images jamais installés, restes d'essais) sont proposés à la
@@ -11,14 +12,14 @@ import { bus, getState, update } from './state.mjs';
 // liste refusée n'est plus reproposée, seuls de nouveaux fichiers en trop relancent la question.
 
 // Ce qui sert : le dossier de chaque modèle connu de l'état (installé, en cours, ou en échec qu'on
-// relancera), les copies reprises ailleurs, Strata, et les modèles d'images connus.
+// relancera), les copies reprises ailleurs, Strata, et les modèles d'images et de voix connus.
 function inUse() {
   const state = getState();
   const keep = [path.join(DIRS.models, 'strata-data')];
   for (const [id, entry] of Object.entries(state.models ?? {})) {
     keep.push(path.join(DIRS.models, id), ...Object.values(entry.paths ?? {}));
   }
-  keep.push(...imagePathsInUse());
+  keep.push(...imagePathsInUse(), ...voicePathsInUse());
   return keep.map((p) => path.resolve(p));
 }
 const covered = (file, keep) => keep.some((p) => file === p || file.startsWith(p + path.sep));

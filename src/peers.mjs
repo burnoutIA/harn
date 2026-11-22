@@ -71,23 +71,26 @@ async function poll(peer) {
   return seen.get(peer.id);
 }
 
-// Sa voix (voice.mjs) : installée chez elle, sur sa propre carte. Un Harn d'avant la voix répond
-// 404 : pas de voix.
+// Ses modèles de voix (voice.mjs) : installés chez elle, sur sa propre carte. Un Harn d'avant la
+// voix répond 404 : pas de voix. Un Harn d'avant les modèles de voix (Voxtral seul) ne donne que
+// ses voix : c'est Voxtral.
 async function voiceOf(peer) {
   try {
     const response = await fetch(`${peer.url}/audio/voices`, { headers: headersOf(peer), signal: AbortSignal.timeout(TIMEOUT_MS) });
     if (!response.ok) return null;
     const body = await response.json();
-    return body?.installed ? { voices: Array.isArray(body.voices) ? body.voices : [], status: body.status ?? null } : null;
+    if (!body?.installed) return null;
+    const models = Array.isArray(body.models) ? body.models.filter((m) => m?.id && m.kind)
+      : [{ id: 'voxtral', name: 'Voxtral TTS 4B', kind: 'preset', voices: Array.isArray(body.voices) ? body.voices : [] }];
+    return models.length ? { models, status: body.status ?? null, running: body.running ?? (body.models ? null : 'voxtral') } : null;
   } catch { return null; }
 }
 
 export const refreshPeers = () => Promise.all(peers.map(poll)).then((all) => { showVoice(); return all; });
 
-// Pour la fiche d'agent : quelle machine prêterait sa voix (voice.mjs s'en sert si celle-ci n'en a pas).
+// Pour la vue Voix et la fiche d'agent : les modèles de voix que prêteraient les autres machines.
 function showVoice() {
-  const found = peerWithVoice();
-  const next = found ? { name: found.peer.name, status: found.voice.status } : null;
+  const next = peersWithVoice().map(({ peer, voice }) => ({ peer: peer.name, peerId: peer.id, status: voice.status, running: voice.running, models: voice.models }));
   if (JSON.stringify(getState().voiceRemote ?? null) !== JSON.stringify(next)) update((s) => { s.voiceRemote = next; });
 }
 
@@ -156,10 +159,14 @@ export function peersWith(modelId) {
   });
 }
 
-// La première machine joignable qui a la voix, pour un Harn qui ne l'a pas lui-même.
-export function peerWithVoice() {
-  const peer = peers.find((p) => seen.get(p.id)?.ok && seen.get(p.id).voice);
-  return peer ? { peer: { id: peer.id, name: peer.name, url: peer.url }, headers: headersOf(peer), voice: seen.get(peer.id).voice } : null;
+// Les machines joignables qui ont des modèles de voix.
+export function peersWithVoice() {
+  return peers.filter((p) => seen.get(p.id)?.ok && seen.get(p.id).voice)
+    .map((peer) => ({ peer: { id: peer.id, name: peer.name, url: peer.url }, headers: headersOf(peer), voice: seen.get(peer.id).voice }));
+}
+// La première qui a ce modèle de voix (n'importe lequel sans modelId).
+export function peerWithVoice(modelId = null) {
+  return peersWithVoice().find((route) => !modelId || route.voice.models.some((m) => m.id === modelId)) ?? null;
 }
 
 // « modele@pc2 » → la machine et le nom du modèle chez elle ; null pour un modèle d'ici.

@@ -430,17 +430,38 @@ fenêtre.
 Un agent dont la case **Voix** est cochée peut répondre en messages vocaux sur Telegram. Sans la
 case, rien ne change pour lui : ni commande, ni consigne en plus dans son contexte.
 
-- **Installer** : une fois, depuis la fiche de l'agent (« Installer la voix »). Harn installe
-  vLLM-Omni dans `runtime/voxtral` et télécharge Voxtral TTS de Mistral (4B, ~8 Go). Linux
-  seulement. Licence CC BY-NC : usage non commercial.
-- **Sur Telegram** : `/parler` démarre la voix (une minute la première fois), puis chaque réponse
-  arrive en message vocal, voix `fr_female`. Les liens cités partent juste après, en texte. Une
-  longue réponse est coupée en plusieurs vocaux. `/ecrire` revient au texte.
-- **La carte graphique** : la voix prend ~8,5 Go (poids compressés en fp8 au chargement, une
-  requête à la fois), à côté du modèle de texte. S'il manque de place, le modèle de texte est
+- **Les modèles** (vue Modèles, section Voix) : tous servis par vLLM-Omni, un seul moteur
+  installé une fois (`runtime/vllm-omni`), les poids sous `models/voice/<id>`. Proposés d'office :
+  **Qwen3-TTS 1.7B Base** et **0.6B Base** (Apache-2.0, 4,5 et 2,5 Go), qui imitent la voix d'un
+  extrait, et **Voxtral TTS 4B** (Mistral, voix `fr_female`/`fr_male`, CC BY-NC). Un autre dépôt
+  d'une famille connue (Qwen3-TTS Base ou CustomVoice, réglage fin compris ; Voxtral) s'ajoute par
+  son adresse Hugging Face. Une famille, dans `src/voice-models.mjs`, dit comment lancer le
+  modèle (dérivée de la deploy-config d'origine de vLLM-Omni, ramenée à une requête et à sa part
+  de la carte) et comment lui demander de parler. Linux et carte Nvidia seulement : une machine
+  sans elle prend les modèles d'une machine Harn reliée, qui les fait tourner sur sa carte.
+- **Les voix clonées** : pour un modèle qui imite une voix, un extrait de 5 à 15 s et ce qui y est
+  dit, gardés dans `data/voices`. L'extrait part avec chaque demande, même vers une autre machine.
+  Sans transcription, seul le timbre est imité. N'imitez que votre voix ou celle de quelqu'un qui
+  vous l'a permis.
+- **La voix des agents** : un modèle et une de ses voix (et la langue), choisis pour tous les agents
+  dans la même section ; « Écouter » la fait entendre avant.
+- **Sur Telegram** : `/parler` démarre la voix (une à deux minutes la première fois), puis chaque
+  réponse arrive en message vocal. Les liens cités partent juste après, en texte. Une longue
+  réponse est coupée en plusieurs vocaux. `/ecrire` revient au texte.
+- **La carte graphique** : un seul modèle de voix tourne à la fois, une requête à la fois, à côté
+  du modèle de texte (Voxtral ~8,5 Go, poids compressés en fp8 au chargement ; Qwen3-TTS estimé
+  à ~8,5 Go pour le 1.7B, ~7 Go pour le 0.6B). S'il manque de place, le modèle de texte est
   déchargé puis rechargé avec moins de contexte, pour ce chargement-là seulement. La voix
   s'arrête après un quart d'heure sans rien dire, et le temps d'une image.
-- 30 s de parole se génèrent en ~5 s sur une RTX 3090. Journal : `data/logs/voice.log`.
+- **L'API** : `POST /v1/audio/speech` au format d'OpenAI (`input`, et au choix `model`, `voice`,
+  `language`, `ref_audio`/`ref_text` pour imiter un extrait), réponse en Ogg/Opus ;
+  `GET /v1/audio/voices` liste les modèles de voix installés ici ; `POST /v1/audio/start`
+  (`{"model": …}`) démarre un modèle à l'avance. **En flux** : WebSocket
+  `/v1/audio/speech/stream?model=…` (avec la clé), relié tel quel à celui de vLLM-Omni, ici ou sur
+  la machine reliée qui a le modèle : le texte entre au fil de l'eau (`session.config` avec
+  `ref_audio`/`ref_text`, `input.text`, `input.done`) et l'audio sort au fil de la génération.
+  Fermer la connexion arrête la génération ; un flux ouvert garde le modèle en marche.
+- Voxtral : 30 s de parole en ~5 s sur une RTX 3090. Journal : `data/logs/voice.log`.
 
 ## Sécurité de l'inférence
 
@@ -595,7 +616,8 @@ pi, agents, images
   src/pi-extensions/     extensions pi : ctx-optimizer, telegram-follow, agent-memory, image-gen
   src/skills/            marches à suivre de pi : installer un modèle, dépanner une installation
   src/images.mjs         génération d'images : moteur, modèles, partage de la carte avec le texte
-  src/voice.mjs          la voix des agents : Voxtral sous vLLM-Omni, à côté du modèle de texte
+  src/voice.mjs          la voix des agents : modèles de voix sous vLLM-Omni, voix clonées, choix
+  src/voice-models.mjs   familles de voix (Qwen3-TTS, Voxtral) : lancement, requête, modèles proposés
   src/image-families.mjs familles d'images : fichiers d'accompagnement, réglages, choix de la version
   src/image-hub.mjs      modèles d'images ajoutés depuis Hugging Face, propositions du jour
 

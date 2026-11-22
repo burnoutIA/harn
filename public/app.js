@@ -1002,6 +1002,91 @@ function renderImageModels() {
     ${suggestions.length ? suggestions.map(imageSuggestionRow).join('') : `<p class="empty">${w.error ? `Hugging Face n’a pas répondu : ${esc(w.error)}` : w.checkedAt ? 'Rien de plus à proposer pour cette machine : les familles qui tiennent sur votre carte sont déjà dans la liste.' : 'Harn regarde une fois par jour les modèles d’images les plus appréciés sur Hugging Face, et ne garde que ceux qui tournent sur cette machine.'}</p>`}`);
 }
 
+// ── Modèles de voix ────────────────────────────────────────
+// Leur description vient de /api/voice, relue quand l'état de la voix change (installation,
+// marche, voix clonées, choix) ou ce que prêtent les autres machines.
+let voiceCatalog = null;
+let voiceCatalogKey = null;
+let voiceAdding = null; // { url, error }
+const voiceKey = () => JSON.stringify([state.voice ?? null, state.voiceRemote ?? null, state.runtimes?.['vllm-omni']?.installedAt ?? null]);
+async function loadVoiceCatalog() {
+  voiceCatalogKey = voiceKey();
+  const report = await fetch('/api/voice').then((r) => r.json()).catch(() => null);
+  if (!report?.models) return;
+  voiceCatalog = report;
+  if (view === 'models') renderVoiceModels();
+  if (view === 'agents') renderAgents();
+}
+const voiceKindText = (m) => (m.kind === 'clone' ? 'imite la voix d’un extrait que vous fournissez' : m.kind === 'preset' ? `voix : ${m.voices.join(', ')}` : 'genre de voix non pris en charge');
+function voiceModelRow(m, report) {
+  const working = report.running === m.id;
+  const live = working ? (report.status === 'ready' ? 'en marche' : report.status === 'starting' ? 'démarre…' : null) : null;
+  const status = m.installing ? `<span class="hint">${esc(m.detail ?? 'Installation')}</span>`
+    : m.installed ? `${live ? `<span class="live">${live}</span>` : '<span class="live">installé</span>'}
+        ${working && report.status === 'ready' ? '<button class="btn ghost small" data-action="voice-stop">Arrêter</button>' : `<button class="btn ghost small" data-action="voice-start" data-id="${esc(m.id)}" ${report.status === 'starting' ? 'disabled' : ''}>Démarrer</button>`}
+        <button class="btn ghost small" data-action="voice-delete" data-id="${esc(m.id)}" title="Supprimer ses fichiers${m.custom ? ' et le retirer de la liste' : ''}" ${working && report.status === 'starting' ? 'disabled' : ''}>${icon.trash}</button>`
+    : report.canInstall ? `<button class="btn small" data-action="voice-install" data-id="${esc(m.id)}">${m.error ? 'Réessayer' : 'Installer'}</button>${m.custom ? `<button class="btn ghost small" data-action="voice-delete" data-id="${esc(m.id)}" title="Retirer de la liste">${icon.trash}</button>` : ''}`
+    : '';
+  const lentBy = (report.remote ?? []).filter((r) => r.models.some((x) => x.id === m.id)).map((r) => r.peer);
+  const facts = [
+    `${gbFr(m.gigabytes)} à télécharger`,
+    m.needMiB ? `~${fr(Math.round(m.needMiB / 1024))} Go de mémoire graphique en marche${m.fits ? '' : ' (plus que votre carte)'}` : null,
+    voiceKindText(m),
+    m.license ? `licence ${esc(m.license)}` : null,
+    lentBy.length ? `prêté par ${lentBy.map(esc).join(', ')}` : null,
+  ].filter(Boolean).join(' · ');
+  return `<div class="image-model"><div><h3>${esc(m.name)}</h3><p>${esc(m.tagline ?? '')}</p>
+      <p class="hint">${facts} · <a href="https://huggingface.co/${esc(m.repo)}" target="_blank" rel="noopener">dépôt</a></p>
+      ${m.error && !m.installing ? `<p class="hint bad">${esc(m.error)}</p>` : ''}
+      ${working && report.status === 'error' && report.error ? `<p class="hint bad">${esc(report.error)}</p>` : ''}</div>
+    <div class="acts">${status}</div></div>`;
+}
+// Les modèles qu'on peut faire parler : ceux d'ici, puis ceux des machines reliées.
+function voiceChoices(report) {
+  const here = report.canInstall ? report.models.filter((m) => m.installed).map((m) => ({ id: m.id, name: m.name, kind: m.kind, voices: m.voices, where: null })) : [];
+  const seen = new Set(here.map((m) => m.id));
+  const lent = (report.remote ?? []).flatMap((r) => r.models.map((m) => ({ id: m.id, name: m.name ?? m.id, kind: m.kind, voices: m.voices ?? [], where: r.peer })));
+  return [...here, ...lent.filter((m) => !seen.has(m.id) && seen.add(m.id))];
+}
+function voiceSelectBlock(report) {
+  const choices = voiceChoices(report);
+  if (!choices.length) return `<p class="hint">${report.canInstall ? 'Installez un modèle de voix ci-dessus : il deviendra la voix des agents.' : 'Cette machine n’a pas de carte Nvidia : installez un modèle de voix dans le Harn d’une machine qui en a une, puis reliez-la (« Autres machines Harn », dans la vue Machine). Elle prêtera sa voix.'}</p>`;
+  const c = report.choice ?? {};
+  const current = choices.find((m) => m.id === c.model) ?? choices[0];
+  const voices = current.kind === 'preset' ? current.voices.map((v) => [v, v]) : report.samples.map((x) => [x.id, x.name]);
+  const voicePick = voices.length
+    ? `<select data-voice-select="voice" aria-label="Voix">${voices.map(([id, label]) => `<option value="${esc(id)}" ${id === c.voice ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>`
+    : '<span class="hint bad">Ce modèle imite une voix : ajoutez une voix clonée ci-dessous.</span>';
+  const langPick = current.kind === 'clone' ? '' : `<select data-voice-select="language" aria-label="Langue">${report.languages.map(([code, label]) => `<option value="${code}" ${code === c.language ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>`;
+  return `<div class="voice-pick">
+      <select data-voice-select="model" aria-label="Modèle de voix">${choices.map((m) => `<option value="${esc(m.id)}" ${m.id === current.id ? 'selected' : ''}>${esc(m.name)}${m.where ? ` · sur ${esc(m.where)}` : ''}</option>`).join('')}</select>
+      ${voicePick}${langPick}
+      <button class="btn small" type="button" data-action="voice-preview" ${voices.length ? '' : 'disabled'}>Écouter</button>
+    </div>
+    <p class="hint">La première écoute démarre le modèle : une à deux minutes. Le modèle de texte est déchargé s’il manque de place sur la carte, puis rechargé.</p>`;
+}
+function voiceSampleRows(report) {
+  if (!report.samples.length) return '<p class="hint">Aucune. Un extrait de 5 à 15 secondes d’une seule personne, sans musique ni bruit, avec ce qui y est dit mot pour mot.</p>';
+  const lang = (code) => report.languages.find(([c]) => c === code)?.[1] ?? code;
+  return report.samples.map((x) => `<div class="image-model"><div><h3>${esc(x.name)}</h3>
+      <p class="hint">${x.text ? `« ${esc(x.text.length > 140 ? `${x.text.slice(0, 140)}…` : x.text)} »` : 'sans transcription : seul le timbre est imité'} · ${esc(lang(x.language))} · ${fr(Math.round(x.bytes / 1024))} Ko</p></div>
+    <div class="acts"><button class="btn ghost small" data-action="voice-sample-delete" data-id="${esc(x.id)}" title="Supprimer cette voix" aria-label="Supprimer ${esc(x.name)}">${icon.trash}</button></div></div>`).join('');
+}
+function renderVoiceModels() {
+  if (!voiceCatalog || voiceCatalogKey !== voiceKey()) loadVoiceCatalog();
+  if (!voiceCatalog) return paint('voice-models', '<p class="empty">Lecture…</p>');
+  const report = voiceCatalog;
+  const installed = report.models.filter((m) => m.installed).length;
+  const lent = (report.remote ?? []).reduce((n, r) => n + r.models.length, 0);
+  paint('voice-count', [installed ? `${installed} installé${installed > 1 ? 's' : ''}` : 'aucun installé', lent ? `${lent} prêté${lent > 1 ? 's' : ''}` : null].filter(Boolean).join(' · '));
+  const failed = report.status === 'error' && report.error && !report.running ? `<p class="hint bad">${esc(report.error)}</p>` : '';
+  paint('voice-models', `${failed}${report.canInstall ? '' : '<p class="hint">vLLM-Omni ne tourne ici qu’avec une carte Nvidia : les modèles s’installent sur une autre machine Harn reliée à celle-ci, qui les prête.</p>'}${report.models.map((m) => voiceModelRow(m, report)).join('')}`);
+  paint('voice-select', voiceSelectBlock(report));
+  paint('voice-samples', voiceSampleRows(report));
+  paint('voice-add-status', voiceAdding?.error ? `<p class="hint bad">${esc(voiceAdding.error)}</p>` : '');
+  paint('voice-sample-langs', report.languages.map(([code, label]) => `<option value="${code}" ${code === 'French' ? 'selected' : ''}>${esc(label)}</option>`).join(''));
+}
+
 // ── Tri des modèles ─────────────────────────────────────────
 // « Récents » : le modèle chargé, puis la dernière utilisation par un client (pi, un agent, une
 // clé ; pas les bancs de Harn). Les autres critères dans les deux sens. Un modèle sans valeur
@@ -1063,9 +1148,40 @@ function renderModels() {
       <div id="image-hub" class="image-list"></div>
       </div>
     </details>
+    <details class="card image-models">
+      <summary><span class="label">Voix</span><span id="voice-count" class="count"></span><span class="chevron" aria-hidden="true"></span></summary>
+      <div class="image-body">
+      <p class="intro">Un agent dont la case « Voix » est cochée répond en messages vocaux sur Telegram (<code>/parler</code>). Tous les modèles de voix passent par vLLM-Omni ; un seul tourne à la fois, à côté du modèle de texte, et s’arrête après un quart d’heure sans rien dire.</p>
+      <div id="voice-models" class="image-list"></div>
+      <div class="image-add">
+        <div><h3>Ajouter un modèle de voix depuis Hugging Face</h3><p>Collez l’adresse d’un dépôt Qwen3-TTS (Base, CustomVoice, ou un réglage fin) ou Voxtral TTS. Harn reconnaît la famille et l’installe avec le même moteur.</p></div>
+        <form class="add-form" data-form="add-voice">
+          <input id="voice-url" type="url" placeholder="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" autocomplete="off" spellcheck="false" required>
+          <button class="btn" type="submit">Ajouter</button>
+        </form>
+        <div id="voice-add-status"></div>
+      </div>
+      <div class="image-add">
+        <div><h3>Voix des agents</h3><p>Le modèle et la voix que disent tous les agents dont la case « Voix » est cochée.</p></div>
+        <div id="voice-select"></div>
+      </div>
+      <div class="image-add">
+        <div><h3>Voix clonées</h3><p>Pour un modèle qui imite une voix (Qwen3-TTS Base) : un extrait et ce qui y est dit. Il part avec chaque demande, même vers une autre machine. N’imitez que votre voix, ou celle de quelqu’un qui vous l’a permis.</p></div>
+        <div id="voice-samples" class="image-list"></div>
+        <form class="voice-sample-form" data-form="voice-sample">
+          <input id="voice-sample-name" type="text" maxlength="60" placeholder="Nom de la voix (ex. Estelle)" autocomplete="off" spellcheck="false" required aria-label="Nom de la voix">
+          <input id="voice-sample-file" type="file" accept="audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/mpeg,.wav,.flac,.ogg,.mp3" required aria-label="Extrait audio">
+          <select id="voice-sample-lang" aria-label="Langue de l’extrait"><optgroup id="voice-sample-langs" label="Langue"></optgroup></select>
+          <textarea id="voice-sample-text" maxlength="2000" placeholder="Ce qui est dit dans l’extrait, mot pour mot (conseillé : sans, seul le timbre est imité)" spellcheck="false" aria-label="Transcription de l’extrait"></textarea>
+          <button class="btn small" type="submit">Ajouter la voix</button>
+        </form>
+      </div>
+      </div>
+    </details>
     <div id="models-body"></div>
   </div>`);
   renderImageModels();
+  renderVoiceModels();
   paint('gpu-banner', gpuBanner());
   const byQuality = (a, b) => (b.quality ?? 0) - (a.quality ?? 0);
   const mine = sortModels(catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id), byQuality);
@@ -1359,28 +1475,26 @@ const AGENT_OPTIONS = [
   ['memory', 'Mémoire', 'Note lui-même ce qu’il juge durable et le relit à chaque conversation.'],
   ['images', 'Images', 'Générer et retoucher des images avec un modèle d’images installé (vue Modèles).'],
   ['autostart', 'Lancer avec Harn', 'Démarre en même temps que Harn, pour que son bot Telegram réponde.'],
-  ['voice', 'Voix', 'Sur Telegram, /parler le fait répondre en messages vocaux (Voxtral), les sources à part en texte.'],
+  ['voice', 'Voix', 'Sur Telegram, /parler le fait répondre en messages vocaux (la voix choisie dans la vue Modèles), les sources à part en texte.'],
 ];
 
-// La voix d'un agent (case Voix) : à installer une fois pour tous, puis lancée par /parler. Peinte
-// à part de la fiche : sa progression ne doit pas effacer ce qu'on est en train d'y écrire.
+// La voix d'un agent (case Voix) : celle choisie pour tous les agents dans la vue Modèles, lancée
+// par /parler. Peinte à part de la fiche : sa progression ne doit pas effacer ce qu'on y écrit.
 function voiceBlock(agent) {
   if (!agent.options.voice) return '';
-  const v = state.voice ?? {};
-  const installed = Boolean(state.runtimes?.voxtral?.installedAt);
-  // Sans carte Nvidia, Voxtral ne tourne pas ici : une machine reliée (Réseau local) prête la sienne.
-  const nvidia = state.hardware?.primary?.vendor === 'nvidia';
-  const lent = state.voiceRemote;
+  const report = voiceCatalog;
+  const c = report?.choice;
   let body;
-  if (!installed && lent) {
-    const status = lent.status === 'ready' ? 'en marche' : lent.status === 'starting' ? 'démarre…' : 'arrêtée, /parler la démarre (une à deux minutes la première fois)';
-    body = `<p class="hint">Sur Telegram, <code>/parler</code> pour des réponses vocales, <code>/ecrire</code> pour revenir au texte. Voix prêtée par <strong>${esc(lent.name)}</strong>, sur sa carte : ${status}.</p>`;
-  } else if (!installed && !nvidia) body = '<p class="hint">Voxtral ne tourne que sur une carte Nvidia. Installez la voix dans le Harn d’une machine qui en a une, puis reliez-la à celle-ci (« Autres machines Harn », dans l’accès) : elle prêtera sa voix.</p>';
-  else if (v.installing) body = `<p class="hint">Installation de la voix… <small>${esc(v.detail ?? '')}</small></p>`;
-  else if (!installed) body = `<p class="hint">Voxtral (Mistral) : environ 15 Go à télécharger (moteur et poids). En mode vocal, ~8,5 Go sur la carte graphique, à côté du modèle de texte. Licence CC BY-NC : usage non commercial.</p>${v.error ? `<p class="hint bad">${esc(v.error)}</p>` : ''}<button class="btn small" type="button" data-action="voice-install">Installer la voix</button>`;
+  if (!report) body = '<p class="hint">Lecture…</p>';
+  else if (!c) body = `<p class="hint">${report.canInstall ? 'Aucun modèle de voix installé : la vue Modèles (section Voix) en propose.' : 'Pas de voix ici (vLLM-Omni demande une carte Nvidia) ni sur une machine reliée : installez un modèle de voix dans le Harn d’une machine qui en a une, puis reliez-la à celle-ci.'}</p>`;
   else {
-    const status = v.status === 'ready' ? 'en marche, elle s’arrête après un quart d’heure sans rien dire' : v.status === 'starting' ? 'démarre…' : 'arrêtée, /parler la démarre';
-    body = `<p class="hint">Sur Telegram, <code>/parler</code> pour des réponses vocales, <code>/ecrire</code> pour revenir au texte. Voix : ${status}.</p>${v.status === 'error' && v.error ? `<p class="hint bad">${esc(v.error)}</p>` : ''}${v.status === 'ready' ? '<button class="btn small ghost" type="button" data-action="voice-stop">Arrêter la voix</button>' : ''}`;
+    const sample = c.kind === 'clone' ? report.samples.find((x) => x.id === c.voice) : null;
+    const voice = c.kind === 'clone' ? (sample ? `la voix clonée « ${esc(sample.name)} »` : '<span class="bad">aucune voix clonée choisie</span>') : `la voix ${esc(c.voice ?? '?')}`;
+    const lent = (report.remote ?? []).find((r) => r.peer === c.where);
+    const running = c.where ? lent?.running === c.model && lent?.status === 'ready' : report.running === c.model && report.status === 'ready';
+    const starting = c.where ? lent?.running === c.model && lent?.status === 'starting' : report.running === c.model && report.status === 'starting';
+    const status = running ? 'en marche' : starting ? 'démarre…' : 'arrêté, /parler le démarre (une à deux minutes la première fois)';
+    body = `<p class="hint">Sur Telegram, <code>/parler</code> pour des réponses vocales, <code>/ecrire</code> pour revenir au texte. ${esc(c.name)}${c.where ? ` sur <strong>${esc(c.where)}</strong>` : ''}, ${voice} : ${status}. À changer dans la vue Modèles, section Voix.</p>${!c.where && report.status === 'error' && report.error ? `<p class="hint bad">${esc(report.error)}</p>` : ''}${running && !c.where ? '<button class="btn small ghost" type="button" data-action="voice-stop">Arrêter la voix</button>' : ''}`;
   }
   return `<h4>Voix</h4>${agent.telegram ? '' : '<p class="hint">La voix passe par Telegram : renseignez le bot ci-dessous.</p>'}${body}`;
 }
@@ -1606,7 +1720,7 @@ function render() {
   else if (view === 'models') renderModels();
   else if (view === 'tuning') renderTuning();
   else if (view === 'machine') { renderMachine(); loadDoc(); if (!access) loadAccess(); }
-  else if (view === 'agents') { renderAgents(); loadSystem(); if (!agents) loadAgents(); if (!imageCatalog || imageCatalogKey !== imageKey()) loadImageCatalog(); }
+  else if (view === 'agents') { renderAgents(); loadSystem(); if (!agents) loadAgents(); if (!imageCatalog || imageCatalogKey !== imageKey()) loadImageCatalog(); if (!voiceCatalog || voiceCatalogKey !== voiceKey()) loadVoiceCatalog(); }
   else renderHome();
 }
 
@@ -1618,6 +1732,19 @@ function go(next) {
   render();
   window.scrollTo({ top: 0 });
 }
+
+// La voix des agents : chaque liste enregistre aussitôt. Changer de modèle reprend sa première voix.
+app.addEventListener('change', async (event) => {
+  const select = event.target.closest('[data-voice-select]');
+  if (!select || !voiceCatalog) return;
+  const c = voiceCatalog.choice ?? {};
+  const next = { model: c.model, voice: c.voice, language: c.language };
+  next[select.dataset.voiceSelect] = select.value;
+  if (select.dataset.voiceSelect === 'model') next.voice = null;
+  try { voiceCatalog = await post('/api/voice/select', next); toast('Voix des agents enregistrée'); } catch (error) { toast(error.message); voiceCatalogKey = null; }
+  regions.delete('voice-select');
+  renderVoiceModels();
+});
 
 app.addEventListener('submit', async (event) => {
   const keyForm = event.target.closest('[data-form="key"]');
@@ -1661,6 +1788,44 @@ app.addEventListener('submit', async (event) => {
         renderAgents();
         toast(`Agent « ${created.name} » créé`);
       }
+    } catch (error) { toast(error.message); } finally { button.disabled = false; }
+    return;
+  }
+  const voiceForm = event.target.closest('[data-form="add-voice"]');
+  if (voiceForm) {
+    event.preventDefault();
+    const input = voiceForm.querySelector('#voice-url');
+    const url = input.value.trim();
+    if (!/huggingface\.co\/[\w.-]+\/[\w.-]+/.test(url)) return toast('Collez une adresse de dépôt huggingface.co/auteur/modele');
+    voiceAdding = { url };
+    try {
+      const r = await post('/api/voice/add', { url });
+      input.value = '';
+      toast(voiceCatalog?.canInstall ? `${r.name} ajouté, installation en cours` : `${r.name} ajouté : installez-le sur une machine avec une carte Nvidia`);
+      voiceAdding = null;
+    } catch (error) { voiceAdding = { url, error: error.message }; }
+    voiceCatalogKey = null;
+    renderVoiceModels();
+    return;
+  }
+  const sampleForm = event.target.closest('[data-form="voice-sample"]');
+  if (sampleForm) {
+    event.preventDefault();
+    const file = sampleForm.querySelector('#voice-sample-file').files[0];
+    if (!file) return toast('Choisissez un extrait audio');
+    if (file.size > 10 * 1024 * 1024) return toast('Extrait limité à 10 Mo : quelques secondes suffisent');
+    const button = sampleForm.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      const mime = file.type || ({ wav: 'audio/wav', flac: 'audio/flac', ogg: 'audio/ogg', mp3: 'audio/mpeg' })[file.name.split('.').pop().toLowerCase()] || '';
+      const sample = await post('/api/voice/samples', { name: sampleForm.querySelector('#voice-sample-name').value, text: sampleForm.querySelector('#voice-sample-text').value, language: sampleForm.querySelector('#voice-sample-lang').value, mime, audio: btoa(binary) });
+      sampleForm.reset();
+      toast(`Voix « ${sample.name} » ajoutée`);
+      voiceCatalogKey = null;
+      renderVoiceModels();
     } catch (error) { toast(error.message); } finally { button.disabled = false; }
     return;
   }
@@ -1747,6 +1912,24 @@ app.addEventListener('click', async (event) => {
       toast('LoRA supprimé');
     }
     if (action === 'image-hub-check') { await post('/api/images/hub/check'); toast('Recherche de modèles d’images sur Hugging Face'); }
+    if (action === 'voice-install') { await post(`/api/voice/models/${id}/install`); toast('Installation du modèle de voix lancée, en arrière-plan'); }
+    if (action === 'voice-delete') {
+      if (!confirm('Supprimer ce modèle de voix et ses fichiers ?')) return;
+      voiceCatalog = await post(`/api/voice/models/${id}/delete`); renderVoiceModels(); toast('Modèle de voix supprimé');
+    }
+    if (action === 'voice-start') { toast('Le modèle de voix démarre : une à deux minutes'); voiceCatalog = await post(`/api/voice/models/${id}/start`); renderVoiceModels(); toast('Voix en marche'); }
+    if (action === 'voice-sample-delete') {
+      if (!confirm('Supprimer cette voix clonée ?')) return;
+      voiceCatalog = await post(`/api/voice/samples/${id}/delete`); renderVoiceModels(); toast('Voix supprimée');
+    }
+    if (action === 'voice-preview') {
+      toast('La voix se prépare… (une à deux minutes si le modèle ne tourne pas encore)');
+      const response = await fetch('/api/voice/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? `Erreur ${response.status}`);
+      const audio = new Audio(URL.createObjectURL(await response.blob()));
+      audio.addEventListener('ended', () => URL.revokeObjectURL(audio.src));
+      await audio.play().catch(() => toast('Le navigateur refuse de lire ce son (Ogg/Opus)'));
+    }
     if (action === 'image-hub-dismiss') { await post('/api/images/hub/dismiss', { repo: button.dataset.repo }); toast('Ce modèle ne sera plus proposé'); }
     if (action === 'delete-model') {
       const m = modelOf(id);
@@ -1836,7 +2019,6 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       if (r.session) { agents = agents.map((a) => (a.id === id ? { ...a, running: true } : a)); renderAgents(); }
       toast(r.restarted || saved.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : r.resumed ? `${saved.name} tourne déjà : son terminal est rouvert` : r.restarted ? `${saved.name} est relancé avec ses nouveaux réglages` : `${saved.name} s’ouvre avec ${nameOf(r.model)}`);
     }
-    if (action === 'voice-install') { await post('/api/voice/install'); toast('Installation de la voix lancée, en arrière-plan'); }
     if (action === 'voice-stop') { await post('/api/voice/stop'); toast('Voix arrêtée'); }
     if (action === 'agent-stop') {
       const r = await post(`/api/agents/${id}/stop`);

@@ -7,7 +7,7 @@
 //   - l'agent lui montre une image ou lui envoie un fichier (outil send_file) ; une image générée
 //     part toute seule ;
 //   - « écrit… » reste affiché tant que l'agent travaille ; /new ouvre une nouvelle conversation ;
-//   - avec la case Voix de l'agent, /parler fait répondre en messages vocaux (Voxtral, dans Harn),
+//   - avec la case Voix de l'agent, /parler fait répondre en messages vocaux (la voix choisie dans Harn),
 //     les liens sources à part en texte ; /ecrire revient au texte. Sans la case, rien de tout cela.
 //
 // Aucun secret ici : le jeton du bot et l'identifiant Telegram de la personne sont lus dans
@@ -109,7 +109,7 @@ function releaseLock() {
 const shared = ((globalThis as any).__harnTelegram ??= { offset: 0, chat: 0, voice: false }) as { offset: number; chat: number; voice: boolean };
 
 // --- Mode vocal ---
-// Ce que Voxtral lit d'un coup (MAX_SPEAK_CHARS de voice.mjs) : au-delà, plusieurs messages vocaux.
+// Ce que la voix lit d'un coup (MAX_SPEAK_CHARS de voice.mjs) : au-delà, plusieurs messages vocaux.
 const SPEAK_CHARS = 1100;
 const URL_RE = /https?:\/\/[^\s<>()\]]+[^\s<>()\].,;:!?'"»]/g;
 // Un chemin de fichier (images/2026…png, /home/…/notes.pdf) : illisible à voix haute, et le fichier

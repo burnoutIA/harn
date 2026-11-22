@@ -547,6 +547,14 @@ body.onboarding .topline { max-width: none; }
 .image-inspect .acts { flex: none; }
 .image-variant { margin-top: 8px; max-width: 100%; min-height: 34px; padding: 0 8px; border-radius: var(--r-btn); border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font: calc(12.5px * var(--fs)) var(--mono); }
 .image-models .hub-head { margin-top: 8px; }
+/* La voix des agents et l'ajout d'une voix clonée. */
+.voice-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-pick select, .voice-sample-form select, .voice-sample-form input[type="text"], .voice-sample-form textarea { min-height: 34px; padding: 0 8px; border-radius: var(--r-btn); border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font: inherit; font-size: calc(13px * var(--fs)); max-width: 100%; }
+.voice-sample-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.voice-sample-form textarea { grid-column: 1 / -1; min-height: 64px; padding: 8px; resize: vertical; }
+.voice-sample-form button { justify-self: start; }
+.voice-sample-form input[type="file"] { font-size: calc(12.5px * var(--fs)); color: var(--muted); min-width: 0; }
+@media (max-width: 700px) { .voice-sample-form { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 700px) { .image-model, .image-inspect { flex-direction: column; align-items: flex-start; } .image-model .acts { flex-wrap: wrap; } }
 .agent-new { max-width: 560px; }
 .agent-new #agents-all { display: flex; }

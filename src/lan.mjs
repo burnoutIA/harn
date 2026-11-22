@@ -36,10 +36,19 @@ export function lanDetails() {
   };
 }
 
-export function startLan(handler) {
+// upgrade : les flux WebSocket (la parole en flux, gateway.mjs), coupés avec l'accès.
+const upgraded = new Set();
+export function startLan(handler, upgrade = null) {
   if (server?.listening) return Promise.resolve(lanDetails());
   return new Promise((resolve, reject) => {
     const candidate = http.createServer(handler);
+    if (upgrade) {
+      candidate.on('upgrade', (req, socket, head) => {
+        upgraded.add(socket);
+        socket.once('close', () => upgraded.delete(socket));
+        upgrade(req, socket, head);
+      });
+    }
     candidate.once('error', (error) => {
       server = null;
       reject(new Error(error.code === 'EADDRINUSE' ? `Le port ${PORTS.lan} est déjà utilisé par un autre programme` : error.message));
@@ -53,5 +62,7 @@ export function stopLan() {
   const closing = server;
   server = null;
   // Les connexions gardées ouvertes (keep-alive, flux en cours) sont coupées : l'accès est retiré.
+  for (const socket of upgraded) socket.destroy();
+  upgraded.clear();
   return new Promise((resolve) => { closing.close(() => resolve()); closing.closeAllConnections?.(); });
 }

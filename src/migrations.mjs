@@ -3,7 +3,7 @@
 // Ajouter une migration : incrémenter SCHEMA_VERSION et décrire le passage à cette version.
 import { verbosityLabel } from './iq-test.mjs';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const MIGRATIONS = {
   // v2 : `layers` explicite dans chaque réglage. Avant, une cible --fit relevée (> 1 Gio)
@@ -46,6 +46,21 @@ const MIGRATIONS = {
       state.addedEngines = { ...state.addedEngines, [id]: entry };
       delete state.engines[id];
     }
+  },
+  // v7 : la voix n'est plus Voxtral seul mais un modèle de voix parmi d'autres (voice-models.mjs),
+  // servis par un même vLLM-Omni. Celui installé pour Voxtral (runtime/voxtral) devient ce moteur
+  // commun, sans bouger (un venv ne se déplace pas), et ses poids le modèle « voxtral », choisi
+  // pour les agents comme avant.
+  7: (state) => {
+    const old = state.runtimes?.voxtral;
+    if (old?.installedAt && old.venv) {
+      state.runtimes['vllm-omni'] ??= { kind: 'vllm-omni', dir: old.dir, venv: old.venv, version: '0.32.0', installedAt: old.installedAt };
+      state.voice = { ...state.voice };
+      state.voice.models = { ...state.voice.models, voxtral: { installedAt: old.installedAt, path: old.model, revision: old.revision ?? null } };
+      state.voice.selected ??= { model: 'voxtral', voice: 'fr_female', language: 'French' };
+    }
+    if (state.runtimes) delete state.runtimes.voxtral;
+    if (state.voice) { delete state.voice.installing; delete state.voice.detail; }
   },
 };
 

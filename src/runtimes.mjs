@@ -893,38 +893,43 @@ export async function installGemmaChallenge(model, onLog = () => {}) {
   return info;
 }
 
-// ── La voix : Voxtral TTS de Mistral, servi par vLLM-Omni (src/voice.mjs) ──
-// Un venv à part dans runtime/voxtral et les poids d'origine (bf16, 8 Go), compressés en fp8 au
-// chargement (deploy-config de voice.mjs). ninja : vLLM compile ses noyaux au premier démarrage.
-const VOXTRAL_PIP = ['vllm==0.32.0', 'vllm-omni==0.32.0', 'huggingface_hub', 'ninja'];
-export const VOXTRAL_WEIGHTS = { repo: 'mistralai/Voxtral-4B-TTS-2603', revision: 'b81be46c3777f88621676791b512bb01dc1cb970', dir: 'Voxtral-4B-TTS-2603' };
+// ── La voix : vLLM-Omni, un moteur pour tous les modèles de voix (src/voice.mjs) ──
+// Un venv à part. ninja : vLLM compile ses noyaux au premier démarrage. Celui d'avant (installé
+// pour Voxtral seul, dans runtime/voxtral) est repris tel quel par la migration 7 : un venv ne se
+// déplace pas (ses scripts ont son chemin en dur).
+const VOICE_PIP = ['vllm==0.32.0', 'vllm-omni==0.32.0', 'huggingface_hub', 'ninja'];
 
-export async function installVoxtral(onLog = () => {}) {
+const voiceStep = (dir, onLog) => (command, args) => {
+  onLog(`${path.basename(command)} ${args.join(' ')}`);
+  return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000, env: { ...process.env, HF_XET_HIGH_PERFORMANCE: '1' } }, onLog);
+};
+
+export async function installVoiceEngine(onLog = () => {}) {
   if (!LINUX) throw new Error('La voix n’est installée par Harn que sous Linux');
-  const dir = path.join(DIRS.runtime, 'voxtral');
+  const known = getState().runtimes?.['vllm-omni'];
+  if (known?.installedAt && await ready(known.venv)) return known;
+  const dir = path.join(DIRS.runtime, 'vllm-omni');
   const venv = path.join(dir, 'venv');
   await mkdir(dir, { recursive: true });
-  const step = (command, args) => {
-    onLog(`${path.basename(command)} ${args.join(' ')}`);
-    return runLogged(command, args, { cwd: dir, timeout: 3 * 3600_000, env: { ...process.env, HF_XET_HIGH_PERFORMANCE: '1' } }, onLog);
-  };
-
+  const step = voiceStep(dir, onLog);
   if (!(await ready(venv))) {
     await rm(venv, { recursive: true, force: true });
     const uv = await uvCommand();
     await step(uv, ['venv', '--python', '3.12', '--seed', 'venv']);
-    await step(uv, ['pip', 'install', '--python', path.join(venv, 'bin', 'python'), '--link-mode', 'copy', ...VOXTRAL_PIP]);
+    await step(uv, ['pip', 'install', '--python', path.join(venv, 'bin', 'python'), '--link-mode', 'copy', ...VOICE_PIP]);
     await markReady(venv);
   }
-
-  const weights = path.join(dir, 'models', VOXTRAL_WEIGHTS.dir);
-  if (!(await ready(weights))) {
-    await rm(weights, { recursive: true, force: true });
-    await step(path.join(venv, 'bin', 'hf'), ['download', VOXTRAL_WEIGHTS.repo, '--revision', VOXTRAL_WEIGHTS.revision, '--local-dir', weights]);
-    await markReady(weights);
-  }
-
-  const info = { kind: 'voxtral', dir, venv, model: weights, revision: VOXTRAL_WEIGHTS.revision, installedAt: new Date().toISOString() };
-  update((s) => { s.runtimes.voxtral = info; });
+  const info = { kind: 'vllm-omni', dir, venv, version: '0.32.0', installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes['vllm-omni'] = info; });
   return info;
+}
+
+// Les poids d'un modèle de voix, à la révision donnée, par le hf du venv.
+export async function downloadVoiceWeights({ repo, revision, dest, venv }, onLog = () => {}) {
+  if (await ready(dest)) return dest;
+  await rm(dest, { recursive: true, force: true });
+  await mkdir(path.dirname(dest), { recursive: true });
+  await voiceStep(path.dirname(dest), onLog)(path.join(venv, 'bin', 'hf'), ['download', repo, ...(revision ? ['--revision', revision] : []), '--local-dir', dest]);
+  await markReady(dest);
+  return dest;
 }

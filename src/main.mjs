@@ -6,7 +6,7 @@ import { MODELS, displayName, modelById, totalBytes, variantOf } from './catalog
 import { globalRating, paramsOf } from './rating.mjs';
 import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
-import { handleV1, setActivator, setImages, setVoice } from './gateway.mjs';
+import { handleV1, handleV1Upgrade, setActivator, setImages, setVoice } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { updateSharing } from './placement.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -28,7 +28,7 @@ import { watchIdle } from './idle.mjs';
 import { addImageModel, checkImageHub, dismissImageSuggestion, imageIdOf, inspectImageRepo, loadImageModels, watchImageHub } from './image-hub.mjs';
 import { deleteImageModel, generateImage, imageModelById, imagesReport, installImageModel, loraTargets } from './images.mjs';
 import { listLoras, loraDirOf } from './loras.mjs';
-import { installVoice, speak, startVoice, stopVoice, voiceReport } from './voice.mjs';
+import { addVoiceModel, addVoiceSample, deleteVoiceModel, deleteVoiceSample, inspectVoiceModel, installVoiceModel, openStream, resetVoiceState, selectVoice, speak, startVoice, stopVoice, voiceOffer, voiceReport } from './voice.mjs';
 import { agentForImages, agentForVoice, claimCard, remoteModels, createAgent, deleteAgent, deleteAgentLora, launchAgent, listAgents, openOverview, startAgents, stopAgent, updateAgent } from './agents.mjs';
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
@@ -96,7 +96,7 @@ async function lanHandler(req, res) {
 async function setLan(enabled) {
   if (enabled) {
     if (!keysEnforced()) throw Object.assign(new Error('Créez d’abord une clé API : le réseau local l’exige.'), { status: 409 });
-    await startLan(lanHandler);
+    await startLan(lanHandler, (req, socket, head) => { handleV1Upgrade(req, socket, head, { lan: true }).catch(() => socket.destroy()); });
   } else {
     await stopLan();
   }
@@ -317,14 +317,38 @@ async function api(req, res, url) {
     return json(res, 404, { error: 'inconnu' });
   }
 
-  // La voix : installer et arrêter, depuis la fenêtre seulement.
+  // La voix : modèles, voix clonées et choix des agents, depuis la fenêtre seulement.
   if (parts[1] === 'voice') {
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
-    if (parts[2] === 'install') {
-      if (!voiceReport().canInstall) return json(res, 409, { error: 'Voxtral ne tourne que sur une carte Nvidia : installez la voix sur une autre machine Harn reliée à celle-ci' });
-      background(installVoice()); return json(res, 202, { ok: true });
+    const body = await new Response(req).json().catch(() => ({}));
+    try {
+      if (parts[2] === 'inspect') return json(res, 200, await inspectVoiceModel(body.url));
+      if (parts[2] === 'add') {
+        const model = await addVoiceModel(body.url);
+        if (voiceReport().canInstall) background(installVoiceModel(model.id));
+        return json(res, 202, { id: model.id, name: model.name });
+      }
+      if (parts[2] === 'models' && parts[3]) {
+        if (parts[4] === 'install') {
+          if (!voiceReport().canInstall) return json(res, 409, { error: 'vLLM-Omni ne tourne ici que sur une carte Nvidia : installez ce modèle sur une autre machine Harn reliée à celle-ci, elle le prêtera' });
+          background(installVoiceModel(parts[3])); return json(res, 202, { ok: true });
+        }
+        if (parts[4] === 'delete') { await deleteVoiceModel(parts[3]); return json(res, 200, voiceReport()); }
+        if (parts[4] === 'start') { await startVoice({ model: parts[3] }); return json(res, 200, voiceReport()); }
+      }
+      if (parts[2] === 'samples' && !parts[3]) return json(res, 200, await addVoiceSample(body));
+      if (parts[2] === 'samples' && parts[4] === 'delete') { await deleteVoiceSample(parts[3]); return json(res, 200, voiceReport()); }
+      if (parts[2] === 'select') { selectVoice(body); return json(res, 200, voiceReport()); }
+      if (parts[2] === 'stop') { await stopVoice(); return json(res, 200, voiceReport()); }
+      // Écouter la voix choisie (ou celle donnée) avant de la confier aux agents.
+      if (parts[2] === 'preview') {
+        const audio = await speak(body.text ?? 'Bonjour, voici ma voix. Je lirai ainsi les réponses de vos agents.', { ...(body.model ? { model: body.model } : {}), ...(body.voice ? { voice: body.voice } : {}), ...(body.language ? { language: body.language } : {}) });
+        res.writeHead(200, { 'content-type': 'audio/ogg', 'content-length': audio.length });
+        return res.end(audio);
+      }
+    } catch (error) {
+      return json(res, error.status ?? 500, { error: error.message });
     }
-    if (parts[2] === 'stop') { await stopVoice(); return json(res, 200, voiceReport()); }
     return json(res, 404, { error: 'inconnu' });
   }
 
@@ -343,7 +367,7 @@ async function api(req, res, url) {
         if (parts[4] === 'start') { await startVoice(); return json(res, 200, voiceReport()); }
         if (parts[4] === 'speak') {
           const body = await new Response(req).json().catch(() => ({}));
-          const audio = await speak(body.text, body.voice ?? undefined);
+          const audio = await speak(body.text, body.voice ? { voice: body.voice } : {});
           res.writeHead(200, { 'content-type': 'audio/ogg', 'content-length': audio.length });
           return res.end(audio);
         }
@@ -601,7 +625,7 @@ async function main() {
   await loadKeys();
   await internalKey();
   setActivator(activate, busyWith, gpuFree);
-  setVoice({ speak, start: startVoice, report: voiceReport });
+  setVoice({ speak, start: startVoice, offer: voiceOffer, stream: openStream });
   // Les images des clients OpenAI (/v1/images/generations) : faites dans un dossier à part, renvoyées
   // en base64, puis effacées (le client les garde, Harn ne les accumule pas).
   setImages({
@@ -615,6 +639,8 @@ async function main() {
     },
   });
 
+  // La parole en flux (WebSocket /v1/audio/speech/stream), pour un client de cette machine.
+  server.on('upgrade', (req, socket, head) => { handleV1Upgrade(req, socket, head).catch(() => socket.destroy()); });
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       // Déjà lancé : on ouvre simplement la fenêtre de l'instance existante.
@@ -628,13 +654,7 @@ async function main() {
     console.log(`Harn · interface ${ORIGIN} · API OpenAI ${ORIGIN}/v1`);
     openWindow();
     await reapOrphans();
-    // La voix d'avant ce démarrage vient d'être reprise avec les autres orphelins.
-    // Un runtime/voxtral effacé à la main sort de l'état : la fiche d'agent ne le croit plus installé.
-    const voiceGone = !voiceReport().installed;
-    update((s) => {
-      if (s.voice) s.voice = { ...s.voice, status: 'stopped', installing: false, detail: null };
-      if (voiceGone && s.runtimes?.voxtral) delete s.runtimes.voxtral;
-    });
+    resetVoiceState();
     watchForUpdates();
     watchHub();
     watchImageHub();
