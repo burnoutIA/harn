@@ -28,6 +28,8 @@ async function harnWithVoice(key, { legacy = false } = {}) {
       return res.end(JSON.stringify(legacy ? { installed: true, voices: ['fr_female'], status: 'stopped' }
         : { installed: true, status: 'stopped', running: null, voices: [], models: [{ id: 'qwen3-tts-1.7b-base', name: 'Qwen3-TTS 1.7B Base', kind: 'clone', voices: [] }] }));
     }
+    // Un Harn d'avant les combos.
+    if (req.url === '/v1/combos') { res.writeHead(404); return res.end(); }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), hop: req.headers['x-harn-hop'] ?? null });

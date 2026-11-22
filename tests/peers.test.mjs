@@ -24,6 +24,8 @@ async function fakeHarn(key) {
     }
     // Un Harn d'avant la voix.
     if (req.url === '/v1/audio/voices') { res.writeHead(404); return res.end(); }
+    // … et d'avant les combos.
+    if (req.url === '/v1/combos') { res.writeHead(404); return res.end(); }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     received.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), hop: req.headers['x-harn-hop'] ?? null, ...(req.headers['x-harn-parallel'] ? { parallel: req.headers['x-harn-parallel'] } : {}) });

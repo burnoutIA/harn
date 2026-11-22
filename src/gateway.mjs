@@ -25,6 +25,9 @@ export function setVoice(api) { voice = api; }
 // Les images, pour les clients OpenAI (POST /v1/images/generations) : branchées par main.mjs.
 let images = null;
 export function setImages(api) { images = api; }
+// Les combos (combo.mjs, comboRequest) : deux modèles gardés ensemble sur une carte.
+let combos = null;
+export function setCombos(fn) { combos = fn; }
 
 // Les niveaux de Qwen3.8 sont low / medium / xhigh. Le défaut du gabarit est xhigh, le plus
 // bavard : sur un run long il épuise le budget de sortie en pleine réflexion et rend une
@@ -219,6 +222,14 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
     const found = modelsList().data.find((m) => m.id === decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
     return found ? sendJson(res, 200, found, cors) : sendJson(res, 404, { error: { message: 'Modèle inconnu ou non installé', type: 'invalid_request_error' } }, cors);
   }
+  if (req.method === 'GET' && url.pathname === '/v1/combos') {
+    if (!combos) return sendJson(res, 503, { error: { message: 'Pas de combos dans ce Harn' } }, cors);
+    try {
+      return sendJson(res, 200, await combos('status', { machine: url.searchParams.get('machine') }, { hopped: Boolean(req.headers['x-harn-hop']) }), cors);
+    } catch (error) {
+      return sendJson(res, error.status ?? 500, { error: { message: error.message } }, cors);
+    }
+  }
   // Un POST sans JSON est la seule forme qu'une page web peut envoyer sans demander la permission
   // (formulaire, fetch « no-cors ») : il chargerait un modèle et occuperait la carte. Aucun client
   // OpenAI n'envoie autre chose que du JSON.
@@ -256,6 +267,18 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
       return sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data, model: made.model, size: `${made.width}x${made.height}`, seed: made.seed, seconds: made.seconds, warnings: made.warnings ?? [] }, cors);
     } catch (error) {
       return sendJson(res, error.status ?? 500, { error: { message: error.message } }, cors);
+    }
+  }
+
+  // Un combo : plan (sans rien charger), start, stop. Refusé (409) quand il ne tient pas, avec
+  // le plan qui dit ce qui manque.
+  const comboAction = /^\/v1\/combos\/(plan|start|stop)$/.exec(url.pathname)?.[1];
+  if (req.method === 'POST' && comboAction) {
+    if (!combos) return sendJson(res, 503, { error: { message: 'Pas de combos dans ce Harn' } }, cors);
+    try {
+      return sendJson(res, 200, await combos(comboAction, body ?? {}, { hopped: Boolean(req.headers['x-harn-hop']) }), cors);
+    } catch (error) {
+      return sendJson(res, error.status ?? 500, { error: { message: error.message }, ...(error.plan ? { plan: error.plan } : {}) }, cors);
     }
   }
 

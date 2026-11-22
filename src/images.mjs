@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { activate } from './activation.mjs';
 import { hfSha256 } from './catalog.mjs';
+import { comboOf, comboRefusal } from './combo-state.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { github } from './github.mjs';
@@ -292,6 +293,8 @@ export async function generateImage({ workspace, who = 'pi', model: wanted = nul
   if (text.length > MAX_PROMPT) throw failure(400, `Description limitée à ${MAX_PROMPT} caractères`);
   const ready = installedModels();
   if (!ready.length) throw failure(409, 'Aucun modèle d’images n’est installé : l’utilisateur en installe un dans Harn, vue Modèles');
+  // L'image vide la carte de ses modèles de texte : pas pendant un combo.
+  if (comboOf()) throw comboRefusal('l’image');
   const refs = [].concat(references ?? []).filter(Boolean).slice(0, 4).map((ref) => path.resolve(workspace, String(ref)));
   // Les LoRA du dossier lora/ de l'agent s'appliquent depuis la description, syntaxe
   // <lora:nom:echelle> (comme stable-diffusion-webui). Sans les chevrons, sd.cpp ignore la mention

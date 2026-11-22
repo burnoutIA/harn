@@ -129,6 +129,37 @@ moins récemment, et si tous répondent, il attend qu'une réponse finisse. Quan
 se partagent la carte, ou plusieurs clients un même modèle, l'accueil le signale, avec un bouton
 « Décharger » pour ceux qui ne servent pas : quand ils répondent ensemble, chacun va moins vite.
 
+### Combo : deux modèles réservés sur la carte
+
+Hors combo, un modèle appelé fait de la place en déchargeant les autres. Un **combo** garde deux
+modèles ensemble sur une carte : un modèle de texte et un modèle de voix, ou deux modèles de
+texte. Harn fait d'abord le plan. Il compte la place de chacun : mesurée au dernier chargement,
+sinon estimée. Il en retire le bureau et la marge de 1,5 Go, puis cherche le plus grand contexte de
+texte qui tient. Le réglage du banc reste le même, seul le contexte change, et seulement le temps du
+combo ; un cache f16 qu'il faudrait raccourcir passe d'abord en q8_0 (sans perte mesurée). Qwen3-TTS 1.7B y passe en forme compacte (fp8, 2048 jetons par requête) : 5,3 Go au lieu
+de 6,9.
+
+Tant que le combo tient, une demande qui obligerait à décharger l'un de ses modèles est refusée
+(409), au lieu de le décharger. Cela vaut pour un autre modèle qui ne tient pas à côté, une autre
+voix, une image ou un banc. Un modèle qui tient à côté sans rien déplacer se charge normalement.
+Comme un modèle seul, le combo rend la carte après 10 minutes sans requête, mais toujours en
+entier : ses deux modèles partent ensemble (`idleMinutes`, `0` pour le garder).
+
+- Dans la fenêtre : vue Modèles, section **Combo** (Prévoir, Lancer, Arrêter).
+- Par l'API, avec la clé : `POST /v1/combos/plan` calcule sans rien charger. `POST /v1/combos/start`
+  charge, avec `{"models": ["swift15-q27-iq3s-mtp", "qwen3-tts-1.7b-base"]}`, et en option
+  `"minContext": 65536` (refusé en dessous) et `"idleMinutes"`. `POST /v1/combos/stop` arrête
+  (`{"unload": false}` laisse les modèles chargés, sans réserve). `GET /v1/combos` lit l'état. Un
+  refus (409) donne le plan, avec ce qui manque.
+- **Sur une autre machine** : les mêmes noms suffixés (`swift15-q27-iq3s-mtp@pc2`,
+  `qwen3-tts-1.7b-base@pc2`). La demande est relayée à cette machine, qui fait le plan sur sa
+  carte. `stop` et `GET` prennent `{"machine": "pc2"}` (`?machine=pc2`). Un combo qui mélange deux
+  machines est refusé : un combo, c'est une seule carte.
+- Mesuré sur une 3090 (24 Go), essai à la main : un 27B en IQ4_XS (KV q8_0, MTP3, 13,4 Go) à côté
+  de Qwen3-TTS 1.7B en fp8 tient environ 64k de contexte, à ~100 tok/s ; la voix parle à 7 fois le
+  temps réel, et à 1,6 fois pendant que le texte lit un prompt de 48k. Le Swift 27B IQ3_S du
+  catalogue pèse 2 Go de moins : il devrait dépasser 100k en q8_0 (à mesurer).
+
 ### Plusieurs machines
 
 Les modèles d'une autre machine Harn du réseau s'utilisent ici sous le nom `modele@machine`
@@ -452,7 +483,8 @@ case, rien ne change pour lui : ni commande, ni consigne en plus dans son contex
   du modèle de texte (Voxtral ~8,5 Go, poids compressés en fp8 au chargement ; Qwen3-TTS 1.7B
   6,8 Go mesurés, le 0.6B estimé à ~5,5 Go). S'il manque de place, le modèle de texte est
   déchargé puis rechargé avec moins de contexte, pour ce chargement-là seulement. La voix
-  s'arrête après un quart d'heure sans rien dire, et le temps d'une image.
+  s'arrête après un quart d'heure sans rien dire, et le temps d'une image. Pour garder la voix et
+  un modèle de texte ensemble sans que l'un chasse l'autre : un combo (plus haut, Parallélisme).
 - **L'API** : `POST /v1/audio/speech` au format d'OpenAI (`input`, et au choix `model`, `voice`,
   `language`, `ref_audio`/`ref_text` pour imiter un extrait), réponse en Ogg/Opus ;
   `GET /v1/audio/voices` liste les modèles de voix installés ici ; `POST /v1/audio/start`

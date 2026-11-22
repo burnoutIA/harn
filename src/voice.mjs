@@ -3,7 +3,8 @@ import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { activate } from './activation.mjs';
-import { killTree, spareRuntime, stopEngine } from './engine.mjs';
+import { comboMember, comboRefusal, comboVoice } from './combo-state.mjs';
+import { killTree, loadedModels, spareRuntime, stopEngine } from './engine.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { sampleGpu } from './hardware.mjs';
 import { getLive } from './metrics.mjs';
@@ -45,6 +46,7 @@ export const allVoiceModels = () => [...VOICE_MODELS, ...(voiceState().added ?? 
 export const voiceModelById = (id) => allVoiceModels().find((model) => model.id === id) ?? null;
 const entryOf = (id) => voiceState().models?.[id] ?? {};
 // Installé, et toujours là : un dossier effacé à la main ne compte plus.
+export const voiceInstalledHere = (id) => installedHere(id);
 const installedHere = (id) => Boolean(engine()?.installedAt && entryOf(id).installedAt && existsSync(entryOf(id).path ?? ''));
 const installedModels = () => allVoiceModels().filter((model) => installedHere(model.id));
 export const voiceInstalled = () => installedModels().length > 0;
@@ -220,15 +222,23 @@ function effectiveChoice() {
 // ── Marche et arrêt ──
 let child = null;
 let running = null;
+let runningCompact = false;
 let starting = null;
 let idleTimer = null;
 let streams = 0;
+let lastUse = 0;
 function touch() {
   clearTimeout(idleTimer);
-  // Un flux ouvert (un appel en cours) garde la voix en marche.
-  idleTimer = setTimeout(() => { if (streams > 0) touch(); else stopVoice().catch(() => {}); }, IDLE_MS);
+  lastUse = Date.now();
+  // Un flux ouvert (un appel en cours) garde la voix en marche ; dans un combo, elle part avec
+  // lui (combo.mjs).
+  idleTimer = setTimeout(() => { if (streams > 0 || (running && comboVoice() === running)) touch(); else stopVoice().catch(() => {}); }, IDLE_MS);
   idleTimer.unref?.();
 }
+// Pour le combo : la voix qui tourne ici, sous quelle forme, sa dernière parole, ses flux ouverts.
+export const voiceActivity = () => ({ running, compact: runningCompact, status: voiceState().status ?? 'stopped', lastUse, streams });
+// La forme réduite de la voix (fp8…) quand elle est dans le combo et que sa famille en a une.
+const compactFor = (id) => (comboVoice() === id ? describeVoiceModel(voiceModelById(id)).compact : null);
 
 const healthy = () => fetch(`http://127.0.0.1:${PORTS.voice}/health`).then((r) => r.ok, () => false);
 
@@ -269,10 +279,13 @@ export async function startVoice({ here = false, model = null } = {}) {
     return;
   }
   if (!installedHere(id)) throw failure(409, `${voiceModelById(id)?.name ?? id} n’est pas installé ici`);
-  if (child && running === id && voiceState().status === 'ready') { touch(); return; }
+  // Le combo a sa voix : une autre la chasserait.
+  if (comboVoice() && comboVoice() !== id) throw comboRefusal(`la voix ${voiceModelById(id)?.name ?? id}`);
+  const ready = () => child && running === id && runningCompact === Boolean(compactFor(id)) && voiceState().status === 'ready';
+  if (ready()) { touch(); return; }
   // Un démarrage en cours (d'un autre modèle peut-être) se termine d'abord.
   while (starting) await starting.catch(() => {});
-  if (child && running === id && voiceState().status === 'ready') { touch(); return; }
+  if (ready()) { touch(); return; }
   starting = withGpu(`voice:${id}`, () => launch(id)).finally(() => {
     starting = null;
     if (textToRestore) activate(textToRestore).catch(() => {});
@@ -293,28 +306,35 @@ async function deployDirOf(venv) {
 async function launch(id) {
   const runtime = engine();
   const model = voiceModelById(id);
-  const { family, needMiB } = describeVoiceModel(model);
+  const { family, needMiB: fullMiB } = describeVoiceModel(model);
   if (!family) throw failure(409, `Famille inconnue pour ${model.name}`);
+  const compact = compactFor(id);
+  const needMiB = compact?.needMiB ?? fullMiB;
   if (child) await stopVoice();
   patch({ status: 'starting', running: id, since: Date.now(), error: null });
   running = id;
+  runningCompact = Boolean(compact);
   try {
     const gpu = await sampleGpu();
     if (gpu && gpu.freeMiB < needMiB) {
       // Une réponse en cours se termine d'abord, comme pour une image.
       for (let waited = 0; getLive().request && waited < 120_000; waited += 500) await new Promise((resolve) => setTimeout(resolve, 500));
       const active = getState().active;
-      if (active?.status === 'ready' || active?.status === 'loading') textToRestore = active.modelId;
-      await stopEngine();
+      // Le combo garde son modèle de texte : seuls les autres partent (sa place est prévue).
+      if (comboVoice() === id) await Promise.all(loadedModels().filter((other) => !comboMember(other)).map((other) => stopEngine(other)));
+      else {
+        if (active?.status === 'ready' || active?.status === 'loading') textToRestore = active.modelId;
+        await stopEngine();
+      }
       const after = await sampleGpu();
       if (after && after.freeMiB < needMiB) throw failure(409, `La carte graphique n’a pas la place pour ${model.name} (${Math.round(after.freeMiB / 1024)} Go libres, ~${Math.round(needMiB / 1024)} Go nécessaires)`);
     }
     await mkdir(DIRS.logs, { recursive: true });
     // Les parts de carte des étages se calculent sur sa taille.
     const totalMiB = gpu?.totalMiB ?? getState().hardware?.primary?.vramMiB ?? 24576;
-    const share = family.stageMiB(model).map((mib) => Math.min(0.9, mib / totalMiB).toFixed(3));
+    const share = (compact?.stageMiB ?? family.stageMiB(model)).map((mib) => Math.min(0.9, mib / totalMiB).toFixed(3));
     const config = path.join(runtime.dir, `deploy-${id}.yaml`);
-    await writeFile(config, family.deploy({ share, deployDir: await deployDirOf(runtime.venv) }));
+    await writeFile(config, family.deploy({ share, deployDir: await deployDirOf(runtime.venv), ...(compact?.stage0 ? { stage0: compact.stage0 } : {}) }));
     const log = createWriteStream(path.join(DIRS.logs, 'voice.log'), { flags: 'w' });
     const bin = path.join(runtime.venv, 'bin');
     const args = ['serve', entryOf(id).path, '--omni', '--deploy-config', config, '--served-model-name', id, '--host', '127.0.0.1', '--port', String(PORTS.voice)];

@@ -63,7 +63,8 @@ async function poll(peer) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
     const models = (body.data ?? []).filter((m) => m?.id && (m.owned_by ?? 'harn') === 'harn' && !String(m.id).includes(SEPARATOR));
-    seen.set(peer.id, { ok: true, error: null, models, voice: await voiceOf(peer), checkedAt: Date.now() });
+    const [voice, combo] = await Promise.all([voiceOf(peer), comboOf(peer)]);
+    seen.set(peer.id, { ok: true, error: null, models, voice, combo, checkedAt: Date.now() });
   } catch (error) {
     const message = error.name === 'TimeoutError' ? 'ne répond pas (machine éteinte, Harn arrêté ou réseau local fermé ?)' : error.cause?.code === 'ECONNREFUSED' ? 'connexion refusée (réseau local fermé sur l’autre machine ?)' : error.message;
     seen.set(peer.id, { ok: false, error: message, models: [], checkedAt: Date.now() });
@@ -86,7 +87,21 @@ async function voiceOf(peer) {
   } catch { return null; }
 }
 
-export const refreshPeers = () => Promise.all(peers.map(poll)).then((all) => { showVoice(); return all; });
+// Son combo (combo.mjs), s'il en a un. Un Harn d'avant les combos répond 404 : aucun.
+async function comboOf(peer) {
+  try {
+    const response = await fetch(`${peer.url}/combos`, { headers: headersOf(peer), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    return response.ok ? (await response.json())?.combo ?? null : null;
+  } catch { return null; }
+}
+
+export const refreshPeers = () => Promise.all(peers.map(poll)).then((all) => { showVoice(); showCombos(); return all; });
+
+// Pour la vue Modèles : les combos des autres machines.
+function showCombos() {
+  const next = peers.filter((p) => seen.get(p.id)?.ok && seen.get(p.id).combo).map((p) => ({ peer: p.name, peerId: p.id, combo: seen.get(p.id).combo }));
+  if (JSON.stringify(getState().comboRemote ?? []) !== JSON.stringify(next)) update((s) => { s.comboRemote = next; });
+}
 
 // Pour la vue Voix et la fiche d'agent : les modèles de voix que prêteraient les autres machines.
 function showVoice() {
@@ -167,6 +182,12 @@ export function peersWithVoice() {
 // La première qui a ce modèle de voix (n'importe lequel sans modelId).
 export function peerWithVoice(modelId = null) {
   return peersWithVoice().find((route) => !modelId || route.voice.models.some((m) => m.id === modelId)) ?? null;
+}
+
+// Une machine par son identifiant (« pc2 »), pour lui parler directement.
+export function peerById(id) {
+  const peer = peers.find((p) => p.id === id);
+  return peer ? { peer: { id: peer.id, name: peer.name, url: peer.url }, headers: headersOf(peer) } : null;
 }
 
 // « modele@pc2 » → la machine et le nom du modèle chez elle ; null pour un modèle d'ici.

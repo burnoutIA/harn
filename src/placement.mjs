@@ -1,4 +1,5 @@
 import { modelById, ownLauncher, totalBytes } from './catalog.mjs';
+import { comboMember, comboRefusal } from './combo-state.mjs';
 import { layersOf, loadedModels, stopEngine } from './engine.mjs';
 import { busyWith } from './gpu-queue.mjs';
 import { inUse, lastUseOf } from './idle.mjs';
@@ -12,7 +13,8 @@ import { HEADROOM_MIN_MIB } from './tuner.mjs';
 // ce qui reste de libre. S'il ne tient pas, on décharge le modèle inactif utilisé le moins
 // récemment ; si tous répondent, on attend qu'une réponse finisse. Le contexte reste celui du banc.
 // Les moteurs qui se réservent toute la carte (vLLM, Strata, modèle partagé avec la RAM) ne
-// cohabitent avec personne.
+// cohabitent avec personne. Les modèles d'un combo (combo.mjs) ne sont jamais déchargés pour un
+// autre : la demande qui en aurait besoin est refusée.
 
 const MiB = 2 ** 20;
 // Tampons de calcul de llama.cpp (graphe, sorties) en plus des poids et du cache.
@@ -28,10 +30,15 @@ const kvMiB = (model, tuning) => ((tuning.context ?? 32768) * (model.kvBytesPerT
 export function needMiB(model, tuning = {}) {
   const slots = tuning.slots ?? 1;
   const measured = getState().profiles?.[model.id]?.vram;
-  if (measured?.mib && measured.context === (tuning.context ?? null) && measured.kv === (tuning.kv ?? null)) {
-    return Math.round(measured.mib + (slots - (measured.slots ?? 1)) * kvMiB(model, tuning) * 1.05);
+  // Mesuré avec le même type de KV : la mesure, plus ce que change le cache (autre contexte,
+  // autre nombre de sessions).
+  if (measured?.mib && measured.context && measured.kv === (tuning.kv ?? null)) {
+    const cache = (context, n) => n * kvMiB(model, { ...tuning, context });
+    return Math.round(measured.mib + (cache(tuning.context ?? 32768, slots) - cache(measured.context, measured.slots ?? 1)) * 1.05);
   }
-  return Math.round((totalBytes(model) / MiB + slots * kvMiB(model, tuning) + COMPUTE_MIB) * 1.05);
+  // La vision laissée au processeur (--no-mmproj-offload) ne prend rien sur la carte.
+  const onCard = totalBytes(model) - (tuning.visionOnCpu ? model.mmproj?.bytes ?? 0 : 0);
+  return Math.round((onCard / MiB + slots * kvMiB(model, tuning) + COMPUTE_MIB) * 1.05);
 }
 
 // Un modèle qui travaille : une réponse en cours, ou un banc / un test qui tient la carte pour lui.
@@ -49,12 +56,20 @@ export async function makeRoom(modelId, tuning, { waitMs = WAIT_MS } = {}) {
     if (!others.length) return unloaded;
     // Un moteur exclusif déjà là occupe toute la carte, et un exclusif à charger veut la carte vide.
     const mustGo = others.filter((id) => alone || exclusive(modelById(id) ?? {}, tuningOf(id)));
+    if (mustGo.some(comboMember) && !comboMember(modelId)) throw comboRefusal(`${model.name ?? modelId}, qui veut la carte pour lui seul,`);
     let candidates = mustGo;
     if (!mustGo.length) {
       const free = await freeVram();
       // Carte illisible : on charge quand même, loadWithHeadroom vérifie la marge après coup.
       if (free === null || free - need >= HEADROOM_MIN_MIB) return unloaded;
       candidates = others;
+    }
+    // Le combo garde ses modèles. Un de ses membres qui manque de place (estimation trop basse)
+    // se charge quand même : loadWithHeadroom réduit alors son contexte.
+    candidates = candidates.filter((id) => !comboMember(id));
+    if (!candidates.length && others.some(comboMember)) {
+      if (comboMember(modelId)) return unloaded;
+      throw comboRefusal(`${model.name ?? modelId} (${Math.round(need / 1024)} Go)`);
     }
     const victim = candidates.filter((id) => !working(id)).sort((a, b) => lastUseOf(a) - lastUseOf(b))[0];
     if (victim) {
@@ -78,7 +93,8 @@ const serial = (task) => { const turn = queue.then(task); queue = turn.catch(() 
 // la demande récente en réclame et que la carte en permet (slotsFor).
 export function placeAndLoad(model, tuning) {
   return serial(async () => {
-    const slots = exclusive(model, tuning) ? 1 : await slotsFor(model, tuning);
+    // Un modèle du combo garde une session : sa place est comptée pour une.
+    const slots = exclusive(model, tuning) || comboMember(model.id) ? 1 : await slotsFor(model, tuning);
     const wanted = { ...tuning, ...(slots > 1 ? { slots } : {}) };
     const unloaded = await makeRoom(model.id, wanted);
     if (unloaded.length) bus.emit('toast', `Place faite pour ${model.name ?? model.id} : ${unloaded.join(', ')} déchargé${unloaded.length > 1 ? 's' : ''}`);
@@ -130,7 +146,7 @@ export async function slotsFor(model, tuning) {
   const free = await freeVram();
   if (free === null) return 1;
   const own = getState().engines?.[model.id] ? needMiB(model, { ...tuning, slots: getState().engines[model.id].slots ?? 1 }) : 0;
-  const spare = loadedModels().filter((id) => id !== model.id && !working(id) && !exclusive(modelById(id) ?? {}, tuningOf(id)))
+  const spare = loadedModels().filter((id) => id !== model.id && !working(id) && !comboMember(id) && !exclusive(modelById(id) ?? {}, tuningOf(id)))
     .reduce((sum, id) => sum + needMiB(modelById(id), { ...tuningOf(id), slots: getState().engines[id]?.slots ?? 1 }), 0);
   for (let slots = wanted; slots > 1; slots -= 1) {
     if (free + own + spare - needMiB(model, { ...tuning, slots }) >= HEADROOM_MIN_MIB) return slots;
@@ -157,7 +173,8 @@ export function followDemand(modelId, n, relayed, reload, askedN = null) {
   } else noteDemand(modelId, n);
   const engine = getState().engines?.[modelId];
   const model = modelById(modelId);
-  if (!engine || engine.status !== 'ready' || !model || exclusive(model, tuningOf(modelId))) return null;
+  // Un modèle du combo garde sa session unique : la carte est comptée au plus juste.
+  if (!engine || engine.status !== 'ready' || !model || exclusive(model, tuningOf(modelId)) || comboMember(modelId)) return null;
   if (resizing.has(modelId)) return resizing.get(modelId);
   if (relayed > 0 || wantedSlots(modelId) <= (engine.slots ?? 1)) return null;
   return resize(modelId, async () => {
@@ -222,7 +239,7 @@ export function updateSharing() {
 
 // Décharge le modèle inactif le moins récemment utilisé (autre que keep). Rend son id, ou null.
 export async function evictOne(keep) {
-  const victim = loadedModels().filter((id) => id !== keep && !working(id)).sort((a, b) => lastUseOf(a) - lastUseOf(b))[0];
+  const victim = loadedModels().filter((id) => id !== keep && !working(id) && !comboMember(id)).sort((a, b) => lastUseOf(a) - lastUseOf(b))[0];
   if (!victim) return null;
   await stopEngine(victim);
   console.log(`[harn] ${victim} déchargé : marge trop juste pour ${keep}`);

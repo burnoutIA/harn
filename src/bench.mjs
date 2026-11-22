@@ -2,6 +2,7 @@ import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { activationsSettled } from './activation.mjs';
 import { modelById, ownLauncher } from './catalog.mjs';
+import { comboOf, comboRefusal } from './combo-state.mjs';
 import { describe, startEngine, stopOthers } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
@@ -34,6 +35,8 @@ function roomFor(model, best, extraMiB) {
   return context >= OBJECTIVE.minContext ? context : null;
 }
 export async function tuneModel(modelId, options = {}) {
+  // Le banc veut la carte pour le modèle mesuré seul : pas pendant un combo.
+  if (comboOf()) throw comboRefusal('le banc');
   return withGpu(modelId, async () => {
     const result = await tuneModelInner(modelId, options);
     // La vitesse et le contexte mesurés changent la note globale : le plan est recalculé. Un banc

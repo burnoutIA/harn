@@ -6,7 +6,9 @@ import { MODELS, displayName, modelById, totalBytes, variantOf } from './catalog
 import { globalRating, paramsOf } from './rating.mjs';
 import { IQ_VERSION } from './iq-test.mjs';
 import { reapOrphans, stopEngine } from './engine.mjs';
-import { handleV1, handleV1Upgrade, setActivator, setImages, setVoice } from './gateway.mjs';
+import { comboChoices, comboRequest, resetComboState, stopCombo, watchCombo } from './combo.mjs';
+import { comboMember, comboVoice } from './combo-state.mjs';
+import { handleV1, handleV1Upgrade, setActivator, setCombos, setImages, setVoice } from './gateway.mjs';
 import { addViewer, getLive, live, loadRecent } from './metrics.mjs';
 import { updateSharing } from './placement.mjs';
 import { DIRS, PORTS } from './paths.mjs';
@@ -222,6 +224,9 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/access') return json(res, 200, accessReport(await listKeys()));
   if (req.method === 'GET' && url.pathname === '/api/agents') return json(res, 200, { agents: await listAgents(), remoteModels: remoteModels() });
   if (req.method === 'GET' && url.pathname === '/api/voice') return json(res, 200, voiceReport());
+  if (req.method === 'GET' && url.pathname === '/api/combo') {
+    try { return json(res, 200, { ...await comboRequest('status', { machine: url.searchParams.get('machine') }), ...(url.searchParams.get('machine') ? {} : { choices: comboChoices() }) }); } catch (error) { return json(res, error.status ?? 500, { error: error.message }); }
+  }
   if (req.method === 'GET' && parts[1] === 'approvals' && parts[2]) {
     const entry = approvalOf(parts[2]);
     return entry ? json(res, 200, entry) : json(res, 404, { error: 'Demande inconnue ou expirée (Harn a-t-il redémarré ?)' });
@@ -317,6 +322,13 @@ async function api(req, res, url) {
     return json(res, 404, { error: 'inconnu' });
   }
 
+  // Les combos (combo.mjs) : plan, start, stop, ici ou sur une machine reliée.
+  if (parts[1] === 'combo' && ['plan', 'start', 'stop'].includes(parts[2])) {
+    if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
+    const body = await new Response(req).json().catch(() => ({}));
+    try { return json(res, 200, await comboRequest(parts[2], body)); } catch (error) { return json(res, error.status ?? 500, { error: error.message, ...(error.plan ? { plan: error.plan } : {}) }); }
+  }
+
   // La voix : modèles, voix clonées et choix des agents, depuis la fenêtre seulement.
   if (parts[1] === 'voice') {
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
@@ -339,7 +351,8 @@ async function api(req, res, url) {
       if (parts[2] === 'samples' && !parts[3]) return json(res, 200, await addVoiceSample(body));
       if (parts[2] === 'samples' && parts[4] === 'delete') { await deleteVoiceSample(parts[3]); return json(res, 200, voiceReport()); }
       if (parts[2] === 'select') { selectVoice(body); return json(res, 200, voiceReport()); }
-      if (parts[2] === 'stop') { await stopVoice(); return json(res, 200, voiceReport()); }
+      // Arrêter la voix du combo, c'est défaire le combo (le texte reste chargé).
+      if (parts[2] === 'stop') { if (comboVoice()) await stopCombo({ unload: false }); await stopVoice(); return json(res, 200, voiceReport()); }
       // Écouter la voix choisie (ou celle donnée) avant de la confier aux agents.
       if (parts[2] === 'preview') {
         const audio = await speak(body.text ?? 'Bonjour, voici ma voix. Je lirai ainsi les réponses de vos agents.', { ...(body.model ? { model: body.model } : {}), ...(body.voice ? { voice: body.voice } : {}), ...(body.language ? { language: body.language } : {}) });
@@ -522,12 +535,16 @@ async function api(req, res, url) {
   }
   // Décharger un seul modèle : les autres restent chargés.
   if (parts[1] === 'models' && parts[2] && parts[3] === 'unload') {
+    // Un modèle du combo qu'on décharge défait le combo : l'autre reste, sans réserve.
+    if (comboMember(parts[2])) await stopCombo({ unload: false });
     await stopEngine(parts[2]);
     return json(res, 200, { ok: true });
   }
   if (url.pathname === '/api/engine/stop') {
     // Libérer la carte : le moteur s'arrête et Harn s'en souvient (pas de rechargement au
-    // prochain démarrage). Une requête d'une application le rechargera quand même.
+    // prochain démarrage). Une requête d'une application le rechargera quand même. Le combo
+    // part avec.
+    await stopCombo();
     await stopEngine();
     update((s) => { if (s.active) s.active.unloadedByUser = true; });
     return json(res, 200, { ok: true });
@@ -626,6 +643,7 @@ async function main() {
   await internalKey();
   setActivator(activate, busyWith, gpuFree);
   setVoice({ speak, start: startVoice, offer: voiceOffer, stream: openStream });
+  setCombos(comboRequest);
   // Les images des clients OpenAI (/v1/images/generations) : faites dans un dossier à part, renvoyées
   // en base64, puis effacées (le client les garde, Harn ne les accumule pas).
   setImages({
@@ -655,10 +673,12 @@ async function main() {
     openWindow();
     await reapOrphans();
     resetVoiceState();
+    resetComboState();
     watchForUpdates();
     watchHub();
     watchImageHub();
     watchIdle();
+    watchCombo();
     const state = getState();
     // Le réseau local se rouvre au démarrage s'il l'était, et seulement si une clé le garde.
     startPeers().catch((error) => console.error(`[harn] autres machines : ${error.message}`));

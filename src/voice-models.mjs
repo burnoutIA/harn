@@ -93,19 +93,24 @@ ${voxtralCommon}
     // d'une H100.
     stageMiB: ({ size }) => (size === '0b6' ? [3500, 1500] : [5000, 1500]),
     needMiB: ({ size }) => (size === '0b6' ? 5500 : 7200),
+    // Dans un combo (combo.mjs), le 1.7B se fait plus petit : talker en fp8 (poids de 4,1 à
+    // 2,8 Gio, l'encodeur du son reste en bf16) et 2048 jetons par requête (~2 min 30 de parole).
+    // Mesuré sur une 3090 (2026-11-22) : 4,0 + 1,3 Go, même vitesse, pas de différence à l'oreille.
+    // Le 0.6B n'y gagnerait presque rien.
+    compact: ({ size }) => (size === '0b6' ? null : { stageMiB: [3440, 1500], needMiB: 5500, stage0: { quantization: 'fp8', max_model_len: 2048 } }),
     // tts_model_type du config.json : base (clonage), custom_voice (voix fournies), voice_design
     // (voix décrite par une consigne, que Harn ne sait pas encore demander).
     kind: ({ ttsType }) => (ttsType === 'base' ? 'clone' : ttsType === 'custom_voice' ? 'preset' : null),
     presetVoices: ({ speakers }) => speakers ?? [],
     // Le profil d'origine (vllm_omni/deploy/qwen3_tts.yaml, avec ses réglages ROCm et NPU), ramené
     // à une requête à la fois et à sa part de la carte.
-    deploy: ({ share, deployDir }) => `# Écrit par Harn (src/voice-models.mjs) : Qwen3-TTS à côté du modèle de texte.
+    deploy: ({ share, deployDir, stage0 = {} }) => `# Écrit par Harn (src/voice-models.mjs) : Qwen3-TTS à côté du modèle de texte.
 base_config: ${deployDir}/qwen3_tts.yaml
 stages:
   - stage_id: 0
     max_num_seqs: 1
     gpu_memory_utilization: ${share[0]}
-  - stage_id: 1
+${Object.entries(stage0).map(([key, value]) => `    ${key}: ${value}\n`).join('')}  - stage_id: 1
     max_num_seqs: 1
     gpu_memory_utilization: ${share[1]}
 `,
@@ -157,10 +162,11 @@ export const VOICE_MODELS = [
 ];
 
 // Ce que la famille dit d'un modèle : sa sorte de voix, ses voix, sa place sur la carte.
+// compact : sa forme réduite pour un combo (null si la famille n'en a pas).
 export function describeVoiceModel(model) {
   const family = voiceFamilyById(model.family);
   const kind = family?.kind(model) ?? null;
-  return { family, kind, presets: kind === 'preset' ? family.presetVoices(model) : [], needMiB: family?.needMiB(model) ?? null };
+  return { family, kind, presets: kind === 'preset' ? family.presetVoices(model) : [], needMiB: family?.needMiB(model) ?? null, compact: family?.compact?.(model) ?? null };
 }
 
 // Un dépôt Hugging Face : sa famille et ce qu'il faut savoir pour le servir, d'après config.json.

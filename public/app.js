@@ -1087,6 +1087,70 @@ function renderVoiceModels() {
   paint('voice-sample-langs', report.languages.map(([code, label]) => `<option value="${code}" ${code === 'French' ? 'selected' : ''}>${esc(label)}</option>`).join(''));
 }
 
+// ── Combo ─────────────────────────────────────────────────
+// Le combo d'ici et ceux des autres machines arrivent avec l'état ; les modèles qu'on peut
+// combiner viennent de /api/combo (relu quand les modèles installés changent, et chaque minute
+// pour ceux des autres machines).
+let comboChoicesList = null;
+let comboChoicesKey = null;
+let comboPlanShown = null; // { plan } ou { error }
+let comboBusy = false;
+const comboKey = () => JSON.stringify([Object.keys(state.models ?? {}).filter((id) => state.models[id].installedAt), voiceKey(), Math.floor(Date.now() / 60_000)]);
+async function loadComboChoices() {
+  comboChoicesKey = comboKey();
+  const report = await fetch('/api/combo').then((r) => r.json()).catch(() => null);
+  if (!report?.choices) return;
+  comboChoicesList = report.choices;
+  if (view === 'models') renderCombo();
+}
+const comboGb = (mib) => `${fr(mib / 1024, 1)} Go`;
+const comboK = (tokens) => `${Math.round(tokens / 1024)}k`;
+function comboMembers(models) {
+  return models.map((m) => `${esc(m.name)} (${m.kind === 'voice' ? `voix${m.compact ? ' compacte, fp8' : ''}` : `${comboK(m.context ?? 0)} de contexte${m.benchContext && m.benchContext !== m.context ? ` au lieu de ${comboK(m.benchContext)}` : ''}`}, ${comboGb(m.needMiB ?? 0)})`).join(' + ');
+}
+function comboRow(combo, where, machine) {
+  const label = { starting: 'démarre…', ready: 'en marche', error: 'échec' }[combo.status] ?? combo.status;
+  const b = combo.budget;
+  return `<div class="image-model"><div><h3>Combo ${where}</h3>
+      <p>${comboMembers(combo.models ?? [])}</p>
+      ${b ? `<p class="hint">${comboGb(b.usedMiB)} prévus sur ${comboGb(b.availableMiB)} disponibles (carte de ${comboGb(b.totalMiB)}, bureau et marge déduits) · ${combo.idleMinutes ? `s’arrête après ${combo.idleMinutes} min sans requête` : 'gardé jusqu’à son arrêt'}</p>` : ''}
+      ${combo.error ? `<p class="hint bad">${esc(combo.error)}</p>` : ''}</div>
+    <div class="acts"><span class="live">${label}</span><button class="btn ghost small" data-action="combo-stop" ${machine ? `data-id="${esc(machine)}"` : ''} title="Décharge ses deux modèles">${combo.status === 'error' ? 'Effacer' : 'Arrêter'}</button></div></div>`;
+}
+function comboOptions(choices, selected) {
+  const option = (m) => `<option value="${esc(m.id)}" ${m.id === selected ? 'selected' : ''}>${m.kind === 'voice' ? '🔊 ' : ''}${esc(m.name)}</option>`;
+  return `<option value="">Choisir…</option>${choices.here.length ? `<optgroup label="Ici">${choices.here.map(option).join('')}</optgroup>` : ''}${choices.machines.map((machine) => `<optgroup label="Sur ${esc(machine.name)}">${machine.models.map(option).join('')}</optgroup>`).join('')}`;
+}
+function renderCombo() {
+  if (!comboChoicesList || comboChoicesKey !== comboKey()) loadComboChoices();
+  const remote = state.comboRemote ?? [];
+  const rows = [...(state.combo ? [comboRow(state.combo, 'sur cette machine', null)] : []), ...remote.map((r) => comboRow(r.combo, `sur ${esc(r.peer)}`, r.peerId))];
+  paint('combo-count', rows.length ? `${rows.length} en cours` : 'aucun');
+  paint('combo-current', rows.join('') || '<p class="hint">Aucun combo en cours.</p>');
+  if (!comboChoicesList) return paint('combo-form', '<p class="empty">Lecture…</p>');
+  const value = (id) => document.getElementById(id)?.value ?? '';
+  const min = value('combo-min');
+  const keep = document.getElementById('combo-keep')?.checked ?? false;
+  paint('combo-form', `<form class="voice-pick" data-form="combo">
+      <select id="combo-a" aria-label="Premier modèle">${comboOptions(comboChoicesList, value('combo-a'))}</select>
+      <select id="combo-b" aria-label="Second modèle">${comboOptions(comboChoicesList, value('combo-b'))}</select>
+      <select id="combo-min" aria-label="Contexte minimal du texte">${[['', 'Contexte : le plus grand qui tient'], ['32768', 'Au moins 32k'], ['65536', 'Au moins 64k'], ['98304', 'Au moins 96k']].map(([v, l]) => `<option value="${v}" ${v === min ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <label class="hint"><input type="checkbox" id="combo-keep" ${keep ? 'checked' : ''}> Garder (pas d’arrêt après 15 min)</label>
+      <button class="btn small" type="button" data-action="combo-plan" ${comboBusy ? 'disabled' : ''}>Prévoir</button>
+      <button class="btn small primary" type="submit" ${comboBusy ? 'disabled' : ''}>${comboBusy ? 'Démarrage…' : 'Lancer'}</button>
+    </form>`);
+  const shown = comboPlanShown;
+  paint('combo-plan', !shown ? '' : shown.error ? `<p class="hint bad">${esc(shown.error)}</p>`
+    : shown.plan.ok ? `<p class="hint">Ça tient${shown.machine ? ` sur ${esc(shown.machine)}` : ''} : ${comboMembers(shown.plan.models)}. Il reste ${comboGb(shown.plan.budget.spareMiB)} au-delà de la marge.</p>`
+    : `<p class="hint bad">${esc(shown.plan.problem)}</p>`);
+}
+function comboAsked() {
+  const value = (id) => document.getElementById(id)?.value ?? '';
+  const models = [value('combo-a'), value('combo-b')];
+  if (models.some((m) => !m)) throw new Error('Choisissez deux modèles');
+  return { models, ...(value('combo-min') ? { minContext: Number(value('combo-min')) } : {}), idleMinutes: document.getElementById('combo-keep')?.checked ? 0 : 15 };
+}
+
 // ── Tri des modèles ─────────────────────────────────────────
 // « Récents » : le modèle chargé, puis la dernière utilisation par un client (pi, un agent, une
 // clé ; pas les bancs de Harn). Les autres critères dans les deux sens. Un modèle sans valeur
@@ -1178,10 +1242,23 @@ function renderModels() {
       </div>
       </div>
     </details>
+    <details class="card image-models">
+      <summary><span class="label">Combo</span><span id="combo-count" class="count"></span><span class="chevron" aria-hidden="true"></span></summary>
+      <div class="image-body">
+      <p class="intro">Deux modèles gardés ensemble sur une même carte : un modèle de texte et la voix, ou deux modèles de texte. Harn calcule la place de chacun et le plus grand contexte qui tient, puis les charge. Tant que le combo tient, une demande qui obligerait à les décharger est refusée. Les modèles d’une autre machine reliée (« · pc2 ») font un combo sur sa carte à elle.</p>
+      <div id="combo-current" class="image-list"></div>
+      <div class="image-add">
+        <div><h3>Lancer un combo</h3><p>« Prévoir » fait le calcul sans rien charger. Le réglage du modèle de texte reste celui du banc, seul son contexte change, le temps du combo. Sans requête pendant un quart d’heure, le combo s’arrête et rend la carte, sauf s’il est gardé.</p></div>
+        <div id="combo-form"></div>
+        <div id="combo-plan"></div>
+      </div>
+      </div>
+    </details>
     <div id="models-body"></div>
   </div>`);
   renderImageModels();
   renderVoiceModels();
+  renderCombo();
   paint('gpu-banner', gpuBanner());
   const byQuality = (a, b) => (b.quality ?? 0) - (a.quality ?? 0);
   const mine = sortModels(catalog.filter((m) => state.models[m.id]?.installedAt || state.active?.modelId === m.id), byQuality);
@@ -1747,6 +1824,20 @@ app.addEventListener('change', async (event) => {
 });
 
 app.addEventListener('submit', async (event) => {
+  const comboForm = event.target.closest('[data-form="combo"]');
+  if (comboForm) {
+    event.preventDefault();
+    try {
+      const asked = comboAsked();
+      comboBusy = true;
+      comboPlanShown = null;
+      renderCombo();
+      toast('Le combo démarre : une à trois minutes (la voix est la plus longue)');
+      await post('/api/combo/start', asked);
+      toast('Combo prêt');
+    } catch (error) { comboPlanShown = { error: error.message }; toast(error.message); } finally { comboBusy = false; renderCombo(); }
+    return;
+  }
   const keyForm = event.target.closest('[data-form="key"]');
   if (keyForm) {
     event.preventDefault();
@@ -1917,6 +2008,14 @@ app.addEventListener('click', async (event) => {
       if (!confirm('Supprimer ce modèle de voix et ses fichiers ?')) return;
       voiceCatalog = await post(`/api/voice/models/${id}/delete`); renderVoiceModels(); toast('Modèle de voix supprimé');
     }
+    if (action === 'combo-plan') {
+      try {
+        const answer = await post('/api/combo/plan', comboAsked());
+        comboPlanShown = { plan: answer.plan, machine: answer.machine ?? null };
+      } catch (error) { comboPlanShown = { error: error.message }; }
+      renderCombo();
+    }
+    if (action === 'combo-stop') { await post('/api/combo/stop', id ? { machine: id } : {}); toast('Combo arrêté'); }
     if (action === 'voice-start') { toast('Le modèle de voix démarre : une à deux minutes'); voiceCatalog = await post(`/api/voice/models/${id}/start`); renderVoiceModels(); toast('Voix en marche'); }
     if (action === 'voice-sample-delete') {
       if (!confirm('Supprimer cette voix clonée ?')) return;

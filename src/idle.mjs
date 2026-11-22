@@ -1,3 +1,4 @@
+import { comboMember } from './combo-state.mjs';
 import { setEngine, stopEngine } from './engine.mjs';
 import { busyWith } from './gpu-queue.mjs';
 import { bus, getState } from './state.mjs';
@@ -35,7 +36,8 @@ export async function unloadIfIdle(now = Date.now()) {
   if (busyWith()) { for (const id of Object.keys(getState().engines ?? {})) lastUse.set(id, Math.max(lastUse.get(id) ?? 0, now)); return false; }
   let unloaded = false;
   for (const [modelId, engine] of Object.entries(getState().engines ?? {})) {
-    if (engine.status !== 'ready') continue;
+    // Un modèle du combo part avec le combo entier (combo.mjs, comboIdleCheck).
+    if (engine.status !== 'ready' || comboMember(modelId)) continue;
     if (inUse(modelId)) { lastUse.set(modelId, Math.max(lastUse.get(modelId) ?? 0, now)); continue; }
     if (now - lastUseOf(modelId) < IDLE_MS) continue;
     // « stopping » avant l'arrêt : une requête qui arrive pendant qu'il s'éteint recharge le
