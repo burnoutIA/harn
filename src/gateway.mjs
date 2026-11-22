@@ -67,7 +67,9 @@ export function shapeRequest(body, model) {
     // (Olala) coupe la réflexion à la place d'enable_thinking, et sans xhigh le plus haut est high.
     const levels = model.reasoningLevels ?? [];
     if (asked === 'none' || asked === 'off' || asked === 'disabled') {
+      // Inkling 2 : « none » dans son échelle d'effort, enable_thinking ignoré par son gabarit.
       if (levels.includes('disabled')) kwargs.reasoning_effort = 'disabled';
+      else if (levels.includes('none')) kwargs.reasoning_effort = 'none';
       else kwargs.enable_thinking = false;
     } else if (!kwargs.reasoning_effort) {
       const effort = EFFORT[asked] ?? 'medium';
@@ -281,7 +283,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (getState().active?.modelId !== modelId) setEngine(modelId, { lastUse: Date.now() }, { focus: true });
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
-  const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : 'llama';
+  const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine) ? model.engine : 'llama';
   const shaped = generative ? shapeRequest(body, model) : null;
   return relay(req, res, {
     target: `${active.endpoint}${url.pathname}${url.search}`,

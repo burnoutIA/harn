@@ -63,10 +63,12 @@ export function describe(tuning) {
   if (tuning.strataArm) return tuning.strataArm;
   if (tuning.hyperqwenArm) return tuning.hyperqwenArm;
   if (tuning.challengeArm) return tuning.challengeArm;
+  if (tuning.ink2Arm) return tuning.ink2Arm;
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'mtp' && tuning.spec.ngram) parts.push('n-gramme');
   if (tuning.spec?.type === 'dflash') parts.push(`DFlash2 n${tuning.spec.n}`);
+  if (tuning.spec?.type === 'dspark') parts.push(`DSpark n${tuning.spec.n}`);
   if (tuning.spec?.type === 'mtp-adaptive') parts.push(`MTP adaptatif ≤${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''} · n-gramme`);
   if (tuning.spec?.type === 'ngram') parts.push('n-gramme');
   if (tuning.fa === 'off') parts.push('sans FA');
@@ -132,10 +134,15 @@ export function llamaArgs(model, files, tuning, hardware) {
   } else if (spec.type === 'dflash' && files.dflash) {
     // Le brouillon entier sur la carte (sinon le moteur peut le laisser au processeur).
     args.push('--spec-type', 'draft-dflash', '--spec-draft-model', files.dflash, '--spec-draft-n-max', String(spec.n), '-ngld', '999');
+  } else if (spec.type === 'dspark' && files.dspark) {
+    // DSpark (Inkling 2, PR #32218) : brouillon récurrent à tête de Markov, entier sur la carte.
+    args.push('--spec-type', 'draft-dspark', '--spec-draft-model', files.dspark, '--spec-draft-n-max', String(spec.n), '-ngld', '999');
   } else if (model.mtp) {
     // Sans spéculation demandée, on le dit : certains builds activent la tête MTP d'office.
     args.push('--spec-type', 'none');
   }
+  // LoRA de texte (custom-models.mjs, buildLoraEntry) : appliqué à pleine échelle sur la base.
+  if (files.lora) args.push('--lora', files.lora);
   if (files.mmproj) {
     args.push('--mmproj', files.mmproj);
     if (tuning.visionOnCpu || !gpu) args.push('--no-mmproj-offload');
@@ -449,6 +456,8 @@ export function modelFiles(modelId) {
     model: where(model.files[0].name),
     mmproj: model.mmproj ? where(model.mmproj.name) : null,
     mtpDraft: model.mtpDraft ? where(model.mtpDraft.name) : null,
+    lora: model.lora ? where(model.lora.name) : null,
     dflash: model.dflash ? path.join(dir, model.dflash.name) : null,
+    dspark: model.dspark ? where(model.dspark.name) : null,
   };
 }

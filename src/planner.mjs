@@ -185,6 +185,16 @@ export function assess(model, hardware) {
     if (reasons.length) return { fit: 'no', reasons };
     return finalize({ fit: 'full', reasons, context: 131072, kv: 'fp8', tps: model.evidence.tps128k });
   }
+  if (model.engine === 'ink2') {
+    // Le moteur sur mesure d'Inkling est compilé pour RDNA4 (gfx1200/gfx1201), sous Linux : ses noyaux
+    // supposent le wave32 et la mémoire partagée de 64 Ko de ces cartes. 131k tiennent dans 21,4 Gio.
+    if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['Le moteur sur mesure d’Inkling n’est installé par Harn que sous Linux'] };
+    if (gpu?.vendor !== 'amd' || !/RX 9\d{3}|R9700|R9600/.test(gpu.name ?? '')) reasons.push('Ce moteur sur mesure demande une Radeon RDNA4 (RX 9000, R9700)');
+    if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
+    if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
+    if (reasons.length) return { fit: 'no', reasons };
+    return finalize({ fit: 'full', reasons, context: contextFor(model, hardware.vramGiB), kv: 'f16', tps: model.evidence.tps4k });
+  }
   if (model.engine === 'gemma-challenge') {
     // Le vLLM nightly de la soumission (CUDA 12.9, noyaux Triton), mesuré sur une 3090 seulement,
     // sous Linux. La pile telle quelle (4k) n'atteint jamais l'objectif : un banc, pas un assistant.
@@ -220,7 +230,7 @@ export function assess(model, hardware) {
 // de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
 // peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
 // Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
-const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
+const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
 
 export function measuredAt100k(bench) {
   const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);

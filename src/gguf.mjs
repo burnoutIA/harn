@@ -119,9 +119,13 @@ export function profileFromMetadata({ meta }) {
   // Fenêtre glissante donnée couche par couche (Gemma 3/4) : ces couches ne gardent que les
   // derniers milliers de tokens, un coût fixe ; seules les couches d'attention pleine suivent le contexte.
   const swa = get('attention.sliding_window') ? get('attention.sliding_window_pattern') : null;
+  // Couches en boucle (Inkling 2 : les couches 6 à 17 passent trois fois, poids partagés) : chaque
+  // passage garde son propre cache, une couche de la boucle compte autant de fois qu'elle est jouée.
+  const loopCount = get('loop.count') ?? 1;
+  const passes = (i) => (loopCount > 1 && i >= (get('loop.start') ?? 0) && i < (get('loop.end') ?? 0) ? loopCount : 1);
   let kvSum;
-  if (Array.isArray(swa)) kvSum = swa.reduce((sum, sliding, i) => sum + (sliding ? 0 : (Array.isArray(kvHeads) ? kvHeads[i] : kvHeads ?? 8) || 0), 0);
-  else if (Array.isArray(kvHeads)) kvSum = kvHeads.reduce((sum, n) => sum + (n || 0), 0);
+  if (Array.isArray(swa)) kvSum = swa.reduce((sum, sliding, i) => sum + (sliding ? 0 : ((Array.isArray(kvHeads) ? kvHeads[i] : kvHeads ?? 8) || 0) * passes(i)), 0);
+  else if (Array.isArray(kvHeads)) kvSum = kvHeads.reduce((sum, n, i) => sum + (n || 0) * passes(i), 0);
   else {
     const interval = get('full_attention_interval');
     const attnLayers = interval ? Math.ceil(layers / interval) : layers;

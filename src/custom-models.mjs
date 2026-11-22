@@ -51,11 +51,21 @@ export async function inspectRepo(input) {
     fetch(`${HF}/api/models/${repo}/tree/main?recursive=1`, { headers: { 'User-Agent': 'harn' } }).then((r) => (r.ok ? r.json() : [])),
     fetch(`${HF}/${repo}/raw/main/README.md`, { headers: { 'User-Agent': 'harn' } }).then((r) => (r.ok ? r.text() : '')),
   ]);
-  const files = tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path));
+  // Un dossier « Mainline_Support » (Unsloth, Inkling 2) range les mêmes poids dans la disposition
+  // que lit llama.cpp officiel, sous l'extension .gguf_file : les fichiers de la racine, eux, ne se
+  // chargent que dans le build d'Unsloth. Harn sert des moteurs issus de llama.cpp : ce sont ceux-là
+  // qu'il prend, à la place des fichiers de la racine du même nom.
+  const MAINLINE = /(^|\/)mainline[^/]*\/[^/]+\.gguf_file$/i;
+  const mainline = tree.filter((f) => f.type === 'file' && MAINLINE.test(f.path));
+  const replaced = new Set(mainline.map((f) => path.basename(f.path).replace(/\.gguf_file$/i, '.gguf').toLowerCase()));
+  const files = [...tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path) && !(f.path === path.basename(f.path) && replaced.has(f.path.toLowerCase()))), ...mainline];
   const mmproj = files.filter((f) => /mmproj/i.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
   // La tête MTP livrée dans un fichier à part (« …-MTP-draft.gguf ») : les poids ne la contiennent
   // pas, le moteur la charge comme brouillon de spéculation, quelle que soit la quantification.
   const drafts = files.filter((f) => MTP_DRAFT.test(f.path)).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
+  // Le brouillon DSpark (Inkling 2 : « dspark-Inkling-2-Mini-Q8_0.gguf », 0,4 Go) : essayé au banc
+  // (--spec-type draft-dspark), sur un moteur qui le connaît (PR #32218 de llama.cpp).
+  const sparks = files.filter((f) => /^dspark[-_]/i.test(path.basename(f.path))).map((f) => ({ name: f.path, bytes: f.size, sha256: f.lfs?.oid ?? null }));
   const groups = new Map();
   // Les têtes MTP et brouillons de spéculation sont des fichiers annexes, pas des quantifications.
   for (const file of files.filter((f) => !/mmproj|imatrix/i.test(f.path) && !MTP_DRAFT.test(f.path) && !/(^|\/)(mtp|draft|dflash|dspark|eagle\d*)[-_/]/i.test(f.path))) {
@@ -113,6 +123,7 @@ export async function inspectRepo(input) {
     mmproj,
     // Plusieurs précisions de la même tête : Q8_0 suffit à un brouillon, deux fois moins lourde que BF16.
     mtpDraft: drafts.find((d) => /Q8_0/i.test(d.name)) ?? drafts[0] ?? null,
+    dspark: sparks.find((d) => /Q8_0/i.test(d.name)) ?? sparks.sort((a, b) => a.bytes - b.bytes)[0] ?? null,
     readmeHints: sampling,
   };
 }
@@ -137,10 +148,19 @@ export function cardFacts(card) {
   const maxContext = Number.isInteger(card.maxContext) && card.maxContext >= 2048 && card.maxContext <= 1 << 21 ? card.maxContext : null;
   const levels = Array.isArray(card.reasoningLevels) ? card.reasoningLevels.map(String).filter((l) => REASONING_LEVELS.includes(l)) : [];
   const notes = Array.isArray(card.notes) ? card.notes.map((n) => String(n).slice(0, 300)).filter(Boolean).slice(0, 8) : [];
-  return { maxContext, reasoningLevels: levels.length ? levels : null, notes: notes.length ? notes : null };
+  // requiredPr : la ou les PR sans lesquelles la fiche dit que le modèle répond faux ou perd un
+  // levier, même si la version officielle connaît déjà l'architecture (Inkling 2 : #32704, perplexité
+  // 130 au lieu de 7,65 ; puis DSpark #32218 et unslothai/llama.cpp#385). Un numéro est une PR de
+  // llama.cpp ; « propriétaire/dépôt#n » celle d'un fork. Toujours une liste (ou null).
+  const prRef = (ref) => (Number.isInteger(ref) && ref > 0 ? ref : typeof ref === 'string' && /^([\w.-]+\/[\w.-]+)?#\d+$/.test(ref.trim()) ? ref.trim() : null);
+  const refs = (Array.isArray(card.requiredPr) ? card.requiredPr : card.requiredPr != null ? [card.requiredPr] : []).map(prRef);
+  const requiredPr = refs.length && refs.length <= 6 && refs.every(Boolean) ? [...new Set(refs)] : null;
+  return { maxContext, reasoningLevels: levels.length ? levels : null, notes: notes.length ? notes : null, requiredPr };
 }
 
-export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, sampling = null, name = null, tagline = null, strata = false, card = null }) {
+// engineOnly : le seul moteur qui sert ce modèle (fiche de engines.mjs), quand les autres le chargent
+// mais répondent faux. Le banc ne lui oppose aucun autre moteur.
+export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = null, dspark = null, sampling = null, name = null, tagline = null, strata = false, card = null, engineOnly = null }) {
   const facts = cardFacts(card);
   const id = `${repo.split('/')[1]}-${quant.quant}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const bytes = quant.bytes;
@@ -157,6 +177,7 @@ export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = nul
     files: quant.files,
     mmproj: mmproj ? { repo, ...mmproj } : undefined,
     mtpDraft: mtpDraft ? { repo, ...mtpDraft } : undefined,
+    dspark: dspark ? { repo, ...dspark } : undefined,
     kvBytesPerToken: profile.kvBytesPerToken,
     needs: { vramGiB: 0, ramGiB: Math.ceil(weightsGiB / 2) + 8 },
     fullGpuVramGiB: +(weightsGiB + 3.8).toFixed(1),
@@ -171,6 +192,7 @@ export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = nul
     cardNotes: facts?.notes ?? undefined,
     evidence: null,
     profile: facts?.maxContext ? { ...profile, maxContext: facts.maxContext } : profile,
+    engineOnly: engineOnly ?? undefined,
   };
   if (!strata) return entry;
   // Sous Strata : sa propre tête MTP et pas de vision pour l'instant ; les experts (les deux tiers
@@ -191,6 +213,73 @@ export function buildEntry({ repo, quant, profile, mmproj = null, mtpDraft = nul
     contextByVram: [[11.5, 65536], [20, 131072]],
     reasoningLevels: ['low', 'medium', 'high'],
   };
+}
+
+// ── LoRA de texte ─────────────────────────────────────────
+// Un adaptateur GGUF (general.type = adapter, adapter.type = lora) chargé par llama.cpp au-dessus
+// d'un modèle déjà installé (--lora) : un profil à part, qui reprend les fichiers de sa base.
+const ADAPTER_MAX_BYTES = 8 * 1024 ** 3;
+async function adapterFiles(repo) {
+  const tree = await fetch(`${HF}/api/models/${repo}/tree/main?recursive=1`, { headers: { 'User-Agent': 'harn' } }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  const found = [];
+  for (const file of tree.filter((f) => f.type === 'file' && /\.gguf$/i.test(f.path) && f.size <= ADAPTER_MAX_BYTES && !/mmproj/i.test(f.path))) {
+    const { meta } = await readGgufMetadata(`${HF}/${repo}/resolve/main/${encodeURIComponent(file.path).replace(/%2F/g, '/')}`).catch(() => ({ meta: {} }));
+    if (meta['general.type'] !== 'adapter' || meta['adapter.type'] !== 'lora') continue;
+    found.push({ name: file.path, bytes: file.size, sha256: file.lfs?.oid ?? null, arch: meta['general.architecture'] ?? null, alpha: meta['adapter.lora.alpha'] ?? null, baseName: meta['general.base_model.0.name'] ?? null });
+  }
+  return found;
+}
+
+// baseArch : l'architecture du modèle installé qui recevra l'adaptateur (lue dans son GGUF).
+export async function inspectLora(input, { baseArch = null } = {}) {
+  const requested = parseRepo(input);
+  let repo = requested;
+  let found = await adapterFiles(repo);
+  // Un LoRA PEFT (adapter_model.safetensors) ne se charge pas tel quel dans llama.cpp : sa
+  // conversion en GGUF est d'habitude publiée à côté, sous « …-GGUF ».
+  for (const candidate of [`${requested}-GGUF`, `${requested}-gguf`]) {
+    if (found.length) break;
+    found = await adapterFiles(candidate);
+    if (found.length) repo = candidate;
+  }
+  if (!found.length) throw new Error(`Aucun LoRA au format GGUF dans ${requested}${requested === repo ? ` (ni dans ${requested}-GGUF)` : ''} : llama.cpp ne charge que des adaptateurs GGUF (convert_lora_to_gguf.py convertit un LoRA PEFT).`);
+  const fitting = found.filter((f) => !baseArch || !f.arch || f.arch === baseArch);
+  if (!fitting.length) throw new Error(`Ce LoRA vise l’architecture « ${found[0].arch} », le modèle de base choisi est « ${baseArch} » : il ne s’y applique pas.`);
+  // F16 (ou BF16) d'abord : quelques centaines de Mo, et au plus près des poids entraînés.
+  const lora = fitting.find((f) => /(^|[-_.])b?f16([-_.]|$)/i.test(f.name)) ?? fitting[0];
+  return { repo, requested, lora, alternatives: found.map((f) => f.name) };
+}
+
+export const loraModelId = (baseId, loraRepo) => `${baseId}-lora-${loraRepo.split('/')[1].toLowerCase().replace(/-gguf$/, '')}`.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+// reasoning : false pour un adaptateur entraîné sans réflexion (le moteur la coupe, pi ne la propose plus).
+export function buildLoraEntry({ base, loraRepo, lora, name = null, tagline = null, sampling = null, reasoning = null, card = null }) {
+  const facts = cardFacts(card);
+  const { name: file, bytes, sha256 } = lora;
+  return {
+    ...structuredClone(base),
+    id: loraModelId(base.id, loraRepo),
+    custom: true,
+    addedAt: new Date().toISOString(),
+    name: name ?? `${base.name} + ${loraRepo.split('/')[1].replace(/-GGUF$/i, '')}`,
+    variant: `${base.variant} · LoRA`,
+    tagline: tagline ?? `${base.name} avec le LoRA huggingface.co/${loraRepo}.`,
+    lora: { repo: loraRepo, name: file, bytes, sha256 },
+    loraOf: base.id,
+    quality: null,
+    evidence: null,
+    sampling: normalizeSampling({ ...base.sampling, ...(sampling ?? {}) }),
+    reasoning: reasoning ?? base.reasoning,
+    reasoningLevels: facts?.reasoningLevels ?? base.reasoningLevels,
+    cardNotes: facts?.notes ?? undefined,
+  };
+}
+
+export function registerLoraModel(options) {
+  const entry = buildLoraEntry(options);
+  const index = MODELS.findIndex((m) => m.id === entry.id);
+  if (index >= 0) MODELS[index] = entry; else MODELS.push(entry);
+  return saveCustomModels().then(() => entry);
 }
 
 export function registerModel(options) {

@@ -272,6 +272,39 @@ export const MODELS = [
     evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 173, tps128k: 139, note: 'vllm-radiance b73bf3e, DFlash2 K7, KV fp8, vision, 128k ; ~97k de prompt : 139 tok/s ; intelligence 100' },
   },
   {
+    // Inkling 2 Mini (Thinking Machines, Apache 2.0) servi par notre moteur sur mesure : strata-ink2
+    // porté en HIP (burnoutIA/moteurs, installInk2), sur le checkpoint officiel NVFP4 + MXFP8. Deux
+    // fois plus rapide que llama.cpp sur une R9700 (67 contre 33 tok/s sans spéculation) et validé
+    // contre lui : les sorties gloutonnes ne divergent que sur des quasi-égalités. Pas de vision.
+    // Les empreintes : celles de Hugging Face (LFS), et celle du gabarit relevée sur le commit
+    // ed40e7d du dépôt (un fichier hors LFS, dont Hugging Face ne publie pas l'empreinte).
+    id: 'inkling-2-mini-ink2',
+    name: 'Inkling 2 Mini',
+    variant: 'NVFP4 · moteur sur mesure',
+    tagline: 'Le MoE en boucle de Thinking Machines, servi par le moteur sur mesure de Harn sur Radeon RDNA4 : 131k de contexte, ~67 tok/s sur une R9700, deux fois llama.cpp.',
+    engine: 'ink2',
+    repo: 'thinkingmachines/Inkling-2-Mini',
+    files: [
+      { name: 'model-00001-of-00001.safetensors', bytes: 19_526_019_168, sha256: '65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1' },
+      { name: 'mtp.safetensors', bytes: 635_801_416, sha256: '7c3b651317f01f73bcf4e1dceba66ef8b7e1a1eac6bc171e882e690a4b10a1d2' },
+      { name: 'tokenizer.json', bytes: 26_178_678, sha256: '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6' },
+      { name: 'chat_template.jinja', bytes: 6868, sha256: '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc' },
+    ],
+    // 131k : 21,4 Gio sur la carte (poids 16,7, KV f16 des 8 passages en attention globale).
+    needs: { vramGiB: 24, ramGiB: 32 },
+    contextByVram: [[24, 131072]],
+    // Banc d'intelligence Harn du même modèle sous llama.cpp : 115 (UD-Q4_K_XL) à 123 (UD-Q8_K_XL).
+    quality: 115,
+    paramsB: 26,
+    reasoning: true,
+    vision: false,
+    moe: null,
+    // generation_config.json : température 1, rien d'autre ; l'effort est dans le prompt.
+    sampling: { temperature: 1, top_p: 1, top_k: 0, min_p: 0 },
+    reasoningLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 67, note: 'strata-ink2 HIP bf6086a, KV f16, 131k : 68-70 tok/s en contexte court, 64,8 après 7k de prompt (llama.cpp : 33, et 39,5 avec DSpark)' },
+  },
+  {
     // La pile gagnante du Fast Gemma Challenge (gemma-slayer, installGemmaChallenge), servie telle
     // quelle pour comparer la carte à l'A10G du challenge. Taillée pour sa métrique : 5 couches
     // retirées, lm_head réduit à 12k tokens choisis sur des prompts anglais, fenêtre glissante 188.
@@ -387,9 +420,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
-// Strata, HyperQwen, Radiance et la pile du Gemma Challenge se lancent par leurs propres scripts, avec leurs
-// propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
-export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine);
+// Strata, HyperQwen, Radiance, la pile du Gemma Challenge et les moteurs sur mesure (ink2) se lancent par leurs
+// propres scripts, avec leurs propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
+export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine);
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

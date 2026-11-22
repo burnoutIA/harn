@@ -7,16 +7,17 @@ import { requestApproval } from './approvals.mjs';
 import { SANDBOX_INSTALL, sandboxAvailable } from './sandbox.mjs';
 import { tuneModel } from './bench.mjs';
 import { displayName, modelById, MODELS, ownLauncher } from './catalog.mjs';
-import { buildEntry, inspectRepo, registerModel, unregisterModel } from './custom-models.mjs';
+import { buildEntry, cardFacts, inspectLora, inspectRepo, loraModelId, registerLoraModel, registerModel, unregisterModel } from './custom-models.mjs';
 import { download } from './download.mjs';
 import { stopEngine } from './engine.mjs';
 import { CHALLENGE_STACK_DIRS, strataTakes } from './runtimes.mjs';
-import { addEngine, archMissing, buildable, dropUnusedEngines, enginesFor, engineSheet, ensureEngine, findEngine } from './engines.mjs';
+import { addEngine, archMissing, buildable, dropUnusedEngines, enginesFor, engineSheet, ensureEngine, findEngine, requiredPrsEngine } from './engines.mjs';
 import { busyWith, withGpu } from './gpu-queue.mjs';
 import { runtimeKind } from './loading.mjs';
 import { refreshHardware } from './machine-state.mjs';
 import { installModelFiles } from './model-files.mjs';
 import { DIRS } from './paths.mjs';
+import { readGgufFile } from './gguf.mjs';
 import { configurePi } from './pi.mjs';
 import { assess, makePlan, OBJECTIVE } from './planner.mjs';
 import { iqScores } from './scores.mjs';
@@ -39,7 +40,9 @@ export function installAndTune(modelId, onDetail = () => {}, { fromCustomJob = f
       // Avant de télécharger : quel moteur sait charger cette architecture ? L'officiel d'abord
       // (mis à jour s'il le faut), sinon un moteur ajouté avec l'accord de l'utilisateur.
       const failed = getState().models[modelId]?.engineFailures ?? {};
-      const engines = ownLauncher(model) ? null : (await enginesFor(model.profile?.arch))?.filter((e) => !failed[e.id]) ?? null;
+      const pinned = model.engineOnly ? engineSheet(model.engineOnly) : null;
+      if (pinned?.orphan) throw new Error(`${displayName(model)} ne se sert qu’avec ${model.engineOnly}, dont l’accord a été perdu : supprimez le modèle et ajoutez-le à nouveau.`);
+      const engines = ownLauncher(model) ? null : pinned ? [{ id: pinned.id, ref: pinned.ref, label: pinned.label }] : (await enginesFor(model.profile?.arch))?.filter((e) => !failed[e.id]) ?? null;
       if (engines && !engines.length) throw new Error(archMissing(model.profile.arch));
       let engine = null;
       if (!ownLauncher(model)) {
@@ -101,10 +104,7 @@ let jobState = null;
 export const customJobState = () => jobState;
 // name, card : ce que pi a lu sur la fiche du modèle (custom-models.mjs, cardFacts).
 export function installCustom({ url, quant, mmproj = null, sampling = null, name = null, card = null }) {
-  if (customJob) throw new Error('Une installation est déjà en cours');
-  jobState = { running: true, startedAt: Date.now(), url, quant, step: 'inspect', detail: 'Analyse du dépôt', result: null, error: null };
-  const onProgress = ({ step, detail }) => { jobState = { ...jobState, step, detail }; };
-  customJob = (async () => {
+  return runJob({ url, quant, step: 'inspect', detail: 'Analyse du dépôt' }, async (onProgress) => {
     const report = await inspectRepo(url);
     const chosen = report.quants.find((q) => q.quant.toUpperCase() === String(quant).toUpperCase());
     if (!chosen) throw new Error(`Quantification « ${quant} » absente. Disponibles : ${report.quants.map((q) => q.quant).join(', ')}`);
@@ -113,15 +113,19 @@ export function installCustom({ url, quant, mmproj = null, sampling = null, name
     const strata = await strataTakes(report.profile);
     const projector = mmproj && !strata ? report.mmproj.find((m) => m.name === mmproj) : null;
     if (mmproj && !strata && !projector) throw new Error(`Projecteur vision « ${mmproj} » absent du dépôt`);
+    // La fiche exige une PR de llama.cpp (correctif pas encore publié) : ce moteur-là, et lui seul,
+    // même si la version officielle charge déjà l'architecture.
+    const requiredPr = !strata ? cardFacts(card)?.requiredPr : null;
+    const required = requiredPr ? await requiredPrsEngine(requiredPr, report.profile.arch) : null;
     // Même dépôt, même quantification : c'est le même fichier, pas un second modèle.
-    const engines = strata ? null : await enginesFor(report.profile?.arch);
+    const engines = strata ? null : required ? [] : await enginesFor(report.profile?.arch);
     // Aucun moteur ne connaît l'architecture : on en cherche un (PR, fork cité par la fiche). Sa
     // compilation attend l'accord de l'utilisateur dans la fenêtre ; une fois donné, l'installation
     // continue d'elle-même (le moteur se compile avant le téléchargement).
     if (engines && !engines.length) {
       let decided;
       const decision = new Promise((resolve) => { decided = resolve; });
-      const proposal = await proposeEngine({ arch: report.profile.arch, name: name ?? report.repo.split('/')[1], repo: report.repo, onAccept: () => decided(true), onRefuse: (error) => decided(error ?? false) }).catch((error) => ({ status: 'error', message: error.message }));
+      const proposal = await proposeEngine({ arch: report.profile.arch, name: name ?? report.repo.split('/')[1], repo: report.repo, found: required, onAccept: () => decided(true), onRefuse: (error) => decided(error ?? false) }).catch((error) => ({ status: 'error', message: error.message }));
       if (proposal.status === 'approval' || proposal.status === 'official') {
         onProgress({ step: 'engine', detail: proposal.status === 'official' ? proposal.message : `${proposal.message} En attente de votre accord dans la fenêtre de Harn.` });
         const timeout = setTimeout(() => decided(null), ENGINE_APPROVAL_TIMEOUT_MS);
@@ -135,32 +139,67 @@ export function installCustom({ url, quant, mmproj = null, sampling = null, name
     }
     const { id } = buildEntry({ repo: report.repo, quant: chosen, profile: report.profile });
     if (getState().models[id]?.installedAt) throw new Error(`Ce modèle est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
-    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, sampling, strata, name, card });
-    const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
-    await refreshHardware();
+    const entry = await registerModel({ repo: report.repo, quant: chosen, profile: report.profile, mmproj: projector, mtpDraft: report.mtpDraft, dspark: strata ? null : report.dspark, sampling, strata, name, card, engineOnly: required?.sheet.id ?? null });
     const onDisk = chosen.files.every((file) => report.local[file.name]);
-    onProgress({ step: 'download', detail: onDisk ? 'Fichier déjà sur cette machine : rien à télécharger' : `Téléchargement de ${(chosen.bytes / 1e9).toFixed(1)} Go` });
-    await installAndTune(entry.id, (detail) => onProgress({ step: 'bench', detail: `Banc · ${detail}` }), { fromCustomJob: true });
-    onProgress({ step: 'iq', detail: 'Test d’intelligence' });
-    setPhase(entry.id, 'iq');
-    const iq = await runIq(entry.id).catch((error) => { setPhase(entry.id, null); throw error; });
-    setPhase(entry.id, 'analysis');
-    onProgress({ step: 'analysis', detail: 'Analyse des mesures par l’IA locale' });
-    await runAnalysis().finally(() => setPhase(entry.id, null));
-    const profile = getState().profiles[entry.id];
-    const result = { status: 'installed', id: entry.id, name: displayName(entry), tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity }, cardNotes: entry.cardNotes ?? null };
-    if (before && before !== entry.id) {
-      onProgress({ step: 'restore', detail: 'Retour au modèle précédent' });
-      await activate(before).catch(() => {});
-      result.restored = before;
-    }
-    return result;
-  })()
+    return benchAndTest(entry, onProgress, onDisk ? 'Fichier déjà sur cette machine : rien à télécharger' : `Téléchargement de ${(chosen.bytes / 1e9).toFixed(1)} Go`);
+  });
+}
+
+// Une installation à la fois, suivie par /api/custom/job.
+function runJob(start, work) {
+  if (customJob) throw new Error('Une installation est déjà en cours');
+  jobState = { running: true, startedAt: Date.now(), ...start, result: null, error: null };
+  const onProgress = ({ step, detail }) => { jobState = { ...jobState, step, detail }; };
+  customJob = work(onProgress)
     .then((result) => { jobState = { ...jobState, running: false, step: 'done', detail: 'Terminé', result }; return result; })
     .catch((error) => { jobState = { ...jobState, running: false, step: 'error', error: error.message }; throw error; })
     .finally(() => { customJob = null; });
   customJob.catch(() => {});
   return customJob;
+}
+
+// Téléchargement, banc, test d'intelligence, analyse, puis retour au modèle qui servait avant.
+async function benchAndTest(entry, onProgress, downloadDetail) {
+  const before = getState().active?.status === 'ready' ? getState().active.modelId : null;
+  await refreshHardware();
+  onProgress({ step: 'download', detail: downloadDetail });
+  await installAndTune(entry.id, (detail) => onProgress({ step: 'bench', detail: `Banc · ${detail}` }), { fromCustomJob: true });
+  onProgress({ step: 'iq', detail: 'Test d’intelligence' });
+  setPhase(entry.id, 'iq');
+  const iq = await runIq(entry.id).catch((error) => { setPhase(entry.id, null); throw error; });
+  setPhase(entry.id, 'analysis');
+  onProgress({ step: 'analysis', detail: 'Analyse des mesures par l’IA locale' });
+  await runAnalysis().finally(() => setPhase(entry.id, null));
+  const profile = getState().profiles[entry.id];
+  const result = { status: 'installed', id: entry.id, name: displayName(entry), tuning: profile.tuning, bench: profile.bench?.winner, iq: { score: iq.score, categories: iq.categories, verbosity: iq.verbosity }, cardNotes: entry.cardNotes ?? null };
+  if (before && before !== entry.id) {
+    onProgress({ step: 'restore', detail: 'Retour au modèle précédent' });
+    await activate(before).catch(() => {});
+    result.restored = before;
+  }
+  return result;
+}
+
+// Un LoRA de texte sur un modèle déjà installé : un profil à part (ses propres réglage, banc et
+// note), qui reprend les fichiers de sa base par liens physiques ; seul l'adaptateur se télécharge.
+// reasoning : false pour un adaptateur entraîné sans réflexion.
+export async function inspectLoraFor(baseId, url) {
+  const base = modelById(baseId);
+  if (!base || !getState().models[baseId]?.installedAt) throw Object.assign(new Error(`Modèle de base « ${baseId} » non installé`), { status: 400 });
+  if (base.lora) throw Object.assign(new Error('Ce modèle porte déjà un LoRA : partir de sa base'), { status: 400 });
+  if (ownLauncher(base) || (base.engine && base.engine !== 'llama')) throw Object.assign(new Error('Un LoRA ne se pose que sur un modèle servi par llama.cpp'), { status: 400 });
+  const where = getState().models[baseId].paths?.[base.files[0].name] ?? path.join(DIRS.models, baseId, base.files[0].name);
+  const baseArch = base.profile?.arch ?? (await readGgufFile(where).catch(() => null))?.meta['general.architecture'] ?? null;
+  return { base, baseArch, ...(await inspectLora(url, { baseArch })) };
+}
+export function installLora({ base: baseId, url, name = null, sampling = null, reasoning = null, card = null }) {
+  return runJob({ url, quant: 'LoRA', step: 'inspect', detail: 'Analyse du LoRA' }, async (onProgress) => {
+    const report = await inspectLoraFor(baseId, url);
+    const id = loraModelId(baseId, report.repo);
+    if (getState().models[id]?.installedAt) throw new Error(`Ce profil est déjà installé (${displayName(modelById(id))}) : rien à ajouter`);
+    const entry = await registerLoraModel({ base: report.base, loraRepo: report.repo, lora: report.lora, name, sampling, reasoning, card });
+    return benchAndTest(entry, onProgress, `Fichiers de ${displayName(report.base)} repris ; téléchargement du LoRA (${(report.lora.bytes / 1e6).toFixed(0)} Mo)`);
+  });
 }
 // Supprimer un modèle : ses fichiers, ses réglages, ses notes. Refusé tant qu'il travaille
 // (installation, réglage, banc, test, téléchargement). S'il est chargé, le moteur s'arrête d'abord.
@@ -214,6 +253,10 @@ export async function deleteModel(modelId) {
     await remove(path.join(DIRS.runtime, 'radiance'));
     const image = getState().runtimes.radiance?.image;
     if (image) await new Promise((resolve) => execFile('podman', ['rmi', '-f', image], () => resolve()));
+  } else if (model.engine === 'ink2') {
+    // Les poids dans models/<id>, le moteur compilé et son venv dans runtime/ink2, pour ce seul modèle.
+    await remove(path.join(DIRS.models, modelId));
+    await remove(path.join(DIRS.runtime, 'ink2'));
   } else if (model.engine === 'gemma-challenge') {
     // Le moteur sert aux deux fiches : seuls les poids de celle-ci partent, sauf si c'est la dernière.
     const other = MODELS.some((m) => m.engine === 'gemma-challenge' && m.id !== model.id && getState().models[m.id]?.installedAt);
@@ -229,6 +272,7 @@ export async function deleteModel(modelId) {
     if (model.engine === 'strata') delete s.runtimes[`strata-${model.strataModel}`];
     if (model.engine === 'hyperqwen') delete s.runtimes.hyperqwen;
     if (model.engine === 'radiance') delete s.runtimes.radiance;
+    if (model.engine === 'ink2') delete s.runtimes.ink2;
     if (model.engine === 'gemma-challenge') {
       const runtime = s.runtimes['gemma-challenge'];
       if (runtime && MODELS.some((m) => m.engine === 'gemma-challenge' && m.id !== model.id && s.models[m.id]?.installedAt)) delete runtime[model.challengeStack === 'qat' ? 'qat' : 'submissionStack'];
@@ -260,14 +304,15 @@ async function dirSize(target) {
 // compilée qu'après l'accord de l'utilisateur, donné par un clic dans la fenêtre de Harn.
 // onAccept / onRefuse : prévenus de la décision (une installation en cours qui attend son moteur) ;
 // onRefuse reçoit l'erreur quand une mise à jour du moteur officiel échoue.
-export async function proposeEngine({ modelId = null, arch = null, name = null, repo = null, onAccept = null, onRefuse = null } = {}) {
+// found : un moteur déjà désigné (la PR qu'exige la fiche du modèle), sans recherche.
+export async function proposeEngine({ modelId = null, arch = null, name = null, repo = null, onAccept = null, onRefuse = null, found: given = null } = {}) {
   const model = modelId ? modelById(modelId) : null;
   arch ??= model?.profile?.arch;
   name ??= model ? displayName(model) : null;
   repo ??= model?.repo ?? null;
   if (!arch) throw Object.assign(new Error('Architecture du modèle inconnue'), { status: 400 });
   const exclude = Object.keys((modelId && getState().models[modelId]?.engineFailures) ?? {});
-  const found = await findEngine(arch, { name, exclude, repo });
+  const found = given ?? await findEngine(arch, { name, exclude, repo });
   if (!found) return { status: 'none', message: `Aucun ${exclude.length ? 'autre ' : ''}moteur trouvé pour « ${arch} » : ni version officielle récente, ni proposition dans llama.cpp, ni fork cité par la fiche du modèle qui la connaisse${exclude.length ? ' et que ce fichier n’ait pas déjà mise en échec' : ''}. Harn le proposera dès qu’il en existera un.` };
   // Ensuite : régler le modèle s'il est déjà là, sinon revoir la veille, qui le proposera.
   const after = () => (onAccept ? Promise.resolve(onAccept()) : modelId && getState().models[modelId]?.installedAt ? installAndTune(modelId) : checkHub()).catch(() => {});
@@ -285,9 +330,11 @@ export async function proposeEngine({ modelId = null, arch = null, name = null, 
   requestApproval({
     kind: 'engine',
     title: `Compiler ${sheet.label} pour ${name ?? arch}${isolated ? '' : ' (sans isolation)'} ?`,
-    detail: `${sheet.state === 'fork'
+    detail: `${sheet.state === 'mix'
+      ? `llama.cpp au commit ${sheet.ref.slice(0, 7)}, avec les propositions ${sheet.title}, de ${sheet.author}${given ? `, que la fiche de ${repo} demande` : ''}. Ces propositions ne sont pas encore acceptées dans llama.cpp (ou viennent d’un fork) ; Harn pose leurs diffs, figés à ces commits, avant de compiler`
+      : sheet.state === 'fork'
       ? `Fork de llama.cpp par ${sheet.author} (${sheet.url}), que la fiche de ${sheet.citedBy} demande pour charger ce modèle. Dernier commit : « ${sheet.title} ». Ce fork n’est pas llama.cpp`
-      : `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url}). ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'}`} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ». ${isolated
+      : `« ${sheet.title} », proposé par ${sheet.author} (${sheet.url})${given ? `, que la fiche de ${repo} exige pour que le modèle réponde juste` : ''}. ${sheet.state === 'closed' ? 'Cette proposition a été fermée sans être acceptée dans llama.cpp' : 'Cette proposition n’est pas encore acceptée dans llama.cpp'}`} : son code n’a pas été relu par les mainteneurs, et il s’exécutera sur votre machine. Harn compile ce commit précis une fois (${sheet.ref.slice(0, 7)}, 10 à 20 min) et ne s’en sert que pour l’architecture « ${arch} ». ${isolated
       ? 'Il est compilé et lancé isolé : sans réseau, sans accès à vos fichiers, seulement ses sources, le modèle et la carte graphique.'
       : `Attention : il tournerait sans isolation, avec accès à vos fichiers et au réseau, car bubblewrap manque. Pour l’isoler, refusez, installez-le (${SANDBOX_INSTALL}) et relancez Harn.`}`,
     run: () => { addEngine(sheet).then(after).catch(() => {}); },

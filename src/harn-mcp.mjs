@@ -33,6 +33,7 @@ const TOOLS = [
         max_context: { type: 'integer', description: 'Contexte maximal que la fiche autorise, s’il est plus bas que celui du GGUF (ex. « -c at most 32768 »). Harn ne le dépassera pas, banc compris.' },
         reasoning_levels: { type: 'array', items: { type: 'string', enum: ['disabled', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] }, description: 'Les valeurs de reasoning_effort que le gabarit du modèle accepte, selon la fiche (ex. disabled, low, medium, high). Sans indication : à omettre.' },
         notes: { type: 'array', items: { type: 'string' }, description: 'Mises en garde de la fiche à garder avec le modèle, une phrase chacune (ex. « BF16 recommandé sur GPU : les quantifications peuvent produire des NaN »).' },
+        required_pr: { anyOf: [{ type: 'integer' }, { type: 'array', items: { anyOf: [{ type: 'integer' }, { type: 'string' }] }, maxItems: 6 }], description: 'La ou les PR que la fiche exige pour que le modèle réponde juste (« needs #32704 », « Required llama.cpp fix ») ou pour un levier qu’elle décrit (brouillon de spéculation) : un numéro pour ggml-org/llama.cpp, « propriétaire/dépôt#n » pour un fork. Harn compile llama.cpp avec ces PR et ne sert le modèle qu’avec ce moteur, tant qu’elles ne sont pas dans une version publiée. Sans indication : à omettre.' },
       },
       required: ['url', 'quant'],
     },
@@ -149,7 +150,7 @@ async function call(name, args, token) {
     }
   }
   if (name === 'install_model') {
-    const card = { maxContext: args.max_context, reasoningLevels: args.reasoning_levels, notes: args.notes };
+    const card = { maxContext: args.max_context, reasoningLevels: args.reasoning_levels, notes: args.notes, requiredPr: args.required_pr };
     const asked = await api('POST', '/api/custom/install', { url: args.url, quant: args.quant, mmproj: args.mmproj, sampling: args.sampling, name: args.name, card });
     const refused = asked.approval ? await waitApproval(asked.approval, token) : null;
     if (refused) return text(refused, true);

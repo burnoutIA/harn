@@ -6,7 +6,7 @@ import { describe, startEngine, stopOthers } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
-import { HYPERQWEN_ARMS, freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
+import { HYPERQWEN_ARMS, INK2_ARMS, freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
 import { writeMachineFacts } from './machine-doc.mjs';
 import { downloadFile } from './model-files.mjs';
 import { makePlan, OBJECTIVE } from './planner.mjs';
@@ -21,6 +21,8 @@ const sameTuning = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // DFlash2 : brouillon Q4_K_M et ses tampons. Mesuré sur RTX 3090 (b11430, 124k) : ~0,9 Gio ;
 // on garde un peu de marge. La VRAM réelle est revérifiée après chargement.
 const DFLASH_MIB = 1200;
+// DSpark (Inkling 2 Mini) : brouillon Q8_0 de 0,4 Go, ses tampons et son état récurrent.
+const DSPARK_MIB = 900;
 // La charge longue (~94k tokens lus) demande ce contexte.
 const LONG_CONTEXT = 100 * 1024;
 // Le plus grand contexte (≥ 100k) qui laisse la marge une fois `extraMiB` ajoutés en VRAM.
@@ -146,6 +148,15 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     if (only.error) throw new Error(only.error);
     return finish(model, results, only);
   }
+  // Le moteur sur mesure d'Inkling : sans spéculation, puis avec son drafter MTP (blocs de 8, repli
+  // automatique quand il ne paie pas). Le meilleur des deux à 128k.
+  if (model.engine === 'ink2') {
+    let best = await trial('Moteur sur mesure', initial.tuning);
+    const other = Object.values(INK2_ARMS).find((arm) => arm.spec !== Boolean(initial.tuning.spec));
+    best = better(await trial('Moteur sur mesure', other), best);
+    if (best.error) throw new Error(best.error);
+    return finish(model, results, best);
+  }
   // HyperQwen : ses deux réglages à 128k (HYPERQWEN_ARMS), celui en place d'abord. DFlash2 ne se
   // charge que si la carte est libre : son échec est noté, MTP reste.
   if (model.engine === 'hyperqwen') {
@@ -193,10 +204,35 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     }
   }
 
+  // DSpark (Inkling 2) : le brouillon livré avec le modèle, à plusieurs profondeurs (Unsloth conseille
+  // 3). R9700, Inkling 2 Mini : ~7 600 petits noyaux par token, la carte occupée 39 % du temps ; une
+  // passe qui vérifie plusieurs tokens coûte presque autant qu'une seule. Un moteur qui ne connaît
+  // pas DSpark (sans la PR #32218) refuse le brouillon : l'essai est noté, le réglage reste.
+  const dsparkContext = gpu && model.dspark ? roomFor(model, best, DSPARK_MIB) : null;
+  if (dsparkContext) {
+    onProgress('DSpark · téléchargement du brouillon');
+    try {
+      await downloadFile(model, model.dspark);
+      const start = { ...best.tuning, context: dsparkContext };
+      let spark = null;
+      for (const n of [3, 2, 4, 6]) {
+        // Au-delà de 4, seulement si 4 a battu 2 et 3.
+        if (n === 6 && spark?.tuning.spec?.n !== 4) break;
+        const arm = await trial('DSpark', { ...start, spec: { type: 'dspark', n } });
+        if (arm.error && n === 3) throw new Error(arm.error);
+        spark = spark ? better(arm, spark) : arm;
+      }
+      best = better(spark, best);
+    } catch (error) {
+      results.push({ id: 'dspark', stage: 'DSpark', label: 'brouillon refusé par le moteur', error: error.message.slice(0, 200), ok: false });
+    }
+  }
+
   if (gpu && profile.flashAttentionUncertain) best = better(await trial('Flash Attention', { ...best.tuning, fa: 'off' }), best);
 
   // Radeon : Vulkan et HIP, même réglage.
-  for (const backend of getState().plan.backend.candidates.slice(1)) {
+  // Un modèle lié à un seul moteur (engineOnly) n'a que le backend de sa compilation.
+  for (const backend of model.engineOnly ? [] : getState().plan.backend.candidates.slice(1)) {
     try {
       await installLlama(runtimeKind(model), backend);
       best = better(await trial('Backend', { ...best.tuning, backend }), best);

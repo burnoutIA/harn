@@ -153,7 +153,7 @@ export { activate, runIq } from './activation.mjs';
 export { runAnalysis } from './analysis.mjs';
 export { tuneModel } from './bench.mjs';
 export { activationBlocker, busyWith, withGpu } from './gpu-queue.mjs';
-export { customJobState, deleteModel, inspectForMachine, installAndTune, installCustom, proposeEngine } from './install.mjs';
+export { customJobState, deleteModel, inspectForMachine, inspectLoraFor, installAndTune, installCustom, installLora, proposeEngine } from './install.mjs';
 export { loadWithHeadroom } from './loading.mjs';
 export { refreshHardware } from './machine-state.mjs';
 export { installLogPath, installModelFiles } from './model-files.mjs';

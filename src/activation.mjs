@@ -26,7 +26,7 @@ export function activate(modelId) {
       const saved = state.profiles[modelId]?.tuning;
       // Un réglage d'une version précédente (sans backend) est refait à partir des a priori.
       // HyperQwen n'a pas de backend : son réglage gagnant (MTP ou DFlash2) est repris tel quel.
-      const tuning = saved?.backend || model.engine === 'strata' || (['hyperqwen', 'radiance'].includes(model.engine) && saved) ? saved : startingTuning(model, state.hardware);
+      const tuning = saved?.backend || model.engine === 'strata' || (['hyperqwen', 'radiance', 'ink2'].includes(model.engine) && saved) ? saved : startingTuning(model, state.hardware);
       // À côté des modèles déjà chargés s'il tient, sinon à la place des inactifs (placement.mjs).
       const loaded = await placeAndLoad(model, tuning ?? {});
       // Une réduction faite au chargement reste ponctuelle : seul le banc fixe les réglages.

@@ -15,7 +15,7 @@ import { installKetch } from './runtimes.mjs';
 import { proposeEngine } from './setup.mjs';
 import { dropUnusedEngines, readModelCard } from './engines.mjs';
 import { sandboxAvailable } from './sandbox.mjs';
-import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, installAndTune, installCustom, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
+import { activate, activationBlocker, busyWith, customJobState, deleteModel, installLogPath, pickHelper, inspectForMachine, inspectLoraFor, installAndTune, installCustom, installLora, refreshHardware, runAnalysis, runFirstSetup, runIq, tuneModel } from './setup.mjs';
 import { inspectRepo, loadCustomModels, parseRepo } from './custom-models.mjs';
 import { machineDocPath, writeMachineFacts } from './machine-doc.mjs';
 import { bus, getState, loadState, save, update } from './state.mjs';
@@ -430,6 +430,30 @@ async function api(req, res, url) {
   if (url.pathname === '/api/hf/inspect') {
     const body = await new Response(req).json().catch(() => ({}));
     try { return json(res, 200, await inspectForMachine(body.url)); } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+  // Un LoRA de texte sur un modèle installé. Depuis notre page : lancement immédiat ; d'ailleurs
+  // (pi, un script local) : une demande que l'utilisateur accepte ou refuse dans la fenêtre.
+  if (url.pathname === '/api/custom/lora/inspect') {
+    const body = await new Response(req).json().catch(() => ({}));
+    try { const { base, ...report } = await inspectLoraFor(body.base, body.url ?? ''); return json(res, 200, { base: base.id, ...report }); } catch (error) { return json(res, error.status ?? 400, { error: error.message }); }
+  }
+  if (url.pathname === '/api/custom/lora') {
+    const body = await new Response(req).json().catch(() => ({}));
+    const options = { base: body.base, url: body.url, sampling: body.sampling ?? null, reasoning: typeof body.reasoning === 'boolean' ? body.reasoning : null,
+      name: typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 80) : null,
+      card: body.card && typeof body.card === 'object' ? body.card : null };
+    if (fromOurPage(req)) {
+      try { installLora(options); return json(res, 202, customJobState()); } catch (error) { return json(res, 409, { error: error.message }); }
+    }
+    let report;
+    try { report = await inspectLoraFor(options.base, options.url ?? ''); } catch (error) { return json(res, error.status ?? 400, { error: error.message }); }
+    const approval = requestApproval({
+      kind: 'install',
+      title: `Ajouter le LoRA ${report.repo} sur ${displayName(report.base)}`,
+      detail: `Un profil à part : les fichiers de ${displayName(report.base)} repris sans copie, ${report.lora.name} (${(report.lora.bytes / 1e6).toFixed(0)} Mo) à télécharger depuis huggingface.co, puis réglage, banc et test d’intelligence.${options.reasoning === false ? ' Réflexion coupée (adaptateur entraîné sans).' : ''}`,
+      run: () => installLora(options),
+    });
+    return json(res, 202, { approval, status: 'pending' });
   }
   if (url.pathname === '/api/custom/install') {
     // Depuis notre page : lancement immédiat. Depuis pi (outil MCP) : une demande que

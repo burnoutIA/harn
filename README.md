@@ -201,6 +201,44 @@ l'Uncensored d'OrcaRouter en IQ4_XS (97 Go) : 69 tok/s à 131k sous Strata, cont
 llama.cpp, qui laisse les experts au processeur. Pas de vision par cette voie pour l'instant.
 Sans Strata, le modèle s'installe sous llama.cpp, avec sa tête MTP à part si le dépôt en livre une.
 
+Quand la fiche exige une PR de llama.cpp pas encore publiée (Inkling 2 Mini : #32704, sans
+laquelle la sortie est fausse alors que l'officiel charge déjà l'architecture), pi la passe à
+l'installation (`required_pr`). Harn compile cette PR (avec accord, isolée) et ne sert le modèle
+qu'avec elle. Les dossiers `Mainline_Support/` d'Unsloth (`.gguf_file`) remplacent les fichiers
+de la racine, qui ne se chargent que dans le build d'Unsloth.
+
+`required_pr` accepte aussi une liste, y compris des PR de forks (`unslothai/llama.cpp#385`).
+Harn part alors de la dernière version publiée si elle contient les PR déjà fusionnées, sinon de
+master, et pose par-dessus les diffs des PR ouvertes, figés à leur commit (`git apply`, hors de la
+bulle). Il compile ensuite ce mélange une fois, isolé, après accord. Inkling 2 Mini sur R9700 :
+#32704 (dans master), DSpark #32218 et l'attention découpée d'Unsloth #385.
+
+Un brouillon DSpark livré dans le dépôt (`dspark-….gguf`) est essayé au banc
+(`--spec-type draft-dspark`, profondeurs 2 à 6). Inkling 2 Mini enchaîne environ 7 600 petits
+noyaux par token, et la R9700 n'est occupée que 39 % du temps : vérifier plusieurs tokens par
+passe est le seul levier qui compte. La quantification n'y change presque rien (Q8_K_XL
+28,6 tok/s, UD-Q4_K_XL 33,8).
+
+Sur une Radeon RDNA4, le catalogue propose aussi Inkling 2 Mini avec un **moteur sur mesure**
+(badge « Moteur sur mesure »). C'est `strata-ink2` de Strata, porté en HIP, dans le dépôt
+[burnoutIA/moteurs](https://github.com/burnoutIA/moteurs). Ce dépôt contient la recette, la fiche
+du modèle et la validation contre llama.cpp. Le moteur fusionne les opérations de la boucle :
+~67 tok/s sur une R9700 au lieu de 33, et 131k de contexte dans 21,4 Gio.
+
+Harn télécharge le checkpoint officiel (NVFP4 + MXFP8, empreintes figées). Il compile le moteur
+dans la bulle, à un commit figé, puis lance sa façade OpenAI, `outils/serveur.py`, avec un venv
+à elle qui contient tokenizers et jinja2. Le banc essaie le moteur avec et sans son drafter MTP.
+Pas de vision par ce moteur.
+
+### Ajouter un LoRA de texte
+
+`POST /api/custom/lora` avec `base` (un modèle installé servi par llama.cpp) et `url` (le dépôt
+du LoRA) crée un profil à part, avec son propre réglage, son banc et sa note. Il reprend les
+fichiers de la base par liens physiques : seul l'adaptateur GGUF se télécharge. Un LoRA PEFT
+(safetensors) est cherché converti dans le dépôt voisin `…-GGUF`. Hors de la fenêtre de Harn, la
+demande s'accepte dans la fenêtre. `reasoning: false` coupe la réflexion, pour un adaptateur
+entraîné sans.
+
 ## Intelligence et note globale
 
 Chaque modèle installé passe le **banc d'intelligence** de Harn : une note jusqu'à 125, commune

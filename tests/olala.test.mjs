@@ -39,7 +39,7 @@ test('sans fiche lue : le contexte de la machine, les niveaux par défaut', () =
 });
 
 test('faits de fiche : valeurs hors bornes et niveaux inconnus écartés', () => {
-  assert.deepEqual(cardFacts({ maxContext: 12, reasoningLevels: ['turbo', 'low'], notes: [] }), { maxContext: null, reasoningLevels: ['low'], notes: null });
+  assert.deepEqual(cardFacts({ maxContext: 12, reasoningLevels: ['turbo', 'low'], notes: [] }), { maxContext: null, reasoningLevels: ['low'], notes: null, requiredPr: null });
   assert.equal(cardFacts({ maxContext: '32768' }).maxContext, null, 'un entier, pas une chaîne');
   assert.equal(cardFacts(null), null);
 });

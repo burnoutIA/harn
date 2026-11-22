@@ -113,7 +113,7 @@ export function engineSheet(id, hardware = getState().hardware) {
   return { id, label: id, source: 'build', isolated: true, orphan: true, onlyArchs: [], eligible: () => false };
 }
 // Les identifiants que findEngine donne aux moteurs ajoutés : seuls ceux-là sont nettoyés sans fiche.
-const ADDED_ID = /^(llama-pr-\d+|fork-[a-z0-9-]+)$/;
+const ADDED_ID = /^(llama-pr-\d+|fork-[a-z0-9-]+|mix-[a-z0-9-]+)$/;
 const sheets = () => [...Object.keys(BUILTIN), ...Object.keys(addedSheets())].map((id) => engineSheet(id));
 
 export const parseArchs = (source) => [...source.matchAll(/\{\s*LLM_ARCH_[A-Z0-9_]+,\s*"([^"]+)"\s*\}/g)].map((m) => m[1]);
@@ -213,7 +213,9 @@ export function recordBuildFailure(id, error, hardware = getState().hardware) {
 
 // Les autres moteurs à mesurer au banc pour ce modèle, et les réglages à essayer sur chacun.
 export async function alternates(model, tuning, profile, hardware = getState().hardware) {
-  if (['prism', 'strata', 'hyperqwen', 'radiance', 'gemma-challenge'].includes(model.engine)) return [];
+  if (['prism', 'strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine)) return [];
+  // Un seul moteur sert ce modèle (les autres le chargent mais répondent faux) : rien à lui opposer.
+  if (model.engineOnly) return [];
   const current = tuning.fork ?? 'llama';
   const arch = model.profile?.arch;
   // Sans architecture connue (catalogue intégré) : les moteurs généraux utilisables ici.
@@ -335,17 +337,85 @@ export async function findEngine(arch, { name = null, exclude = [], repo = null 
       if (!pr?.head?.repo || pr.merged) continue;
       const archs = await rawArchs(pr.head.repo.full_name, pr.head.sha).catch(() => []);
       if (!archs.includes(arch)) continue;
-      return {
-        kind: 'pr',
-        label: `llama.cpp PR #${pr.number}`,
-        sheet: {
-          id: `llama-pr-${pr.number}`, label: `llama.cpp PR #${pr.number}`, repo: pr.head.repo.full_name, ref: pr.head.sha,
-          url: pr.html_url, title: pr.title, author: pr.user?.login ?? '?', state: pr.state, onlyArchs: [arch], foundAt: new Date().toISOString(),
-        },
-      };
+      return prFound(pr, arch);
     }
   }
   return repo ? forkFromCard(arch, repo, exclude) : null;
+}
+
+const prFound = (pr, arch) => ({
+  kind: 'pr',
+  label: `llama.cpp PR #${pr.number}`,
+  sheet: {
+    id: `llama-pr-${pr.number}`, label: `llama.cpp PR #${pr.number}`, repo: pr.head.repo.full_name, ref: pr.head.sha,
+    url: pr.html_url, title: pr.title, author: pr.user?.login ?? '?', state: pr.state, onlyArchs: [arch], foundAt: new Date().toISOString(),
+  },
+});
+
+// La PR que la fiche d'un modèle exige (custom-models.mjs, cardFacts : requiredPr), même quand la
+// version officielle connaît déjà l'architecture. null : elle est fusionnée, l'officiel suffit
+// dès qu'une version publiée la contient.
+export async function requiredPrEngine(number, arch) {
+  return requiredPrsEngine([number], arch);
+}
+
+// « 32218 » ou 32218 : une PR de llama.cpp ; « unslothai/llama.cpp#385 » : celle d'un fork.
+export function parsePrRef(ref) {
+  if (Number.isInteger(ref) && ref > 0) return { repo: BUILTIN.llama.repo, number: ref };
+  const match = String(ref).trim().match(/^(?:([\w.-]+\/[\w.-]+))?#?(\d+)$/);
+  if (!match) throw new Error(`PR illisible : « ${ref} » (attendu : 32218 ou propriétaire/dépôt#385)`);
+  return { repo: match[1] ?? BUILTIN.llama.repo, number: Number(match[2]) };
+}
+const prName = ({ repo, number }) => (repo === BUILTIN.llama.repo ? `#${number}` : `${repo.split('/')[0]}#${number}`);
+
+// Les PR qu'exige la fiche d'un modèle (cardFacts : requiredPr, une ou plusieurs).
+// - Toutes fusionnées dans llama.cpp et publiées : null, la version officielle suffit.
+// - Une seule, ouverte, de llama.cpp : sa branche, comme avant.
+// - Sinon, un mélange (Inkling 2 Mini : DSpark #32218 et l'attention découpée d'Unsloth #385, sur un
+//   master qui contient déjà #32704) : un commit de llama.cpp, la dernière version si elle contient
+//   les PR fusionnées, sinon master, et par-dessus les diffs figés (base...tête) des PR ouvertes,
+//   appliqués par git apply avant la compilation (runtimes.mjs, applyMerges).
+export async function requiredPrsEngine(refs, arch) {
+  const llama = BUILTIN.llama.repo;
+  const prs = await Promise.all(refs.map(parsePrRef).map(async (ref) => {
+    const pr = await gh(`/repos/${ref.repo}/pulls/${ref.number}`).catch(() => null);
+    if (!pr?.number) throw new Error(`PR ${prName(ref)} introuvable`);
+    return { ...ref, pr };
+  }));
+  for (const p of prs) if (p.pr.merged && p.repo !== llama) throw new Error(`La PR ${prName(p)} est fusionnée dans ${p.repo}, pas dans llama.cpp : citez plutôt ce fork`);
+  const open = prs.filter((p) => !p.pr.merged);
+  const merged = prs.filter((p) => p.pr.merged);
+  const latest = await latestTag(BUILTIN.llama);
+  const inRelease = (sha) => (latest ? gh(`/repos/${llama}/compare/${sha}...${latest}`).then((c) => ['ahead', 'identical'].includes(c.status)).catch(() => false) : false);
+  const released = (await Promise.all(merged.map((p) => inRelease(p.pr.merge_commit_sha)))).every(Boolean);
+  if (!open.length && released) return null;
+  for (const p of open) if (!p.pr.head?.repo) throw new Error(`La PR ${prName(p)} n’a plus de branche à compiler`);
+  if (open.length === 1 && !merged.length && open[0].repo === llama) {
+    const archs = await rawArchs(open[0].pr.head.repo.full_name, open[0].pr.head.sha);
+    if (!archs.includes(arch)) throw new Error(`La PR #${open[0].number} de llama.cpp ne connaît pas l’architecture « ${arch} »`);
+    return prFound(open[0].pr, arch);
+  }
+  const head = await gh(`/repos/${llama}/commits/${released && latest ? latest : 'master'}`);
+  if (!head?.sha) throw new Error('Commit de llama.cpp introuvable');
+  // L'architecture vient du commit de base ou d'une des PR (une PR qui l'ajoute).
+  const known = [await rawArchs(llama, head.sha), ...await Promise.all(open.map((p) => rawArchs(p.pr.head.repo.full_name, p.pr.head.sha).catch(() => [])))];
+  if (!known.some((archs) => archs.includes(arch))) throw new Error(`Ni llama.cpp ${head.sha.slice(0, 7)} ni les PR ${open.map(prName).join(', ')} ne connaissent l’architecture « ${arch} »`);
+  const merges = open.map((p) => ({
+    repo: p.repo, number: p.number, base: p.pr.base.sha, head: p.pr.head.sha, headRepo: p.pr.head.repo.full_name,
+    title: p.pr.title, url: p.pr.html_url, author: p.pr.user?.login ?? '?',
+  }));
+  // Seulement des PR fusionnées, pas encore publiées : master tel quel, sans diff.
+  const cited = merges.length ? merges : merged.map((p) => ({ ...p, title: p.pr.title, url: p.pr.html_url, author: p.pr.user?.login ?? '?' }));
+  const label = `llama.cpp ${released && latest ? latest : head.sha.slice(0, 7)}${open.length ? ` + PR ${open.map(prName).join(', ')}` : ` (avec ${merged.map(prName).join(', ')})`}`;
+  return {
+    kind: 'mix',
+    label,
+    sheet: {
+      id: `mix-${arch.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, label, repo: llama, ref: head.sha, merges,
+      url: cited[0].url, title: cited.map((m) => `${prName(m)} « ${m.title} »`).join(' · '),
+      author: [...new Set(cited.map((m) => m.author))].join(', '), state: 'mix', onlyArchs: [arch], foundAt: new Date().toISOString(),
+    },
+  };
 }
 
 // Accord donné : la fiche entre dans le registre, ses architectures sont connues tout de suite.

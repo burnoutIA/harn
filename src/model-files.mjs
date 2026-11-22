@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installGemmaChallenge, installHyperQwen, installRadiance, installStrata, installStrataPack } from './runtimes.mjs';
+import { installGemmaChallenge, installHyperQwen, installInk2, installRadiance, installStrata, installStrataPack } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -23,6 +23,7 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
   const files = model.files.map((file) => ({ repo: model.repo, ...file }));
   if (model.mmproj) files.push(model.mmproj);
   if (model.mtpDraft) files.push(model.mtpDraft);
+  if (model.lora) files.push(model.lora);
   const paths = {};
   try {
     // Avant de télécharger : le fichier est peut-être déjà sur la machine (même nom, même taille).
@@ -60,6 +61,18 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
           note(`Téléchargement de ${file.name}`);
           await downloadFile(model, file);
         }
+      }
+      // Le brouillon DFlash2 ne se télécharge qu'au banc, s'il est essayé : déjà sur la machine (un
+      // profil LoRA reprend celui de sa base), il est repris dès maintenant, au même endroit.
+      if (model.dflash && model.loraOf) {
+        const dest = path.join(dir, model.dflash.name);
+        const copy = (await findLocalCopies([model.dflash]))[model.dflash.name];
+        if (copy && copy !== dest && await adoptLocalCopy(copy, dest) === dest) note(`${model.dflash.name} déjà présent (${copy}) : réutilisé sans téléchargement`);
+      }
+      // Le moteur sur mesure (ink2) se compile après les poids : il lit le dossier du modèle tel quel.
+      if (model.engine === 'ink2') {
+        note('Compilation du moteur sur mesure (HIP, dans la bulle) et de sa façade OpenAI');
+        await installInk2(getState().hardware, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
       }
       // Un Flash-Next ajouté depuis Hugging Face : Strata le prépare à partir de ces fichiers.
       if (model.strataPack) {

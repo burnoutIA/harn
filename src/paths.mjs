@@ -39,4 +39,6 @@ export const PORTS = {
   radiance: Number(process.env.HARN_RADIANCE_PORT ?? 4753),
   // La voix des agents (Voxtral sous vLLM-Omni, voice.mjs).
   voice: Number(process.env.HARN_VOICE_PORT ?? 4754),
+  // Les moteurs sur mesure (burnoutIA/moteurs) : leur façade OpenAI.
+  ink2: Number(process.env.HARN_INK2_PORT ?? 4755),
 };

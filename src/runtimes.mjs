@@ -214,12 +214,14 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
   const backend = `cuda${Number.parseInt(tools.nvcc, 10)}`;
   const runtimeId = `${sheet.id}-${backend}`;
   const existing = getState().runtimes[runtimeId];
-  if (existing?.commit === sheet.ref && (await stat(existing.serverPath).catch(() => null))) return existing;
-  const repoDir = path.join(DIRS.runtime, sheet.id, sheet.version ?? sheet.ref.slice(0, 12));
+  // Un mélange de PR : l'identité du build compte leurs têtes (harnPatches).
+  const own = sheet.merges?.length ? await harnPatches(sheet) : { build: sheet.ref, dir: sheet.version ?? sheet.ref.slice(0, 12) };
+  if ((existing?.build ?? existing?.commit) === own.build && (await stat(existing.serverPath).catch(() => null))) return existing;
+  const repoDir = path.join(DIRS.runtime, sheet.id, own.dir);
   const buildDir = `build-sm${sheet.cudaArch}`;
   const binDir = path.join(repoDir, buildDir, 'bin');
   const serverPath = path.join(binDir, 'llama-server');
-  const reuse = (await builtCommit(repoDir)) === sheet.ref && (await stat(serverPath).catch(() => null));
+  const reuse = (await builtCommit(repoDir)) === own.build && (await stat(serverPath).catch(() => null));
 
   if (!reuse) {
     const archive = await download({
@@ -235,6 +237,7 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
     await rm(unpacked, { recursive: true, force: true });
     await extract(archive, parent);
     await rename(unpacked, repoDir);
+    await applyMerges(sheet, repoDir, onLog);
     // nvcc refuse un g++ trop récent : on lui passe celui que la détection a retenu, par son chemin.
     const hostCompiler = (await run('sh', ['-c', `command -v ${tools.hostCompiler}`])).stdout.trim();
     // Code non relu (fiche isolée) : compilé dans la bulle, sans réseau, ne voyant que ses sources.
@@ -247,14 +250,14 @@ export async function buildEngine(sheet, tools, onLog = () => {}) {
     await step(['-S', '.', '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
       `-DCMAKE_CUDA_ARCHITECTURES=${sheet.cudaArch}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`, '-DLLAMA_CURL=OFF'], { cwd: repoDir });
     await step(['--build', buildDir, '-j', String(os.availableParallelism()), '--target', 'llama-server'], { cwd: repoDir, timeout: 90 * 60_000 });
-    await writeFile(path.join(repoDir, '.harn-commit'), sheet.ref);
+    await writeFile(path.join(repoDir, '.harn-commit'), own.build);
   }
 
   const probe = sheet.isolated ? sandboxed(serverPath, ['--version'], { readable: [binDir] }) : { command: serverPath, args: ['--version'] };
   const { stdout, stderr } = await run(probe.command, probe.args, { env: engineEnv(binDir), timeout: 30_000 }).catch((error) => error);
   const version = `${stdout ?? ''}${stderr ?? ''}`.match(/version:\s*(\S+)/)?.[1];
   if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
-  const info = { kind: sheet.id, label: sheet.label, backend, tag: sheet.version ?? sheet.ref.slice(0, 7), commit: sheet.ref, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };
+  const info = { kind: sheet.id, label: sheet.label, backend, tag: sheet.version ?? sheet.ref.slice(0, 7) + (sheet.merges?.length ? '+PR' : ''), commit: sheet.ref, build: own.build, version, dir: binDir, serverPath, verified: false, builtWith: `nvcc ${tools.nvcc}, ${tools.hostCompiler}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
 }
@@ -296,11 +299,41 @@ export const rdna4Target = (hardware) => (/9060/.test(hardware?.primary?.name ??
 const ENGINE_PATCHES = fileURLToPath(new URL('./assets/', import.meta.url));
 async function harnPatches(sheet) {
   const files = (sheet.patches ?? []).map((name) => path.join(ENGINE_PATCHES, sheet.id, name));
-  if (!files.length) return { files, build: sheet.ref, dir: sheet.ref.slice(0, 12) };
+  if (!files.length && !sheet.merges?.length) return { files, build: sheet.ref, dir: sheet.ref.slice(0, 12) };
   const hash = createHash('sha256');
   for (const file of files) hash.update(await readFile(file));
+  // Les PR d'un mélange : leurs têtes figées entrent dans l'identité du build.
+  for (const merge of sheet.merges ?? []) hash.update(`${merge.repo}#${merge.number}@${merge.base}...${merge.head}\n`);
   const short = hash.digest('hex').slice(0, 12);
   return { files, build: `${sheet.ref}+${short}`, dir: `${sheet.ref.slice(0, 12)}-${short}` };
+}
+
+// Moteur « mélange » (engines.mjs, requiredPrsEngine) : les diffs des PR, figés entre la base et la
+// tête de chacune, posés dans l'ordre sur le commit déplié. git apply n'exécute rien : appliqué hors
+// de la bulle, dans un dépôt créé pour l'occasion (le dossier runtime/ peut se trouver dans un autre
+// dépôt git, dont git apply prendrait sinon la racine). Un diff qui ne s'applique pas arrête tout.
+async function applyMerges(sheet, repoDir, onLog) {
+  if (!sheet.merges?.length) return;
+  const git = (args) => runLogged('git', ['-c', 'user.name=harn', '-c', 'user.email=harn@localhost', '-c', 'commit.gpgsign=false', ...args],
+    { cwd: repoDir, env: { ...process.env, GIT_COMMITTER_NAME: 'harn', GIT_COMMITTER_EMAIL: 'harn@localhost', GIT_CEILING_DIRECTORIES: path.dirname(repoDir) } }, onLog);
+  await git(['init', '-q']);
+  await git(['add', '-A', '-f']);
+  await git(['commit', '-q', '-m', `llama.cpp ${sheet.ref}`]);
+  for (const merge of sheet.merges) {
+    const owner = merge.headRepo.split('/')[0];
+    const file = await download({
+      id: `runtime:${sheet.id}-pr-${merge.number}`, label: `${sheet.label} (diff ${merge.repo}#${merge.number})`,
+      url: `https://github.com/${merge.repo}/compare/${merge.base}...${owner}:${merge.head}.diff`,
+      dest: path.join(DIRS.downloads, `${sheet.id}-${merge.repo.split('/')[0]}-${merge.number}-${merge.head.slice(0, 7)}.diff`),
+    });
+    onLog(`PR ${merge.repo}#${merge.number} (${merge.head.slice(0, 7)})`);
+    try {
+      await git(['apply', file]);
+    } catch {
+      throw new Error(`${sheet.label} : la PR ${merge.repo}#${merge.number} ne s’applique pas sur llama.cpp ${sheet.ref.slice(0, 7)}`);
+    }
+    await git(['commit', '-q', '-a', '-m', `${merge.repo}#${merge.number}`]);
+  }
 }
 
 // Deux sortes de sources :
@@ -333,6 +366,7 @@ export async function buildHip(sheet, hardware, onLog = () => {}) {
       for (const dir of [repoDir, unpacked]) await rm(dir, { recursive: true, force: true });
       await extract(archive, parent);
       await rename(unpacked, repoDir);
+      await applyMerges(sheet, repoDir, onLog);
     } else {
       const baseArchive = await fetchSource('ggml-org/llama.cpp', sheet.base, 'base');
       const patchArchive = await fetchSource(sheet.repo, sheet.ref, 'correctifs');
@@ -388,7 +422,7 @@ export async function buildHip(sheet, hardware, onLog = () => {}) {
   const version = (await probe(['--version'])).match(/version:\s*(\S+)/)?.[1];
   if (!version) throw new Error(`${sheet.label} compilé mais llama-server ne démarre pas`);
   const devices = [...(await probe(['--list-devices'])).matchAll(/^\s+([A-Za-z]+\d+): (.+?) \((\d+) MiB/gm)].map(([, id, name, mib]) => ({ id, name, mib: Number(mib) }));
-  const info = { kind: sheet.id, label: sheet.label, backend: 'hip', tag: sheet.ref.slice(0, 7) + (own.files.length ? '+harn' : ''), commit: sheet.ref, build: own.build, version, dir: binDir, serverPath, libs,
+  const info = { kind: sheet.id, label: sheet.label, backend: 'hip', tag: sheet.ref.slice(0, 7) + (own.files.length ? '+harn' : '') + (sheet.merges?.length ? '+PR' : ''), commit: sheet.ref, build: own.build, version, dir: binDir, serverPath, libs,
     devices: devices.length ? devices : null, verified: false, builtWith: `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[runtimeId] = info; });
   return info;
@@ -665,6 +699,68 @@ export async function installRadiance(onLog = () => {}) {
   }
   const info = { kind: 'radiance', image, dir, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes.radiance = info; });
+  return info;
+}
+
+// ── Moteurs sur mesure (burnoutIA/moteurs) : Inkling 2 Mini en HIP ────────────────────────
+// strata-ink2 (Strata, MIT) porté sur RDNA4. Il décode Inkling ~2 fois plus vite que llama.cpp
+// sur une R9700 (67 tok/s contre 33), parce qu'il fusionne les opérations de la boucle à trois
+// passages : 7 265 noyaux par token chez llama.cpp, et la carte ne calcule que 40 % du temps.
+// La recette, les mesures et la validation contre llama.cpp sont dans le dépôt (inkling-2-mini.md).
+// Commit figé, comme Strata : Harn compile ce contenu précis, dans la bulle, puis lance sa façade
+// OpenAI (outils/serveur.py, avec tokenizers et jinja2 dans un venv à lui).
+export const INK2 = {
+  repo: 'burnoutIA/moteurs',
+  commit: 'bf6086ad8728edab81393a06b3e3ed1beca3a802',
+  pip: ['tokenizers==0.23.3', 'jinja2==3.1.6'],
+};
+export async function installInk2(hardware, onLog = () => {}) {
+  if (!LINUX) throw new Error('Le moteur sur mesure d’Inkling n’est installé par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'ink2');
+  const src = path.join(dir, `moteurs-${INK2.commit.slice(0, 12)}`);
+  const work = path.join(src, 'inkling2');
+  const engine = path.join(work, 'build', 'strata-ink2');
+  const target = rdna4Target(hardware);
+  const build = `${INK2.commit}@${target}`;
+  const existing = getState().runtimes.ink2;
+  if (existing?.build === build && (await stat(existing.engine).catch(() => null)) && (await ready(existing.venv))) return existing;
+  await mkdir(dir, { recursive: true });
+
+  if (!((await builtCommit(work)) === build && (await stat(engine).catch(() => null)))) {
+    const archive = await download({
+      id: 'runtime:ink2',
+      label: `Moteur sur mesure d’Inkling (${INK2.repo} ${INK2.commit.slice(0, 7)})`,
+      url: `https://github.com/${INK2.repo}/archive/${INK2.commit}.tar.gz`,
+      dest: path.join(DIRS.downloads, `moteurs-${INK2.commit.slice(0, 7)}.tar.gz`),
+    });
+    const unpacked = path.join(dir, `moteurs-${INK2.commit}`);
+    for (const target of [src, unpacked]) await rm(target, { recursive: true, force: true });
+    await extract(archive, dir);
+    await rename(unpacked, src);
+    const rocm = await ensureRocm(onLog);
+    // Dans la bulle : le système en lecture seule, ROCm en lecture, le seul dossier du moteur en
+    // écriture, sans réseau. build.sh appelle hipcc de ROCm (voir son en-tête pour les en-têtes hip/).
+    const boxed = sandboxed('bash', ['build.sh'], { writable: [work], readable: [rocm], cwd: work });
+    const { command, args } = niced(boxed.command, boxed.args);
+    onLog(`Compilation de strata-ink2 (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
+    await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, ROCM: rocm, GPU_TARGET: target } }, onLog);
+    if (!(await stat(engine).catch(() => null))) throw new Error('strata-ink2 : la compilation n’a pas produit le moteur');
+    await writeFile(path.join(work, '.harn-commit'), build);
+  }
+
+  // La façade lit le gabarit de chat et le tokenizer : tokenizers et jinja2, versions figées.
+  const venv = path.join(dir, 'venv');
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    const step = (args) => { onLog(`uv ${args.join(' ')}`); return runLogged(uv, args, { cwd: dir, timeout: 30 * 60_000 }, onLog); };
+    await step(['venv', '--python', '3.12', venv]);
+    await step(['pip', 'install', '--python', path.join(venv, 'bin', 'python'), ...INK2.pip]);
+    await markReady(venv);
+  }
+  const info = { kind: 'ink2', commit: INK2.commit, build, dir: work, engine, venv, python: path.join(venv, 'bin', 'python'),
+    server: path.join(work, 'outils', 'serveur.py'), builtWith: `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes.ink2 = info; });
   return info;
 }
 
