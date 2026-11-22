@@ -354,6 +354,7 @@ async function launch(id) {
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+    await warmUp(model).catch(() => {});
     patch({ status: 'ready', readyAt: Date.now() });
     touch();
   } catch (error) {
@@ -361,6 +362,31 @@ async function launch(id) {
     patch({ status: 'error', running: child ? id : null, error: error.message });
     throw error;
   }
+}
+
+// Une seconde de son presque muet (un souffle à 220 Hz), en WAV 24 kHz : de quoi faire tourner
+// le modèle une fois sans extrait.
+function quietWav() {
+  const rate = 24000;
+  const pcm = Buffer.alloc(rate * 2);
+  for (let i = 0; i < rate; i += 1) pcm.writeInt16LE(Math.round(300 * Math.sin((2 * Math.PI * 220 * i) / rate)), i * 2);
+  const head = Buffer.alloc(44);
+  head.write('RIFF'); head.writeUInt32LE(36 + pcm.length, 4); head.write('WAVEfmt ', 8); head.writeUInt32LE(16, 16);
+  head.writeUInt16LE(1, 20); head.writeUInt16LE(1, 22); head.writeUInt32LE(rate, 24); head.writeUInt32LE(rate * 2, 28);
+  head.writeUInt16LE(2, 32); head.writeUInt16LE(16, 34); head.write('data', 36); head.writeUInt32LE(pcm.length, 40);
+  return `data:audio/wav;base64,${Buffer.concat([head, pcm]).toString('base64')}`;
+}
+
+// La première requête met le moteur en route (compilation, graphes) : faite au démarrage.
+async function warmUp(model) {
+  const { family, kind, presets } = describeVoiceModel(model);
+  if (!family.warmup) return;
+  await fetch(`http://127.0.0.1:${PORTS.voice}/v1/audio/speech`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ input: 'Bonjour.', model: model.id, response_format: 'pcm', ...family.warmup({ kind, presets, silence: quietWav() }) }),
+    signal: AbortSignal.timeout(60_000),
+  }).then((res) => res.arrayBuffer());
 }
 
 export async function stopVoice() {

@@ -449,8 +449,8 @@ case, rien ne change pour lui : ni commande, ni consigne en plus dans son contex
   réponse arrive en message vocal. Les liens cités partent juste après, en texte. Une longue
   réponse est coupée en plusieurs vocaux. `/ecrire` revient au texte.
 - **La carte graphique** : un seul modèle de voix tourne à la fois, une requête à la fois, à côté
-  du modèle de texte (Voxtral ~8,5 Go, poids compressés en fp8 au chargement ; Qwen3-TTS estimé
-  à ~8,5 Go pour le 1.7B, ~7 Go pour le 0.6B). S'il manque de place, le modèle de texte est
+  du modèle de texte (Voxtral ~8,5 Go, poids compressés en fp8 au chargement ; Qwen3-TTS 1.7B
+  6,8 Go mesurés, le 0.6B estimé à ~5,5 Go). S'il manque de place, le modèle de texte est
   déchargé puis rechargé avec moins de contexte, pour ce chargement-là seulement. La voix
   s'arrête après un quart d'heure sans rien dire, et le temps d'une image.
 - **L'API** : `POST /v1/audio/speech` au format d'OpenAI (`input`, et au choix `model`, `voice`,
@@ -461,7 +461,9 @@ case, rien ne change pour lui : ni commande, ni consigne en plus dans son contex
   la machine reliée qui a le modèle : le texte entre au fil de l'eau (`session.config` avec
   `ref_audio`/`ref_text`, `input.text`, `input.done`) et l'audio sort au fil de la génération.
   Fermer la connexion arrête la génération ; un flux ouvert garde le modèle en marche.
-- Voxtral : 30 s de parole en ~5 s sur une RTX 3090. Journal : `data/logs/voice.log`.
+- Sur une RTX 3090 : Voxtral, 30 s de parole en ~5 s ; Qwen3-TTS 1.7B Base en flux, premier son
+  en 0,1 s (depuis une autre machine du réseau), 6 fois plus vite que le temps réel. Démarrage
+  ~1 min, une phrase d'essai comprise. Journal : `data/logs/voice.log`.
 
 ## Sécurité de l'inférence
 

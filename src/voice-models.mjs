@@ -87,11 +87,12 @@ ${voxtralCommon}
     id: 'qwen3-tts',
     name: 'Qwen3-TTS',
     match: /qwen3-tts/,
-    // Estimations (poids bf16 + cache d'une seule requête), à corriger par une mesure : le talker
-    // (étage 0) porte le modèle de langue, le code2wav (étage 1) le décodeur de son (~0,7 Go de
-    // poids). La deploy-config d'origine en demande 30 % chacun d'une H100.
-    stageMiB: ({ size }) => (size === '0b6' ? [3500, 3000] : [5000, 3000]),
-    needMiB: ({ size }) => (size === '0b6' ? 7000 : 8500),
+    // Le talker (étage 0) porte le modèle de langue, le code2wav (étage 1) le décodeur de son,
+    // sans cache. Mesuré sur une 3090 pour le 1.7B (2026-11-22) : 5,5 Go et 1,3 Go, contexte CUDA
+    // compris. Le 0.6B : estimé d'après lui. La deploy-config d'origine en demande 30 % chacun
+    // d'une H100.
+    stageMiB: ({ size }) => (size === '0b6' ? [3500, 1500] : [5000, 1500]),
+    needMiB: ({ size }) => (size === '0b6' ? 5500 : 7200),
     // tts_model_type du config.json : base (clonage), custom_voice (voix fournies), voice_design
     // (voix décrite par une consigne, que Harn ne sait pas encore demander).
     kind: ({ ttsType }) => (ttsType === 'base' ? 'clone' : ttsType === 'custom_voice' ? 'preset' : null),
@@ -108,6 +109,11 @@ stages:
     max_num_seqs: 1
     gpu_memory_utilization: ${share[1]}
 `,
+    // Une phrase dite au démarrage : la première vraie phrase part ensuite aussi vite que les
+    // autres (2,2 s sinon, contre ~0,1 s). Base : le timbre d'un extrait sans transcription.
+    warmup: ({ kind, presets, silence }) => (kind === 'clone'
+      ? { task_type: 'Base', language: 'French', ref_audio: silence, x_vector_only_mode: true }
+      : { task_type: 'CustomVoice', language: 'French', voice: presets[0] }),
     // Base : l'extrait et sa transcription (sans elle, seul le timbre est pris : x_vector_only_mode).
     request: ({ kind, voice, sample, language }) => (kind === 'clone'
       ? { task_type: 'Base', language, ref_audio: sample.audio, ...(sample.text ? { ref_text: sample.text } : { x_vector_only_mode: true }) }
