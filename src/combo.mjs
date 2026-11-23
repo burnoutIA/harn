@@ -192,7 +192,9 @@ async function run(ids, { minContext = null, idleMinutes = IDLE_MINUTES } = {}) 
       s.combo.readyAt = Date.now();
       for (const m of s.combo.models) if (m.kind === 'text') m.context = loadedContext(m.id) ?? m.context;
     });
-    bus.emit('toast', `Combo prêt : ${plan.models.map((m) => m.name + (m.context ? ` (${k(loadedContext(m.id) ?? m.context)})` : '')).join(' + ')}`);
+    const ready = `Combo prêt : ${plan.models.map((m) => m.name + (m.context ? ` (${k(loadedContext(m.id) ?? m.context)})` : '')).join(' + ')}`;
+    console.log(`[harn] ${ready}`);
+    bus.emit('toast', ready);
     return comboReport();
   } catch (error) {
     if (getState().combo?.since === since) update((s) => { s.combo = { ...s.combo, status: 'error', error: error.message }; });
@@ -211,7 +213,9 @@ export async function stopCombo({ unload = true, reason = null } = {}) {
       else if (voiceActivity().running === m.id) await stopVoice();
     }
   }
-  bus.emit('toast', reason ?? `Combo arrêté : ${combo.models.map((m) => m.name).join(' + ')}${unload ? ' déchargés' : ''}`);
+  const message = reason ?? `Combo arrêté : ${combo.models.map((m) => m.name).join(' + ')}${unload ? ' déchargés' : ''}`;
+  console.log(`[harn] ${message}`);
+  bus.emit('toast', message);
   return comboReport();
 }
 
@@ -267,7 +271,7 @@ export async function comboIdleCheck(now = Date.now()) {
   if (texts.some(inUse) || voice.streams > 0 || busyWith()) return false;
   const last = Math.max(combo.readyAt ?? 0, ...texts.map(lastUseOf), voice.lastUse ?? 0);
   if (now - last < combo.idleMinutes * 60_000) return false;
-  await stopCombo({ reason: `Combo arrêté et déchargé : ${combo.idleMinutes} minutes sans requête` });
+  await stopCombo({ reason: `Combo arrêté et déchargé (${combo.models.map((m) => m.id).join(' + ')}) : ${combo.idleMinutes} minutes sans requête` });
   return true;
 }
 export function watchCombo() {
