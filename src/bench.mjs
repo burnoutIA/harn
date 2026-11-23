@@ -22,8 +22,11 @@ const sameTuning = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // DFlash2 : brouillon Q4_K_M et ses tampons. Mesuré sur RTX 3090 (b11430, 124k) : ~0,9 Gio ;
 // on garde un peu de marge. La VRAM réelle est revérifiée après chargement.
 const DFLASH_MIB = 1200;
-// DSpark (Inkling 2 Mini) : brouillon Q8_0 de 0,4 Go, ses tampons et son état récurrent.
-const DSPARK_MIB = 900;
+// DSpark (Inkling 2 Mini) : brouillon Q8_0 de 0,4 à 0,5 Go, ses tampons et son état récurrent.
+// Son contexte a son propre tampon de calcul, qui suit ubatch × contexte comme celui du modèle :
+// RTX 3090, Inkling UD-Q4_K_M, ub 512 : cudaMalloc refusé à 100k q8_0 avec 900 réservés ; à 100k
+// q4_0 il charge, 23,3 Go sur 24,6, soit ~1,8 Gio pour le brouillon et son contexte.
+const DSPARK_MIB = 1800;
 // La charge longue (~94k tokens lus) demande ce contexte.
 const LONG_CONTEXT = 100 * 1024;
 // Le plus grand contexte (≥ 100k) qui laisse la marge une fois `extraMiB` ajoutés en VRAM.
@@ -33,6 +36,22 @@ function roomFor(model, best, extraMiB) {
   const missing = extraMiB + HEADROOM_MIN_MIB - best.headroomMiB;
   const context = missing <= 0 ? best.tuning.context : Math.floor((best.tuning.context - missing / perToken) / 4096) * 4096;
   return context >= OBJECTIVE.minContext ? context : null;
+}
+
+// Le réglage de départ de DSpark : le meilleur, contexte réduit pour loger le brouillon. S'il
+// tomberait sous 100k, un cache plus léger (f16 → q8_0 → q4_0) libère la place. RTX 3090, Inkling
+// UD-Q4_K_M à 118k en q8_0 : le bras était sauté sans un mot ; il est maintenant noté.
+export function dsparkStart(model, best) {
+  const context = roomFor(model, best, DSPARK_MIB);
+  if (context) return { ...best.tuning, context };
+  const per = model.kvBytesPerToken ?? {};
+  for (const kv of { f16: ['q8_0', 'q4_0'], q8_0: ['q4_0'] }[best.tuning.kv] ?? []) {
+    if (!per[kv] || best.headroomMiB == null) continue;
+    const freed = (best.tuning.context * (per[best.tuning.kv] - per[kv])) / 2 ** 20;
+    const room = roomFor(model, { ...best, headroomMiB: best.headroomMiB + freed, tuning: { ...best.tuning, kv } }, DSPARK_MIB);
+    if (room) return { ...best.tuning, kv, context: room };
+  }
+  return null;
 }
 export async function tuneModel(modelId, options = {}) {
   // Le banc veut la carte pour le modèle mesuré seul : pas pendant un combo.
@@ -211,12 +230,13 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   // 3). R9700, Inkling 2 Mini : ~7 600 petits noyaux par token, la carte occupée 39 % du temps ; une
   // passe qui vérifie plusieurs tokens coûte presque autant qu'une seule. Un moteur qui ne connaît
   // pas DSpark (sans la PR #32218) refuse le brouillon : l'essai est noté, le réglage reste.
-  const dsparkContext = gpu && model.dspark ? roomFor(model, best, DSPARK_MIB) : null;
-  if (dsparkContext) {
+  const sparkStart = gpu && model.dspark ? dsparkStart(model, best) : null;
+  if (gpu && model.dspark && !sparkStart) results.push({ id: 'dspark', stage: 'DSpark', label: 'pas essayé : pas la place pour le brouillon à 100k', ok: false });
+  if (sparkStart) {
     onProgress('DSpark · téléchargement du brouillon');
     try {
       await downloadFile(model, model.dspark);
-      const start = { ...best.tuning, context: dsparkContext };
+      const start = sparkStart;
       let spark = null;
       for (const n of [3, 2, 4, 6]) {
         // Au-delà de 4, seulement si 4 a battu 2 et 3.

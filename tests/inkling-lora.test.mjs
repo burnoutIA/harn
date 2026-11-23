@@ -67,3 +67,20 @@ test('DSpark : le brouillon du dépôt passe à llama-server avec sa profondeur'
   // Sans le fichier (pas encore téléchargé) : aucune spéculation demandée.
   assert.ok(!llamaArgs(entry, { model: '/m/ink.gguf' }, { context: 131072, kv: 'f16', backend: 'hip', spec: { type: 'dspark', n: 3 } }, hardware).includes('draft-dspark'));
 });
+
+test('DSpark : sans la place à 100k, le banc l’essaie avec un cache plus léger', async () => {
+  const { dsparkStart } = await import('../src/bench.mjs');
+  const { OBJECTIVE } = await import('../src/planner.mjs');
+  const model = { dspark: { name: 'dspark.gguf' }, kvBytesPerToken: { f16: 32768, q8_0: 17408, q4_0: 9216 } };
+  // 118k en q8_0 avec 3 Gio de marge : en q8_0 il tomberait sous 100k, en q4_0 il tient.
+  const tight = dsparkStart(model, { headroomMiB: 3000, tuning: { context: 120832, kv: 'q8_0', fa: 'on' } });
+  assert.equal(tight.kv, 'q4_0');
+  assert.equal(tight.fa, 'on');
+  assert.ok(tight.context >= OBJECTIVE.minContext && tight.context <= 120832);
+  // RTX 3090, Inkling UD-Q4_K_M : 1 939 Mio de marge, même en q4_0 le brouillon (~1,8 Gio) ne tient pas.
+  assert.equal(dsparkStart(model, { headroomMiB: 1939, tuning: { context: 120832, kv: 'q8_0' } }), null);
+  // De la place : même cache, contexte gardé.
+  assert.deepEqual(dsparkStart(model, { headroomMiB: 5000, tuning: { context: 120832, kv: 'q8_0' } }), { context: 120832, kv: 'q8_0' });
+  // Déjà en q4_0 et rien de libre : pas d'essai.
+  assert.equal(dsparkStart(model, { headroomMiB: 100, tuning: { context: 120832, kv: 'q4_0' } }), null);
+});
