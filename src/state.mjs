@@ -27,6 +27,7 @@ const initial = () => ({
   pi: { installed: false, version: null, lastLaunch: null },
   lan: false,     // API ouverte au réseau local (port à part, clé exigée)
   approvals: [],  // demandes de pi en attente d'un clic de l'utilisateur (approvals.mjs)
+  approvalsRemote: [], // celles des machines pilotées d'ici (peers.mjs, clé de pilotage)
   cleanupRefused: [], // fichiers de models/ que l'utilisateur a choisi de garder (cleanup.mjs)
 });
 
@@ -49,6 +50,7 @@ export async function loadState() {
   if (state.setup.phase === 'running') state.setup.phase = 'interrupted';
   // Une demande restée sans réponse ne vaut plus rien : pi qui l'attendait n'est plus là.
   state.approvals = [];
+  state.approvalsRemote = [];
   for (const model of Object.values(state.models ?? {})) Object.assign(model, { phase: null, phaseDetail: null, tuning: false, tuneDetail: null });
   for (const profile of Object.values(state.profiles ?? {})) profile.iqRunning = null;
   return state;

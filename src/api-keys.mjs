@@ -67,6 +67,9 @@ function normalize(record) {
     lastUsedAt: record.lastUsedAt ?? null,
     requests: Number.isFinite(record.requests) ? record.requests : 0,
     tokens: Number.isFinite(record.tokens) ? record.tokens : 0,
+    // Clé de pilotage : donnée à une autre machine Harn pour qu'elle décide, sur un clic dans sa
+    // propre fenêtre, des demandes d'accord d'ici (gateway.mjs, /v1/harn/approvals).
+    pilot: record.pilot === true,
   };
 }
 
@@ -125,7 +128,7 @@ export async function listKeys() {
   return { state: status, enforced: keysEnforced(), error: fileError, keys: keys.map(publicRecord) };
 }
 
-export async function createKey(label) {
+export async function createKey(label, { pilot = false } = {}) {
   const name = String(label ?? '').trim();
   if (!name) throw failure(400, 'Donnez un nom à la clé, par exemple « Portable — Copilot »');
   if (name.length > MAX_LABEL) throw failure(400, `Nom de clé limité à ${MAX_LABEL} caractères`);
@@ -133,7 +136,7 @@ export async function createKey(label) {
   if (status === 'invalid') throw failure(409, `${fileError}. Corrigez-le ou supprimez-le avant de créer une clé.`);
   if (keys.some((key) => key.label.toLowerCase() === name.toLowerCase())) throw failure(409, `Une clé porte déjà le nom « ${name} »`);
   const token = generateKey();
-  const record = { id: `key_${randomBytes(6).toString('hex')}`, label: name, hash: hashKey(token), createdAt: new Date().toISOString(), lastUsedAt: null, requests: 0, tokens: 0 };
+  const record = { id: `key_${randomBytes(6).toString('hex')}`, label: name, hash: hashKey(token), createdAt: new Date().toISOString(), lastUsedAt: null, requests: 0, tokens: 0, pilot: pilot === true };
   keys.push(record);
   status = 'active';
   await saveKeys();

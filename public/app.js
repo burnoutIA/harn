@@ -1450,7 +1450,7 @@ function accessCard() {
       <div class="acts"><button class="btn small primary" data-action="copy-text" data-text="${esc(newKey.token)}">${icon.copy} Copier la clé</button><button class="btn small" data-action="copy-text" data-text="${esc(keyUrl)}">Adresse avec la clé</button><button class="btn small ghost" data-action="key-done">C’est noté</button></div>
       <p class="hint">L’adresse avec la clé (<code style="display:inline;padding:1px 5px">/k/&lt;clé&gt;/v1</code>) sert aux clients qui ne laissent pas saisir de clé, comme Copilot. Elle peut finir dans l’historique ou les journaux du client : à réserver à cette machine ou au réseau privé.</p>
     </div>` : '';
-  const keys = (access.keys ?? []).map((k) => `<div class="key-row"><div><b>${esc(k.label)}</b><small>${esc(used(k))}</small></div><button class="btn small ghost" data-action="key-revoke" data-id="${esc(k.id)}" data-label="${esc(k.label)}">Révoquer</button></div>`).join('');
+  const keys = (access.keys ?? []).map((k) => `<div class="key-row"><div><b>${esc(k.label)}</b>${k.pilot ? ' <span class="pill">pilotage</span>' : ''}<small>${esc(used(k))}</small></div><button class="btn small ghost" data-action="key-revoke" data-id="${esc(k.id)}" data-label="${esc(k.label)}">Révoquer</button></div>`).join('');
   const lan = access.lan;
   const lanBody = !lan.enabled ? '<p style="margin:0">Fermé : seule cette machine joint l’API.</p>'
     : !lan.listening ? `<p class="access-warn" style="margin:0">Activé, mais le port ${lan.port} n’écoute pas (voir data/logs/harn.log).</p>`
@@ -1463,7 +1463,7 @@ function accessCard() {
       ${stateLine}
       ${secret}
       ${keys ? `<div class="keys">${keys}</div>` : ''}
-      <form class="add-form" data-form="key"><input id="key-label" type="text" maxlength="80" placeholder="Portable — Copilot" autocomplete="off" spellcheck="false" aria-label="Nom de la nouvelle clé"><button class="btn small" type="submit">Créer une clé</button></form>
+      <form class="add-form" data-form="key"><input id="key-label" type="text" maxlength="80" placeholder="Portable — Copilot" autocomplete="off" spellcheck="false" aria-label="Nom de la nouvelle clé"><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0" title="Pour une autre machine Harn : elle verra les demandes d’accord d’ici et pourra les accepter d’un clic dans sa fenêtre. Ne sert à rien d’autre."><input id="key-pilot" type="checkbox"> pilotage</label><button class="btn small" type="submit">Créer une clé</button></form>
       <p style="margin:0">Une clé par application ou par appareil : chacune se révoque seule et compte ses requêtes. Demander un autre modèle installé le charge automatiquement.</p>
       <div class="row"><span>Réseau local</span>${lanBody}</div>
       <button class="btn small" data-action="lan" data-on="${lan.enabled ? '' : '1'}" ${!lan.enabled && !access.enforced ? 'disabled title="Créez d’abord une clé"' : ''}>${lan.enabled ? 'Fermer au réseau local' : 'Ouvrir au réseau local'}</button>
@@ -1478,7 +1478,10 @@ function peersBlock(peers) {
     const status = p.ok === false ? `<small class="access-warn" style="margin:0">${esc(p.error ?? 'injoignable')}</small>`
       : p.ok ? `<small>${p.models.length ? `${p.models.length} modèle${p.models.length > 1 ? 's' : ''}` : 'aucun modèle installé'} · ${esc(p.url)}</small>` : '<small>Vérification…</small>';
     const models = (p.models ?? []).map((m) => `<button class="model-id" data-action="copy-text" data-text="${esc(m.id)}" title="${esc(m.name)}${m.context ? ` · ${kTokens(m.context)} de contexte` : ''} · cliquer pour copier">${icon.copy}<span>${esc(m.id)}</span></button>`).join('');
-    return `<div class="key-row"><div><b>${esc(p.name)}</b>${status}${models ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${models}</div>` : ''}</div><button class="btn small ghost" data-action="peer-remove" data-id="${esc(p.id)}" data-label="${esc(p.name)}">Retirer</button></div>`;
+    const pilot = p.pilot?.on
+      ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px"><small${p.pilot.ok === false ? ' class="access-warn" style="margin:0"' : ''}>${p.pilot.ok === false ? `Pilotage : ${esc(p.pilot.error ?? 'injoignable')}` : 'Pilotée d’ici : ses demandes d’accord s’affichent dans cette fenêtre'}</small><button class="btn small ghost" data-action="peer-unpilot" data-id="${esc(p.id)}" data-label="${esc(p.name)}">Arrêter le pilotage</button></div>`
+      : `<form class="add-form" data-form="peer-pilot" data-id="${esc(p.id)}" style="margin-top:6px" title="Sur ${esc(p.name)} : npm run keys -- create --pilot &quot;cette machine&quot;, ou une clé créée avec la case « pilotage »"><input type="password" placeholder="Clé de pilotage de ${esc(p.name)}" autocomplete="off" spellcheck="false" aria-label="Clé de pilotage de ${esc(p.name)}" style="flex:1 1 200px"><button class="btn small" type="submit">Piloter</button></form>`;
+    return `<div class="key-row"><div><b>${esc(p.name)}</b>${status}${models ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${models}</div>` : ''}${pilot}</div><button class="btn small ghost" data-action="peer-remove" data-id="${esc(p.id)}" data-label="${esc(p.name)}">Retirer</button></div>`;
   }).join('');
   return `<div class="row"><span>Autres machines Harn</span><div>
       <p style="margin:0">Les modèles d’une autre machine s’utilisent ici, à la même adresse, sous le nom <code style="display:inline;padding:1px 5px">modele@machine</code>. C’est elle qui les charge, sur sa carte. Sur l’autre machine : ouvrez l’API au réseau local et créez une clé pour celle-ci.</p>
@@ -1508,11 +1511,12 @@ const APPROVAL_WORDS = {
   cleanup: { label: 'Ménage des modèles', refuse: 'Garder', accept: 'Supprimer' },
 };
 function renderApprovals() {
-  const pending = (state.approvals ?? []).filter((a) => a.status === 'pending');
+  // Celles des machines pilotées d'ici (clé de pilotage) : décidées ici, exécutées là-bas.
+  const pending = [...(state.approvals ?? []).filter((a) => a.status === 'pending'), ...(state.approvalsRemote ?? [])];
   const words = (a) => APPROVAL_WORDS[a.kind] ?? APPROVAL_WORDS.pi;
   const html = pending.map((a) => `<section class="card approval" role="alertdialog" aria-label="${esc(a.title)}">
-      <div class="label">${words(a).label}</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
-      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-decision="refuse">${words(a).refuse}</button><button class="btn small primary" data-approval="${esc(a.id)}" data-decision="accept">${words(a).accept}</button></div>
+      <div class="label">${words(a).label}${a.peerId ? ` · sur ${esc(a.peer)}` : ''}</div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p>
+      <div class="acts"><button class="btn small ghost" data-approval="${esc(a.id)}" data-peer="${esc(a.peerId ?? '')}" data-decision="refuse">${words(a).refuse}</button><button class="btn small primary" data-approval="${esc(a.id)}" data-peer="${esc(a.peerId ?? '')}" data-decision="accept">${words(a).accept}</button></div>
     </section>`).join('');
   if (html !== approvalsHtml) { approvalsHtml = html; approvalsEl.innerHTML = html; }
   document.title = pending.length ? `(${pending.length}) ${baseTitle}` : baseTitle;
@@ -1522,7 +1526,8 @@ approvalsEl.addEventListener('click', async (event) => {
   if (!button) return;
   for (const b of button.closest('.approval').querySelectorAll('button')) b.disabled = true;
   try {
-    const r = await post(`/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
+    const r = await post(button.dataset.peer ? `/api/approvals/remote/${button.dataset.peer}/${button.dataset.approval}/${button.dataset.decision}` : `/api/approvals/${button.dataset.approval}/${button.dataset.decision}`);
+    if (r.peerId) { toast(r.status === 'accepted' ? `Accepté : ça démarre sur ${r.peer}` : r.status === 'refused' ? `Refusé sur ${r.peer}` : r.error ?? 'Échec'); return; }
     if (r.kind === 'cleanup') { if (r.status !== 'accepted') toast(r.status === 'refused' ? 'Fichiers gardés : Harn ne les proposera plus' : r.error ?? 'Échec'); }
     else if (r.kind === 'card') toast(r.status === 'accepted' ? 'Place laissée' : 'Refusé : la personne en est avertie');
     else toast(r.status === 'accepted' ? 'Accepté : l’installation démarre' : r.status === 'refused' ? 'Refusé : pi en est averti' : r.error ?? 'Échec');
@@ -1844,8 +1849,20 @@ app.addEventListener('submit', async (event) => {
     const button = keyForm.querySelector('button');
     button.disabled = true;
     try {
-      newKey = await post('/api/access/keys', { label: keyForm.querySelector('#key-label').value });
+      newKey = await post('/api/access/keys', { label: keyForm.querySelector('#key-label').value, pilot: keyForm.querySelector('#key-pilot').checked });
       await loadAccess();
+    } catch (error) { toast(error.message); } finally { button.disabled = false; }
+    return;
+  }
+  const pilotForm = event.target.closest('[data-form="peer-pilot"]');
+  if (pilotForm) {
+    event.preventDefault();
+    const button = pilotForm.querySelector('button');
+    button.disabled = true;
+    try {
+      access = await post(`/api/access/peers/${pilotForm.dataset.id}/pilot`, { key: pilotForm.querySelector('input').value });
+      renderMachine();
+      toast('Pilotage en place : ses demandes d’accord s’afficheront ici');
     } catch (error) { toast(error.message); } finally { button.disabled = false; }
     return;
   }
@@ -2100,6 +2117,11 @@ Harn le télécharge, le règle pour votre carte et teste son intelligence. Votr
       access = await post(`/api/access/peers/${id}/remove`);
       renderMachine();
       toast(`« ${button.dataset.label} » retirée`);
+    }
+    if (action === 'peer-unpilot') {
+      access = await post(`/api/access/peers/${id}/pilot`, { key: null });
+      renderMachine();
+      toast(`« ${button.dataset.label} » n’est plus pilotée d’ici`);
     }
     if (action === 'peer-refresh') {
       access = await post('/api/access/peers/refresh');

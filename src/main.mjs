@@ -35,7 +35,7 @@ import { agentForImages, agentForVoice, claimCard, remoteModels, createAgent, de
 import { approvalOf, decideApproval, requestApproval } from './approvals.mjs';
 import { proposeCleanup } from './cleanup.mjs';
 import { lanDetails, startLan, stopLan } from './lan.mjs';
-import { addPeer, peersReport, refreshPeers, removePeer, startPeers } from './peers.mjs';
+import { addPeer, decideRemote, peersReport, refreshPeers, removePeer, setPilotKey, startPeers } from './peers.mjs';
 import { applyUpdate, checkForUpdate, watchForUpdates } from './updater.mjs';
 import { checkHub, dismissHub, watchHub } from './watch.mjs';
 
@@ -239,7 +239,7 @@ async function api(req, res, url) {
     if (!fromOurPage(req)) return json(res, 403, { error: 'À faire depuis la fenêtre de Harn' });
     const body = await new Response(req).json().catch(() => ({}));
     try {
-      if (url.pathname === '/api/access/keys') return json(res, 200, await createKey(body.label));
+      if (url.pathname === '/api/access/keys') return json(res, 200, await createKey(body.label, { pilot: body.pilot === true }));
       if (parts[2] === 'keys' && parts[3] && parts[4] === 'revoke') {
         const revoked = await revokeKey(parts[3], { keepOne: Boolean(getState().lan) });
         return json(res, 200, { revoked, access: accessReport(await listKeys()) });
@@ -251,6 +251,10 @@ async function api(req, res, url) {
       // Les autres machines Harn dont on utilise les modèles (peers.mjs).
       if (url.pathname === '/api/access/peers') { await addPeer(body); return json(res, 200, accessReport(await listKeys())); }
       if (url.pathname === '/api/access/peers/refresh') { await refreshPeers(); return json(res, 200, accessReport(await listKeys())); }
+      // Piloter une autre machine : sa clé de pilotage (null la retire).
+      if (parts[2] === 'peers' && parts[3] && parts[4] === 'pilot') { await setPilotKey(parts[3], body.key ?? null); return json(res, 200, accessReport(await listKeys())); }
+      // Une demande d'une machine pilotée, décidée ici d'un clic.
+      if (parts[1] === 'approvals' && parts[2] === 'remote' && parts[3] && parts[4] && ['accept', 'refuse'].includes(parts[5])) return json(res, 200, await decideRemote(parts[3], parts[4], parts[5] === 'accept'));
       if (parts[2] === 'peers' && parts[3] && parts[4] === 'remove') { await removePeer(parts[3]); return json(res, 200, accessReport(await listKeys())); }
       if (parts[1] === 'approvals' && parts[2] && ['accept', 'refuse'].includes(parts[3])) return json(res, 200, decideApproval(parts[2], parts[3] === 'accept'));
     } catch (error) {

@@ -12,12 +12,16 @@ import { getState, update } from './state.mjs';
 export const PEERS_FILE = path.join(DIRS.data, 'peers.json');
 export const SEPARATOR = '@';
 const POLL_MS = 30_000;
+// Les demandes d'accord des machines pilotées : relevées plus souvent, une demande attend un clic.
+const PILOT_POLL_MS = 4_000;
 const TIMEOUT_MS = 4_000;
 const MAX_NAME = 40;
 
-let peers = [];            // { id, name, url, key, addedAt }
+let peers = [];            // { id, name, url, key, addedAt, pilotKey? }
 const seen = new Map();    // id → { ok, error, models, checkedAt }
 let timer = null;
+let pilotTimer = null;
+const asked = new Map();   // id → { ok, error, approvals } : les demandes en attente chez un pair piloté
 
 const failure = (status, message) => Object.assign(new Error(message), { status });
 
@@ -95,6 +99,77 @@ async function comboOf(peer) {
   } catch { return null; }
 }
 
+// ── Pilotage ─────────────────────────────────────────────────────────────────────────────
+// Avec une clé de pilotage (créée sur l'autre machine : npm run keys -- create --pilot), ses
+// demandes d'accord s'affichent ici et se décident d'un clic dans cette fenêtre : l'installation
+// qu'on lance sur elle n'attend plus quelqu'un devant son écran. La clé ne sert qu'à ça.
+const pilotHeaders = (peer) => ({ Authorization: `Bearer ${peer.pilotKey}` });
+
+async function fetchApprovals(peer) {
+  const response = await fetch(`${peer.url}/harn/approvals`, { headers: pilotHeaders(peer), signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (response.status === 401) throw failure(401, 'clé de pilotage refusée par l’autre machine');
+  if (response.status === 403) throw failure(403, 'cette clé n’est pas une clé de pilotage');
+  // Un Harn d'avant le pilotage.
+  if (response.status === 404) throw failure(404, 'l’autre machine ne connaît pas encore le pilotage (Harn à mettre à jour)');
+  if (!response.ok) throw failure(502, `HTTP ${response.status}`);
+  const body = await response.json();
+  return (Array.isArray(body?.approvals) ? body.approvals : []).filter((a) => a?.id && a.title);
+}
+
+async function pollApprovals(peer) {
+  try {
+    asked.set(peer.id, { ok: true, error: null, approvals: await fetchApprovals(peer) });
+  } catch (error) {
+    const message = error.name === 'TimeoutError' ? 'ne répond pas' : error.cause?.code === 'ECONNREFUSED' ? 'connexion refusée' : error.message;
+    asked.set(peer.id, { ok: false, error: message, approvals: [] });
+  }
+}
+
+export async function refreshApprovals() {
+  await Promise.all(peers.filter((p) => p.pilotKey).map(pollApprovals));
+  for (const id of asked.keys()) if (!peers.some((p) => p.id === id && p.pilotKey)) asked.delete(id);
+  showApprovals();
+}
+
+function showApprovals() {
+  const next = peers.flatMap((p) => (asked.get(p.id)?.approvals ?? []).map((a) => ({ ...a, peer: p.name, peerId: p.id })));
+  if (JSON.stringify(getState().approvalsRemote ?? []) !== JSON.stringify(next)) update((s) => { s.approvalsRemote = next; });
+}
+
+// Un clic dans cette fenêtre (main.mjs le vérifie) : la décision part vers la machine pilotée.
+export async function decideRemote(peerId, approvalId, accept) {
+  const peer = peers.find((p) => p.id === peerId);
+  if (!peer) throw failure(404, 'Machine inconnue');
+  if (!peer.pilotKey) throw failure(409, `${peer.name} n’est pas pilotée d’ici`);
+  let response;
+  try {
+    response = await fetch(`${peer.url}/harn/approvals/${encodeURIComponent(approvalId)}/${accept ? 'accept' : 'refuse'}`, { method: 'POST', headers: pilotHeaders(peer), signal: AbortSignal.timeout(15_000) });
+  } catch (error) {
+    throw failure(502, `${peer.name} : ${error.name === 'TimeoutError' ? 'ne répond pas' : error.message}`);
+  }
+  const body = await response.json().catch(() => ({}));
+  await pollApprovals(peer);
+  showApprovals();
+  if (!response.ok) throw failure(response.status, `${peer.name} : ${body?.error?.message ?? `HTTP ${response.status}`}`);
+  return { ...body, peer: peer.name, peerId: peer.id };
+}
+
+// Poser (vérifiée d'abord) ou retirer (null) la clé de pilotage d'une machine.
+export async function setPilotKey(id, key) {
+  const peer = peers.find((p) => p.id === id);
+  if (!peer) throw failure(404, 'Machine inconnue');
+  const token = key == null ? '' : String(key).trim();
+  if (token) {
+    try { await fetchApprovals({ ...peer, pilotKey: token }); } catch (error) { throw failure(error.status === 401 || error.status === 403 || error.status === 404 ? 400 : 502, `${peer.name} : ${error.message}`); }
+    peer.pilotKey = token;
+  } else {
+    delete peer.pilotKey;
+  }
+  await persist();
+  await refreshApprovals();
+  return peersReport();
+}
+
 export const refreshPeers = () => Promise.all(peers.map(poll)).then((all) => { showVoice(); showCombos(); return all; });
 
 // Pour la vue Modèles : les combos des autres machines.
@@ -119,15 +194,20 @@ export async function startPeers() {
   clearInterval(timer);
   timer = setInterval(() => { refreshPeers().catch(() => {}); }, POLL_MS);
   timer.unref?.();
+  await refreshApprovals();
+  clearInterval(pilotTimer);
+  pilotTimer = setInterval(() => { refreshApprovals().catch(() => {}); }, PILOT_POLL_MS);
+  pilotTimer.unref?.();
 }
 
-export function stopPeers() { clearInterval(timer); timer = null; }
+export function stopPeers() { clearInterval(timer); timer = null; clearInterval(pilotTimer); pilotTimer = null; }
 
 // Pour l'interface : jamais la clé.
 export function peersReport() {
-  return peers.map(({ id, name, url, addedAt }) => {
+  return peers.map(({ id, name, url, addedAt, pilotKey }) => {
     const s = seen.get(id) ?? { ok: null, error: null, models: [], checkedAt: null };
-    return { id, name, url, addedAt, ok: s.ok, error: s.error, checkedAt: s.checkedAt, models: s.models.map((m) => ({ id: `${m.id}${SEPARATOR}${id}`, name: m.meta?.name ?? m.id, context: m.meta?.context ?? null })) };
+    const pilot = pilotKey ? { on: true, ok: asked.get(id)?.ok ?? null, error: asked.get(id)?.error ?? null } : { on: false };
+    return { id, name, url, addedAt, pilot, ok: s.ok, error: s.error, checkedAt: s.checkedAt, models: s.models.map((m) => ({ id: `${m.id}${SEPARATOR}${id}`, name: m.meta?.name ?? m.id, context: m.meta?.context ?? null })) };
   });
 }
 
@@ -151,6 +231,8 @@ export async function removePeer(id) {
   peers = peers.filter((p) => p.id !== id);
   if (peers.length === before) throw failure(404, 'Machine inconnue');
   seen.delete(id);
+  asked.delete(id);
+  showApprovals();
   await persist();
   return peersReport();
 }
@@ -202,5 +284,6 @@ export function peerRoute(modelId) {
 export function _setPeers(list, states = {}) {
   peers = list;
   seen.clear();
+  asked.clear();
   for (const [id, s] of Object.entries(states)) seen.set(id, s);
 }

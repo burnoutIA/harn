@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { authorize, bearerToken, extractPathKey, fingerprint, recordUsage } from './api-keys.mjs';
+import { decideApproval } from './approvals.mjs';
 import { displayName, modelById } from './catalog.mjs';
 import { engineHeaders, setEngine } from './engine.mjs';
 import { engineInUse, inFlightOf } from './idle.mjs';
@@ -211,6 +212,27 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
     // figure que par son début.
     console.warn(`[harn] accès refusé ${req.method} ${pathKey.token ? '/k/<clé>' : ''}${url.pathname} depuis ${req.socket.remoteAddress} : ${decision.message} (clé : ${fingerprint(token)}, client : ${req.headers['user-agent'] ?? '?'})`);
     return sendJson(res, decision.status, { error: { message: decision.message, type: 'authentication_error', code: 'invalid_api_key' } }, { ...cors, 'WWW-Authenticate': 'Bearer realm="harn"' });
+  }
+
+  // Le pilotage : une autre machine Harn voit les demandes d'accord d'ici et les décide, sur un
+  // clic dans sa propre fenêtre (peers.mjs). Seule une clé de pilotage y entre : ni une clé de
+  // client, ni la clé interne (pi, le banc).
+  if (url.pathname === '/v1/harn/approvals' || url.pathname.startsWith('/v1/harn/approvals/')) {
+    if (!decision.key?.pilot) return sendJson(res, 403, { error: { message: 'Réservé à une clé de pilotage (npm run keys -- create --pilot "<machine>")' } }, cors);
+    if (req.method === 'GET' && url.pathname === '/v1/harn/approvals') {
+      const pending = (getState().approvals ?? []).filter((a) => a.status === 'pending').map(({ id, kind, title, detail, at }) => ({ id, kind, title, detail, at }));
+      return sendJson(res, 200, { approvals: pending }, cors);
+    }
+    const asked = /^\/v1\/harn\/approvals\/([0-9a-f]{12})\/(accept|refuse)$/.exec(url.pathname);
+    if (req.method !== 'POST' || !asked) return sendJson(res, 404, { error: { message: 'Introuvable' } }, cors);
+    try {
+      const decided = decideApproval(asked[1], asked[2] === 'accept');
+      console.log(`[harn] demande « ${decided.title} » ${decided.status === 'accepted' ? 'acceptée' : decided.status === 'refused' ? 'refusée' : `en échec (${decided.error})`} depuis une autre machine (clé « ${decision.key.label} »)`);
+      recordUsage(decision.key.id);
+      return sendJson(res, 200, decided, cors);
+    } catch (error) {
+      return sendJson(res, error.status ?? 500, { error: { message: error.message } }, cors);
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/models') return sendJson(res, 200, modelsList(), cors);
