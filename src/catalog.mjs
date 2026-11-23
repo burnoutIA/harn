@@ -273,7 +273,8 @@ export const MODELS = [
   },
   {
     // Inkling 2 Mini (Thinking Machines, Apache 2.0) servi par notre moteur sur mesure : strata-ink2
-    // porté en HIP (burnoutIA/moteurs, installInk2), sur le checkpoint officiel NVFP4 + MXFP8. Deux
+    // en CUDA d'origine sur NVIDIA, porté en HIP sur Radeon (burnoutIA/moteurs, installInk2), sur le
+    // checkpoint officiel NVFP4 + MXFP8. 3090 : 94 tok/s à 131k, 89 après 8k de prompt (llama.cpp 54). Deux
     // fois plus rapide que llama.cpp sur une R9700 (67 contre 33 tok/s sans spéculation) et validé
     // contre lui : les sorties gloutonnes ne divergent que sur des quasi-égalités. Pas de vision.
     // Les empreintes : celles de Hugging Face (LFS), et celle du gabarit relevée sur le commit
@@ -281,7 +282,7 @@ export const MODELS = [
     id: 'inkling-2-mini-ink2',
     name: 'Inkling 2 Mini',
     variant: 'NVFP4 · moteur sur mesure',
-    tagline: 'Le MoE en boucle de Thinking Machines, servi par le moteur sur mesure de Harn sur Radeon RDNA4 : 131k de contexte, ~67 tok/s sur une R9700, deux fois llama.cpp.',
+    tagline: 'Le MoE en boucle de Thinking Machines, servi par le moteur sur mesure de Harn (RTX série 30 et plus, Radeon RDNA4) : 131k de contexte, ~94 tok/s sur une 3090, ~67 sur une R9700, presque deux fois llama.cpp.',
     engine: 'ink2',
     repo: 'thinkingmachines/Inkling-2-Mini',
     files: [

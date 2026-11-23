@@ -186,10 +186,14 @@ export function assess(model, hardware) {
     return finalize({ fit: 'full', reasons, context: 131072, kv: 'fp8', tps: model.evidence.tps128k });
   }
   if (model.engine === 'ink2') {
-    // Le moteur sur mesure d'Inkling est compilé pour RDNA4 (gfx1200/gfx1201), sous Linux : ses noyaux
-    // supposent le wave32 et la mémoire partagée de 64 Ko de ces cartes. 131k tiennent dans 21,4 Gio.
+    // Le moteur sur mesure d'Inkling, sous Linux : ses sources CUDA d'origine, compilées par nvcc sur
+    // une RTX série 30 ou plus récente (mesuré sur une 3090), ou son portage HIP pour RDNA4
+    // (gfx1200/gfx1201 : wave32, 64 Ko de mémoire partagée). 131k tiennent dans 21,4 Gio.
     if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['Le moteur sur mesure d’Inkling n’est installé par Harn que sous Linux'] };
-    if (gpu?.vendor !== 'amd' || !/RX 9\d{3}|R9700|R9600/.test(gpu.name ?? '')) reasons.push('Ce moteur sur mesure demande une Radeon RDNA4 (RX 9000, R9700)');
+    if (gpu?.vendor === 'nvidia') {
+      if (gpu.computeCapability < 8) reasons.push('Ce moteur sur mesure demande une RTX série 30 ou plus récente');
+      else if (hardware.buildTools && !(hardware.buildTools.nvcc && hardware.buildTools.hostCompiler)) reasons.push('Harn compile ce moteur : il faut le toolkit CUDA (nvcc) et un g++ qu’il accepte');
+    } else if (gpu?.vendor !== 'amd' || !/RX 9\d{3}|R9700|R9600/.test(gpu.name ?? '')) reasons.push('Ce moteur sur mesure demande une RTX série 30 ou une Radeon RDNA4 (RX 9000, R9700)');
     if (hardware.vramGiB < model.needs.vramGiB) reasons.push(`il faut ${model.needs.vramGiB} Go de mémoire graphique (${hardware.vramGiB} ici)`);
     if (hardware.ramGiB < model.needs.ramGiB) reasons.push(`il faut ${model.needs.ramGiB} Go de RAM (${Math.round(hardware.ramGiB)} ici)`);
     if (reasons.length) return { fit: 'no', reasons };

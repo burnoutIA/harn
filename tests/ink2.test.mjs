@@ -14,10 +14,17 @@ import { update } from '../src/state.mjs';
 const model = modelById('inkling-2-mini-ink2');
 const card = (name, vram, vendor) => ({ vramGiB: vram, ramGiB: 64, diskFreeGiB: 500, os: { platform: 'linux' }, primary: { vendor, name, vramMiB: vram * 1024, computeCapability: 8.6 } });
 
-test('moteur sur mesure d’Inkling : une Radeon RDNA4 de 24 Go ou plus, sous Linux', () => {
+test('moteur sur mesure d’Inkling : une Radeon RDNA4 ou une RTX série 30 de 24 Go ou plus, sous Linux', () => {
   const ok = assess(model, card('AMD Radeon AI PRO R9700', 31.8, 'amd'));
   assert.deepEqual([ok.fit, ok.context], ['full', 131072]);
-  assert.match(assess(model, card('NVIDIA GeForce RTX 3090', 24, 'nvidia')).reasons.join(), /RDNA4/);
+  const tools = { nvcc: '13.4', hostCompiler: 'g++', cmake: true, ok: true };
+  const rtx = assess(model, { ...card('NVIDIA GeForce RTX 3090', 24, 'nvidia'), buildTools: tools });
+  assert.deepEqual([rtx.fit, rtx.context], ['full', 131072]);
+  assert.match(assess(model, { ...card('NVIDIA GeForce RTX 3090', 24, 'nvidia'), buildTools: { ...tools, nvcc: null } }).reasons.join(), /nvcc/);
+  const turing = card('NVIDIA GeForce RTX 2080 Ti', 24, 'nvidia');
+  turing.primary.computeCapability = 7.5;
+  assert.match(assess(model, turing).reasons.join(), /série 30/);
+  assert.match(assess(model, card('AMD Radeon RX 7900 XTX', 24, 'amd')).reasons.join(), /RDNA4/);
   assert.match(assess(model, card('AMD Radeon RX 9070 XT', 16, 'amd')).reasons.join(), /24 Go/);
   assert.equal(assess(model, { ...card('AMD Radeon AI PRO R9700', 31.8, 'amd'), os: { platform: 'win32' } }).fit, 'no');
 });

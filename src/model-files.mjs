@@ -71,7 +71,7 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
       }
       // Le moteur sur mesure (ink2) se compile après les poids : il lit le dossier du modèle tel quel.
       if (model.engine === 'ink2') {
-        note('Compilation du moteur sur mesure (HIP, dans la bulle) et de sa façade OpenAI');
+        note('Compilation du moteur sur mesure (dans la bulle) et de sa façade OpenAI');
         await installInk2(getState().hardware, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
       }
       // Un Flash-Next ajouté depuis Hugging Face : Strata le prépare à partir de ces fichiers.

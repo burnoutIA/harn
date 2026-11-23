@@ -163,9 +163,17 @@ export async function linuxPython() {
 // Linux : de quoi compiler un moteur CUDA (llamAmpere). nvcc n'accepte qu'une plage de g++ :
 // 12.4-12.6 jusqu'à g++ 13, 12.8-12.9 jusqu'à 14, 13.x jusqu'à 15. Ubuntu récent livre un g++ plus
 // neuf que ce que son nvcc accepte : on cherche alors un g++-N installé à côté.
+// Le paquet NVIDIA (cuda-toolkit-13-4…) s'installe dans /usr/local/cuda sans toucher au PATH : nvcc
+// y est cherché quand le PATH ne le donne pas, et son chemin est passé à cmake.
+const NVCC_DIRS = ['/usr/local/cuda/bin', '/opt/cuda/bin'];
 export async function buildTools() {
   if (process.platform !== 'linux') return null;
-  const nvcc = (await tryRun('nvcc', ['--version']))?.match(/release (\d+)\.(\d+)/);
+  let nvcc = null;
+  let nvccPath = null;
+  for (const candidate of ['nvcc', ...NVCC_DIRS.map((dir) => path.join(dir, 'nvcc'))]) {
+    nvcc = (await tryRun(candidate, ['--version']))?.match(/release (\d+)\.(\d+)/);
+    if (nvcc) { nvccPath = candidate === 'nvcc' ? null : candidate; break; }
+  }
   const cmake = Boolean(await tryRun('cmake', ['--version']));
   if (!nvcc) return { ok: false, nvcc: null, cmake, hostCompiler: null };
   const [major, minor] = [Number(nvcc[1]), Number(nvcc[2])];
@@ -175,7 +183,7 @@ export async function buildTools() {
     const version = Number.parseInt(await tryRun(name, ['-dumpversion']) ?? '', 10);
     if (version && version <= maxGcc) { hostCompiler = name; break; }
   }
-  return { ok: Boolean(cmake && hostCompiler), nvcc: `${major}.${minor}`, cmake, hostCompiler };
+  return { ok: Boolean(cmake && hostCompiler), nvcc: `${major}.${minor}`, ...(nvccPath && { nvccPath }), cmake, hostCompiler };
 }
 
 // Podman : les moteurs livrés en image de conteneur (vllm-radiance pour les Radeon RDNA4) passent

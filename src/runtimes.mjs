@@ -702,10 +702,11 @@ export async function installRadiance(onLog = () => {}) {
   return info;
 }
 
-// ── Moteurs sur mesure (burnoutIA/moteurs) : Inkling 2 Mini en HIP ────────────────────────
-// strata-ink2 (Strata, MIT) porté sur RDNA4. Il décode Inkling ~2 fois plus vite que llama.cpp
+// ── Moteurs sur mesure (burnoutIA/moteurs) : Inkling 2 Mini, CUDA d'origine ou HIP ─────────
+// strata-ink2 (Strata, MIT), porté sur RDNA4. Il décode Inkling ~2 fois plus vite que llama.cpp
 // sur une R9700 (67 tok/s contre 33), parce qu'il fusionne les opérations de la boucle à trois
 // passages : 7 265 noyaux par token chez llama.cpp, et la carte ne calcule que 40 % du temps.
+// Sur une 3090, ses sources CUDA d'origine : 94 tok/s à 131k, 89 après 8k de prompt (llama.cpp : 54).
 // La recette, les mesures et la validation contre llama.cpp sont dans le dépôt (inkling-2-mini.md).
 // Commit figé, comme Strata : Harn compile ce contenu précis, dans la bulle, puis lance sa façade
 // OpenAI (outils/serveur.py, avec tokenizers et jinja2 dans un venv à lui).
@@ -720,7 +721,10 @@ export async function installInk2(hardware, onLog = () => {}) {
   const src = path.join(dir, `moteurs-${INK2.commit.slice(0, 12)}`);
   const work = path.join(src, 'inkling2');
   const engine = path.join(work, 'build', 'strata-ink2');
-  const target = rdna4Target(hardware);
+  // NVIDIA : les sources CUDA d'origine (amont/, inchangées), compilées par nvcc pour la carte.
+  // Radeon : le portage HIP (src/), pour RDNA4.
+  const nvidia = hardware?.primary?.vendor === 'nvidia';
+  const target = nvidia ? `sm_${Math.round((hardware.primary.computeCapability ?? 8.6) * 10)}` : rdna4Target(hardware);
   const build = `${INK2.commit}@${target}`;
   const existing = getState().runtimes.ink2;
   if (existing?.build === build && (await stat(existing.engine).catch(() => null)) && (await ready(existing.venv))) return existing;
@@ -737,13 +741,30 @@ export async function installInk2(hardware, onLog = () => {}) {
     for (const target of [src, unpacked]) await rm(target, { recursive: true, force: true });
     await extract(archive, dir);
     await rename(unpacked, src);
-    const rocm = await ensureRocm(onLog);
-    // Dans la bulle : le système en lecture seule, ROCm en lecture, le seul dossier du moteur en
-    // écriture, sans réseau. build.sh appelle hipcc de ROCm (voir son en-tête pour les en-têtes hip/).
-    const boxed = sandboxed('bash', ['build.sh'], { writable: [work], readable: [rocm], cwd: work });
-    const { command, args } = niced(boxed.command, boxed.args);
-    onLog(`Compilation de strata-ink2 (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
-    await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, ROCM: rocm, GPU_TARGET: target } }, onLog);
+    if (nvidia) {
+      // Dans la bulle, comme en HIP : nvcc (sous /usr, en lecture seule) écrit dans build/ et
+      // dans le /tmp vide de la bulle. nvcc refuse un g++ trop récent : celui que la détection a
+      // retenu (hardware.buildTools), par son chemin. ~10 s.
+      const tools = hardware.buildTools ?? {};
+      if (!tools.nvcc || !tools.hostCompiler) throw new Error('Il faut le toolkit CUDA (nvcc) et un g++ qu’il accepte');
+      const which = async (name) => (await run('sh', ['-c', `command -v ${name}`])).stdout.trim();
+      const nvcc = tools.nvccPath?.startsWith('/') ? tools.nvccPath : await which('nvcc');
+      const hostCompiler = await which(tools.hostCompiler);
+      await mkdir(path.join(work, 'build'), { recursive: true });
+      const boxed = sandboxed(nvcc, ['-O3', '-std=c++17', `-arch=${target}`, '--default-stream', 'per-thread', '-ccbin', hostCompiler,
+        'amont/engine/src/inkling2/ink2_engine.cu', '-o', 'build/strata-ink2', '-lcublas'], { writable: [work], cwd: work });
+      const { command, args } = niced(boxed.command, boxed.args);
+      onLog(`Compilation de strata-ink2 (CUDA ${target}, nvcc ${tools.nvcc}), dans la bulle`);
+      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000 }, onLog);
+    } else {
+      const rocm = await ensureRocm(onLog);
+      // Dans la bulle : le système en lecture seule, ROCm en lecture, le seul dossier du moteur en
+      // écriture, sans réseau. build.sh appelle hipcc de ROCm (voir son en-tête pour les en-têtes hip/).
+      const boxed = sandboxed('bash', ['build.sh'], { writable: [work], readable: [rocm], cwd: work });
+      const { command, args } = niced(boxed.command, boxed.args);
+      onLog(`Compilation de strata-ink2 (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
+      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, ROCM: rocm, GPU_TARGET: target } }, onLog);
+    }
     if (!(await stat(engine).catch(() => null))) throw new Error('strata-ink2 : la compilation n’a pas produit le moteur');
     await writeFile(path.join(work, '.harn-commit'), build);
   }
@@ -759,7 +780,7 @@ export async function installInk2(hardware, onLog = () => {}) {
     await markReady(venv);
   }
   const info = { kind: 'ink2', commit: INK2.commit, build, dir: work, engine, venv, python: path.join(venv, 'bin', 'python'),
-    server: path.join(work, 'outils', 'serveur.py'), builtWith: `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
+    server: path.join(work, 'outils', 'serveur.py'), builtWith: nvidia ? `nvcc ${hardware.buildTools?.nvcc}, ${target}` : `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes.ink2 = info; });
   return info;
 }
