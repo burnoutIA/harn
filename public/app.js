@@ -767,7 +767,7 @@ function renderSharing() {
 function archWithoutEngine(model) {
   const arch = model.profile?.arch;
   const lists = Object.values(state.engineArchs ?? {});
-  if (!arch || ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine) || !lists.length) return null;
+  if (!arch || ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine) || !lists.length) return null;
   return lists.some((archs) => archs.includes(arch)) ? null : arch;
 }
 
@@ -831,7 +831,7 @@ function modelCard(model) {
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
   if (model.engine === 'hyperqwen') badges.push('<span class="badge">vLLM · HyperQwen</span>');
   if (model.engine === 'radiance') badges.push('<span class="badge" title="vLLM pour Radeon RDNA4, dans Podman">vLLM · Radiance</span>');
-  if (model.engine === 'ink2') badges.push('<span class="badge" title="Moteur écrit pour ce modèle (burnoutIA/moteurs), compilé par Harn pour Radeon RDNA4">Moteur sur mesure</span>');
+  if (['ink2', 'lfm3'].includes(model.engine)) badges.push('<span class="badge" title="Moteur écrit pour ce modèle (burnoutIA/moteurs), compilé par Harn pour la carte">Moteur sur mesure</span>');
   if (model.engine === 'gemma-challenge') badges.push(model.challengeStack === 'qat'
     ? '<span class="badge" title="Accélérations sans perte du Fast Gemma Challenge sur le checkpoint officiel">vLLM · Gemma Challenge</span>'
     : '<span class="badge warn" title="Pile taillée pour la métrique du challenge : réponses dégradées, surtout en français">vLLM · banc du challenge</span>');

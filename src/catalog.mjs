@@ -310,6 +310,38 @@ export const MODELS = [
     evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 67, note: 'strata-ink2 HIP bf6086a, KV f16, 131k : 68-70 tok/s en contexte court, 64,8 après 7k de prompt (llama.cpp : 33, et 39,5 avec DSpark)' },
   },
   {
+    // LFM3 1.7B de Liquid AI, point de contrôle QAD (distillé pour retrouver en Q4_0 la justesse du
+    // BF16), servi par notre moteur écrit de zéro (burnoutIA/moteurs, lfm3/, installLfm3). Décodage
+    // +24 à +44 % sur llama.cpp : R9700 ~395 tok/s (279), 3090 514 (366). Validé contre llama.cpp :
+    // 195 à 200 premiers choix identiques sur 200, les écarts sur des quasi-égalités.
+    // Le gabarit et le tokenizer viennent du dépôt du modèle (commit 1da06be) ; le gabarit est hors
+    // LFS, son empreinte relevée à ce commit.
+    id: 'lfm3-1-7b-qad-lfm3',
+    name: 'LFM3 1.7B QAD',
+    variant: 'Q4_0 · moteur sur mesure',
+    tagline: 'Le petit hybride convolution/attention de Liquid AI, en Q4_0 distillé, servi par le moteur sur mesure de Harn (RTX série 30 et plus, Radeon RDNA4) : 131k de contexte, ~395 tok/s sur une R9700, ~514 sur une 3090.',
+    engine: 'lfm3',
+    repo: 'LiquidAI/LFM3-1.7B-GGUF',
+    files: [
+      { name: 'LFM3-1.7B-QAD-Q4_0.gguf', bytes: 1_049_615_680, sha256: '43a7d09a0e9cba91b63eb7052488b9564569bddfd65754d2e426465e572a7452' },
+      { name: 'tokenizer.json', repo: 'LiquidAI/LFM3-1.7B', bytes: 17_908_635, sha256: '7e226e34bface23ccf6e495d157bf77186c1c30a7659880e1a8994db528c3701' },
+      { name: 'chat_template.jinja', repo: 'LiquidAI/LFM3-1.7B', bytes: 12_129, sha256: 'f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818' },
+    ],
+    // 131k : 5,8 Gio sur la carte (poids 1 Go, copie fp16 pour le préremplissage 3 Go, KV f16).
+    needs: { vramGiB: 8, ramGiB: 8 },
+    contextByVram: [[8, 131072]],
+    // Banc d'intelligence Harn : 80 sur une R9700, 72 sur une 3090 (le même GGUF sous llama.cpp : 76 et 69).
+    quality: 80,
+    paramsB: 1.7,
+    reasoning: true,
+    vision: false,
+    moe: null,
+    // generation_config.json de LiquidAI pour le QAD.
+    sampling: { temperature: 0.1, top_p: 1, top_k: 50, min_p: 0, repeat_penalty: 1.1 },
+    reasoningLevels: ['low', 'medium', 'xhigh'],
+    evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 370, note: 'lfm3-engine HIP ebce16b, KV f16, glouton : ~395 tok/s en contexte court, 370 après 4,4k, 308 après 18k (llama.cpp Vulkan : 279 / 260 / 249)' },
+  },
+  {
     // La pile gagnante du Fast Gemma Challenge (gemma-slayer, installGemmaChallenge), servie telle
     // quelle pour comparer la carte à l'A10G du challenge. Taillée pour sa métrique : 5 couches
     // retirées, lm_head réduit à 12k tokens choisis sur des prompts anglais, fenêtre glissante 188.
@@ -425,9 +457,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
-// Strata, HyperQwen, Radiance, la pile du Gemma Challenge et les moteurs sur mesure (ink2) se lancent par leurs
+// Strata, HyperQwen, Radiance, la pile du Gemma Challenge et les moteurs sur mesure (ink2, lfm3) se lancent par leurs
 // propres scripts, avec leurs propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
-export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine);
+export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine);
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

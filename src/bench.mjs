@@ -179,6 +179,12 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     if (best.error) throw new Error(best.error);
     return finish(model, results, best);
   }
+  // Le moteur sur mesure de LFM3 : son seul réglage, mesuré sur toutes les charges.
+  if (model.engine === 'lfm3') {
+    const only = await trial('Moteur sur mesure', initial.tuning);
+    if (only.error) throw new Error(only.error);
+    return finish(model, results, only);
+  }
   // HyperQwen : ses deux réglages à 128k (HYPERQWEN_ARMS), celui en place d'abord. DFlash2 ne se
   // charge que si la carte est libre : son échec est noté, MTP reste.
   if (model.engine === 'hyperqwen') {

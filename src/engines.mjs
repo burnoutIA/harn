@@ -213,7 +213,7 @@ export function recordBuildFailure(id, error, hardware = getState().hardware) {
 
 // Les autres moteurs à mesurer au banc pour ce modèle, et les réglages à essayer sur chacun.
 export async function alternates(model, tuning, profile, hardware = getState().hardware) {
-  if (['prism', 'strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine)) return [];
+  if (['prism', 'strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine)) return [];
   // Un seul moteur sert ce modèle (les autres le chargent mais répondent faux) : rien à lui opposer.
   if (model.engineOnly) return [];
   const current = tuning.fork ?? 'llama';

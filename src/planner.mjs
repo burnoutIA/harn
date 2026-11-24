@@ -185,11 +185,12 @@ export function assess(model, hardware) {
     if (reasons.length) return { fit: 'no', reasons };
     return finalize({ fit: 'full', reasons, context: 131072, kv: 'fp8', tps: model.evidence.tps128k });
   }
-  if (model.engine === 'ink2') {
+  if (['ink2', 'lfm3'].includes(model.engine)) {
     // Le moteur sur mesure d'Inkling, sous Linux : ses sources CUDA d'origine, compilées par nvcc sur
     // une RTX série 30 ou plus récente (mesuré sur une 3090), ou son portage HIP pour RDNA4
     // (gfx1200/gfx1201 : wave32, 64 Ko de mémoire partagée). 131k tiennent dans 21,4 Gio.
-    if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['Le moteur sur mesure d’Inkling n’est installé par Harn que sous Linux'] };
+    // Celui de LFM3 : la même source pour les deux, mesurée sur une 3090 et une R9700 ; 131k dans 5,8 Gio.
+    if (hardware.os?.platform && hardware.os.platform !== 'linux') return { fit: 'no', reasons: ['Ce moteur sur mesure n’est installé par Harn que sous Linux'] };
     if (gpu?.vendor === 'nvidia') {
       if (gpu.computeCapability < 8) reasons.push('Ce moteur sur mesure demande une RTX série 30 ou plus récente');
       else if (hardware.buildTools && !(hardware.buildTools.nvcc && hardware.buildTools.hostCompiler)) reasons.push('Harn compile ce moteur : il faut le toolkit CUDA (nvcc) et un g++ qu’il accepte');
@@ -234,7 +235,7 @@ export function assess(model, hardware) {
 // de contexte, le banc mesure à ~4k (code) et ~32k (profondeur). Le temps par token croissant à
 // peu près linéairement avec le contexte, ces deux points donnent la vitesse mesurée à 100k.
 // Borné, et seulement les modèles tout sur la carte : un partage avec la RAM suit d'autres lois.
-const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
+const familyOf = (model) => (['strata', 'prism', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine) ? model.engine : model.moe ? 'moe' : 'dense');
 
 export function measuredAt100k(bench) {
   const arm = bench?.arms?.find((a) => a.id === bench.winner?.id);

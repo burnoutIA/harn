@@ -64,6 +64,7 @@ export function describe(tuning) {
   if (tuning.hyperqwenArm) return tuning.hyperqwenArm;
   if (tuning.challengeArm) return tuning.challengeArm;
   if (tuning.ink2Arm) return tuning.ink2Arm;
+  if (tuning.lfm3Arm) return tuning.lfm3Arm;
   const parts = [`${Math.round(tuning.context / 1024)}k`, `KV ${tuning.kv}${tuning.kvV ? `/${tuning.kvV}` : ''}`];
   if (tuning.spec?.type === 'mtp') parts.push(tuning.spec.n === 'auto' ? 'MTP auto' : `MTP${tuning.spec.n}${tuning.spec.pMin ? ` p${tuning.spec.pMin}` : ''}`);
   if (tuning.spec?.type === 'mtp' && tuning.spec.ngram) parts.push('n-gramme');

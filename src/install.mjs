@@ -257,6 +257,9 @@ export async function deleteModel(modelId) {
     // Les poids dans models/<id>, le moteur compilé et son venv dans runtime/ink2, pour ce seul modèle.
     await remove(path.join(DIRS.models, modelId));
     await remove(path.join(DIRS.runtime, 'ink2'));
+  } else if (model.engine === 'lfm3') {
+    await remove(path.join(DIRS.models, modelId));
+    await remove(path.join(DIRS.runtime, 'lfm3'));
   } else if (model.engine === 'gemma-challenge') {
     // Le moteur sert aux deux fiches : seuls les poids de celle-ci partent, sauf si c'est la dernière.
     const other = MODELS.some((m) => m.engine === 'gemma-challenge' && m.id !== model.id && getState().models[m.id]?.installedAt);
@@ -273,6 +276,7 @@ export async function deleteModel(modelId) {
     if (model.engine === 'hyperqwen') delete s.runtimes.hyperqwen;
     if (model.engine === 'radiance') delete s.runtimes.radiance;
     if (model.engine === 'ink2') delete s.runtimes.ink2;
+    if (model.engine === 'lfm3') delete s.runtimes.lfm3;
     if (model.engine === 'gemma-challenge') {
       const runtime = s.runtimes['gemma-challenge'];
       if (runtime && MODELS.some((m) => m.engine === 'gemma-challenge' && m.id !== model.id && s.models[m.id]?.installedAt)) delete runtime[model.challengeStack === 'qat' ? 'qat' : 'submissionStack'];

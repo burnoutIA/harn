@@ -813,6 +813,80 @@ export async function installInk2(hardware, onLog = () => {}) {
   return info;
 }
 
+// ── LFM3 1.7B (QAD Q4_0) : moteur écrit de zéro (burnoutIA/moteurs, lfm3/), une source CUDA et HIP ──
+// Le décodage en 112 noyaux par token (llama.cpp : 381) : Q4_0 réorganisé, normes et convolution
+// fusionnées dans les produits matrice-vecteur, arg-max sur la carte. Le préremplissage par paquets
+// sur hipBLAS / cuBLAS (copie fp16 des poids, +3 Go) et une attention WMMA. R9700 ~395 tok/s, 3090
+// 514 (llama.cpp : 279 et 366). La recette, la validation et les mesures : lfm3-1.7b.md du dépôt.
+// Commit figé, compilé dans la bulle ; la façade OpenAI (outils/serveur.py) dans un venv à lui.
+export const LFM3 = {
+  repo: 'burnoutIA/moteurs',
+  commit: 'ebce16bcadbfd46e86215137b2031e39eaea2e7c',
+  pip: ['tokenizers==0.23.3', 'jinja2==3.1.6'],
+};
+export async function installLfm3(hardware, onLog = () => {}) {
+  if (!LINUX) throw new Error('Le moteur sur mesure de LFM3 n’est installé par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'lfm3');
+  const src = path.join(dir, `moteurs-${LFM3.commit.slice(0, 12)}`);
+  const work = path.join(src, 'lfm3');
+  const engine = path.join(work, 'build', 'lfm3-engine');
+  const nvidia = hardware?.primary?.vendor === 'nvidia';
+  const target = nvidia ? `sm_${Math.round((hardware.primary.computeCapability ?? 8.6) * 10)}` : rdna4Target(hardware);
+  const build = `${LFM3.commit}@${target}`;
+  const existing = getState().runtimes.lfm3;
+  const built = async (file) => Boolean(await stat(file).catch(() => null));
+  if (existing?.build === build && (await built(existing.engine)) && (await ready(existing.venv))) return existing;
+  await mkdir(dir, { recursive: true });
+
+  if (!((await builtCommit(work)) === build && (await built(engine)))) {
+    const archive = await download({
+      id: 'runtime:lfm3',
+      label: `Moteur sur mesure de LFM3 (${LFM3.repo} ${LFM3.commit.slice(0, 7)})`,
+      url: `https://github.com/${LFM3.repo}/archive/${LFM3.commit}.tar.gz`,
+      dest: path.join(DIRS.downloads, `moteurs-${LFM3.commit.slice(0, 7)}.tar.gz`),
+    });
+    const unpacked = path.join(dir, `moteurs-${LFM3.commit}`);
+    for (const target of [src, unpacked]) await rm(target, { recursive: true, force: true });
+    await extract(archive, dir);
+    await rename(unpacked, src);
+    if (nvidia) {
+      // Comme strata-ink2 : nvcc et le g++ retenu par la détection, dans la bulle (~1 min, cuBLAS).
+      const tools = hardware.buildTools ?? {};
+      if (!tools.nvcc || !tools.hostCompiler) throw new Error('Il faut le toolkit CUDA (nvcc) et un g++ qu’il accepte');
+      const which = async (name) => (await run('sh', ['-c', `command -v ${name}`])).stdout.trim();
+      const nvcc = tools.nvccPath?.startsWith('/') ? tools.nvccPath : await which('nvcc');
+      const hostCompiler = await which(tools.hostCompiler);
+      const boxed = sandboxed('bash', ['build-cuda.sh'], { writable: [work], cwd: work });
+      const { command, args } = niced(boxed.command, boxed.args);
+      onLog(`Compilation de lfm3-engine (CUDA ${target}, nvcc ${tools.nvcc}), dans la bulle`);
+      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, NVCC: nvcc, CXX: hostCompiler, CUDA_ARCH: target.slice(3) } }, onLog);
+    } else {
+      // hipcc et hipBLAS du ROCm de Harn ; le moteur garde son chemin (rpath) vers ses bibliothèques.
+      const rocm = await ensureRocm(onLog);
+      const boxed = sandboxed('bash', ['build.sh'], { writable: [work], readable: [rocm], cwd: work });
+      const { command, args } = niced(boxed.command, boxed.args);
+      onLog(`Compilation de lfm3-engine (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
+      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, ROCM: rocm, GPU_TARGET: target } }, onLog);
+    }
+    if (!(await built(engine))) throw new Error('lfm3-engine : la compilation n’a pas produit le moteur');
+    await writeFile(path.join(work, '.harn-commit'), build);
+  }
+
+  const venv = path.join(dir, 'venv');
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    const step = (args) => { onLog(`uv ${args.join(' ')}`); return runLogged(uv, args, { cwd: dir, timeout: 30 * 60_000 }, onLog); };
+    await step(['venv', '--python', '3.12', venv]);
+    await step(['pip', 'install', '--python', path.join(venv, 'bin', 'python'), ...LFM3.pip]);
+    await markReady(venv);
+  }
+  const info = { kind: 'lfm3', commit: LFM3.commit, build, dir: work, engine, venv, python: path.join(venv, 'bin', 'python'),
+    server: path.join(work, 'outils', 'serveur.py'), builtWith: nvidia ? `nvcc ${hardware.buildTools?.nvcc}, ${target}` : `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes.lfm3 = info; });
+  return info;
+}
+
 // ── Gemma Challenge : le moteur des soumissions du Fast Gemma Challenge (Hugging Face, 2026) ──
 // La soumission gemma-slayer w188-ctk49-n64 (511 tok/s vérifiés sur A10G) : son serve.py, ses
 // patchs, son vLLM nightly. Deux fiches s'en servent (model.challengeStack) :

@@ -375,7 +375,7 @@ export async function handleV1(req, res, url, { lan = false } = {}) {
   if (getState().active?.modelId !== modelId) setEngine(modelId, { lastUse: Date.now() }, { focus: true });
   const model = modelById(modelId);
   // Seul llama-server a /slots ; les autres sont suivis par morceaux, puis par l'usage final.
-  const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2'].includes(model.engine) ? model.engine : 'llama';
+  const engine = ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine) ? model.engine : 'llama';
   const shaped = generative ? shapeRequest(body, model) : null;
   return relay(req, res, {
     target: `${active.endpoint}${url.pathname}${url.search}`,

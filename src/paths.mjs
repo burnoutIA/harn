@@ -41,4 +41,5 @@ export const PORTS = {
   voice: Number(process.env.HARN_VOICE_PORT ?? 4754),
   // Les moteurs sur mesure (burnoutIA/moteurs) : leur façade OpenAI.
   ink2: Number(process.env.HARN_INK2_PORT ?? 4755),
+  lfm3: Number(process.env.HARN_LFM3_PORT ?? 4756),
 };

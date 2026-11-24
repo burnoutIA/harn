@@ -34,6 +34,8 @@ export const INK2_ARMS = {
   plain: { context: 131072, kv: 'f16', spec: false, ink2Arm: '128k · KV f16 · moteur sur mesure' },
   drafter: { context: 131072, kv: 'f16', spec: true, ink2Arm: '128k · KV f16 · drafter MTP · moteur sur mesure' },
 };
+// Le moteur sur mesure de LFM3 : un seul réglage, 131k en KV f16 (5,8 Gio sur la carte).
+export const LFM3_TUNING = { context: 131072, kv: 'f16', lfm3Arm: '128k · KV f16 · moteur sur mesure' };
 // Les fiches du moteur du Gemma Challenge : un seul réglage chacune.
 export const GEMMA_CHALLENGE_TUNING = {
   submission: { context: 4096, challengeArm: 'Soumission gemma-slayer · 4k' },
@@ -106,6 +108,7 @@ export function startingTuning(model, hardware) {
   if (model.engine === 'hyperqwen') return HYPERQWEN_ARMS.mtp;
   if (model.engine === 'radiance') return RADIANCE_TUNING;
   if (model.engine === 'ink2') return INK2_ARMS.plain;
+  if (model.engine === 'lfm3') return LFM3_TUNING;
   if (model.engine === 'gemma-challenge') return GEMMA_CHALLENGE_TUNING[model.challengeStack];
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
@@ -215,6 +218,27 @@ export function recipeFor(model, tuning, { port = PORTS.engine } = {}) {
       args: ['-I', runtime.server, '--model', path.join(DIRS.models, model.id), '--engine', runtime.engine,
         '--host', '127.0.0.1', '--port', String(PORTS.ink2), '--ctx', String(arm.context), '--kv', arm.kv,
         ...(arm.spec ? ['--spec'] : []), ...vision, '--api-key-file', ENGINE_KEY_FILE, '--alias', model.id],
+      cwd: runtime.dir,
+      endpoint,
+      health: `${endpoint}/health`,
+      context: arm.context,
+    };
+  }
+  if (model.engine === 'lfm3') {
+    // La façade OpenAI (outils/serveur.py) lance lfm3-engine --serve, comme celle d'Inkling ; /health
+    // ne répond qu'une fois le moteur chargé et échauffé.
+    const runtime = state.runtimes.lfm3;
+    if (!runtime) throw new Error('Le moteur sur mesure de LFM3 n’est pas installé');
+    const endpoint = `http://127.0.0.1:${PORTS.lfm3}`;
+    const arm = { ...LFM3_TUNING, ...tuning };
+    const dir = path.join(DIRS.models, model.id);
+    const gguf = state.models[model.id]?.paths?.[model.files[0].name] ?? path.join(dir, model.files[0].name);
+    return {
+      modelId: model.id,
+      label: displayName(model),
+      command: runtime.python,
+      args: ['-I', runtime.server, '--model', dir, '--engine', runtime.engine, '--gguf', gguf,
+        '--host', '127.0.0.1', '--port', String(PORTS.lfm3), '--ctx', String(arm.context), '--api-key-file', ENGINE_KEY_FILE, '--alias', model.id],
       cwd: runtime.dir,
       endpoint,
       health: `${endpoint}/health`,
