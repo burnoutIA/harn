@@ -710,10 +710,14 @@ export async function installRadiance(onLog = () => {}) {
 // La recette, les mesures et la validation contre llama.cpp sont dans le dépôt (inkling-2-mini.md).
 // Commit figé, comme Strata : Harn compile ce contenu précis, dans la bulle, puis lance sa façade
 // OpenAI (outils/serveur.py, avec tokenizers et jinja2 dans un venv à lui).
+// La vision : l'encodeur de llama.cpp seul (inkling2-vision, build-vision.sh), sur les sources de
+// llama.cpp au commit que le script fige (après #32217), téléchargées ici puisque la bulle n'a pas
+// de réseau. En HIP sur la Radeon ; sur le processeur avec NVIDIA, où 131k laissent ~2 Go à la 3090.
 export const INK2 = {
   repo: 'burnoutIA/moteurs',
-  commit: 'bf6086ad8728edab81393a06b3e3ed1beca3a802',
+  commit: '5aad758222b14f40b8a3f8261d3a7747e856552d',
   pip: ['tokenizers==0.23.3', 'jinja2==3.1.6'],
+  llamaCommit: 'c74c71a6f7a0b06df30f979520e5d9a86a4d60ad',
 };
 export async function installInk2(hardware, onLog = () => {}) {
   if (!LINUX) throw new Error('Le moteur sur mesure d’Inkling n’est installé par Harn que sous Linux');
@@ -721,16 +725,19 @@ export async function installInk2(hardware, onLog = () => {}) {
   const src = path.join(dir, `moteurs-${INK2.commit.slice(0, 12)}`);
   const work = path.join(src, 'inkling2');
   const engine = path.join(work, 'build', 'strata-ink2');
-  // NVIDIA : les sources CUDA d'origine (amont/, inchangées), compilées par nvcc pour la carte.
+  const vision = path.join(work, 'build', 'inkling2-vision');
+  // NVIDIA : les sources CUDA d'origine (amont/, inchangées) avec le correctif des images
+  // (vision/ink2-images-cuda.patch, appliqué par build-cuda.sh), compilées par nvcc pour la carte.
   // Radeon : le portage HIP (src/), pour RDNA4.
   const nvidia = hardware?.primary?.vendor === 'nvidia';
   const target = nvidia ? `sm_${Math.round((hardware.primary.computeCapability ?? 8.6) * 10)}` : rdna4Target(hardware);
   const build = `${INK2.commit}@${target}`;
   const existing = getState().runtimes.ink2;
-  if (existing?.build === build && (await stat(existing.engine).catch(() => null)) && (await ready(existing.venv))) return existing;
+  const built = async (file) => Boolean(await stat(file).catch(() => null));
+  if (existing?.build === build && (await built(existing.engine)) && existing.vision && (await built(existing.vision)) && (await ready(existing.venv))) return existing;
   await mkdir(dir, { recursive: true });
 
-  if (!((await builtCommit(work)) === build && (await stat(engine).catch(() => null)))) {
+  if (!((await builtCommit(work)) === build && (await built(engine)) && (await built(vision)))) {
     const archive = await download({
       id: 'runtime:ink2',
       label: `Moteur sur mesure d’Inkling (${INK2.repo} ${INK2.commit.slice(0, 7)})`,
@@ -741,6 +748,18 @@ export async function installInk2(hardware, onLog = () => {}) {
     for (const target of [src, unpacked]) await rm(target, { recursive: true, force: true });
     await extract(archive, dir);
     await rename(unpacked, src);
+    // Les sources de llama.cpp pour l'encodeur d'image, à côté du moteur (build/llama.cpp) :
+    // build-vision.sh les prend telles quelles et y applique son correctif d'une ligne.
+    const llamaArchive = await download({
+      id: 'runtime:ink2-vision',
+      label: `Sources de llama.cpp pour la vision d’Inkling (${INK2.llamaCommit.slice(0, 7)})`,
+      url: `https://github.com/ggml-org/llama.cpp/archive/${INK2.llamaCommit}.tar.gz`,
+      dest: path.join(DIRS.downloads, `llama.cpp-${INK2.llamaCommit.slice(0, 7)}.tar.gz`),
+    });
+    await mkdir(path.join(work, 'build'), { recursive: true });
+    await extract(llamaArchive, path.join(work, 'build'));
+    await rename(path.join(work, 'build', `llama.cpp-${INK2.llamaCommit}`), path.join(work, 'build', 'llama.cpp'));
+    let rocm = null;
     if (nvidia) {
       // Dans la bulle, comme en HIP : nvcc (sous /usr, en lecture seule) écrit dans build/ et
       // dans le /tmp vide de la bulle. nvcc refuse un g++ trop récent : celui que la détection a
@@ -750,14 +769,12 @@ export async function installInk2(hardware, onLog = () => {}) {
       const which = async (name) => (await run('sh', ['-c', `command -v ${name}`])).stdout.trim();
       const nvcc = tools.nvccPath?.startsWith('/') ? tools.nvccPath : await which('nvcc');
       const hostCompiler = await which(tools.hostCompiler);
-      await mkdir(path.join(work, 'build'), { recursive: true });
-      const boxed = sandboxed(nvcc, ['-O3', '-std=c++17', `-arch=${target}`, '--default-stream', 'per-thread', '-ccbin', hostCompiler,
-        'amont/engine/src/inkling2/ink2_engine.cu', '-o', 'build/strata-ink2', '-lcublas'], { writable: [work], cwd: work });
+      const boxed = sandboxed('bash', ['build-cuda.sh'], { writable: [work], cwd: work });
       const { command, args } = niced(boxed.command, boxed.args);
       onLog(`Compilation de strata-ink2 (CUDA ${target}, nvcc ${tools.nvcc}), dans la bulle`);
-      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000 }, onLog);
+      await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, NVCC: nvcc, CXX: hostCompiler, CUDA_ARCH: target.slice(3) } }, onLog);
     } else {
-      const rocm = await ensureRocm(onLog);
+      rocm = await ensureRocm(onLog);
       // Dans la bulle : le système en lecture seule, ROCm en lecture, le seul dossier du moteur en
       // écriture, sans réseau. build.sh appelle hipcc de ROCm (voir son en-tête pour les en-têtes hip/).
       const boxed = sandboxed('bash', ['build.sh'], { writable: [work], readable: [rocm], cwd: work });
@@ -765,7 +782,16 @@ export async function installInk2(hardware, onLog = () => {}) {
       onLog(`Compilation de strata-ink2 (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
       await runLogged(command, args, { cwd: work, timeout: 30 * 60_000, env: { ...process.env, ROCM: rocm, GPU_TARGET: target } }, onLog);
     }
-    if (!(await stat(engine).catch(() => null))) throw new Error('strata-ink2 : la compilation n’a pas produit le moteur');
+    if (!(await built(engine))) throw new Error('strata-ink2 : la compilation n’a pas produit le moteur');
+    // L'encodeur d'image : cmake et g++ du système, dans la bulle aussi. HIP : ~5 min (les noyaux
+    // de ggml pour la carte) ; processeur : ~2 min.
+    if (hardware.buildTools && !hardware.buildTools.cmake) throw new Error('La vision d’Inkling se compile avec cmake : sudo apt install cmake');
+    const boxed = sandboxed('bash', ['build-vision.sh'], { writable: [work], readable: rocm ? [rocm] : [], cwd: work });
+    const { command, args } = niced(boxed.command, boxed.args);
+    onLog(`Compilation de l’encodeur d’image (llama.cpp ${INK2.llamaCommit.slice(0, 7)}, ${nvidia ? 'processeur' : `HIP ${target}`}), dans la bulle`);
+    await runLogged(command, args, { cwd: work, timeout: 60 * 60_000,
+      env: { ...process.env, VISION_BACKEND: nvidia ? 'cpu' : 'hip', ...(rocm ? { ROCM: rocm, GPU_TARGET: target } : {}) } }, onLog);
+    if (!(await built(vision))) throw new Error('inkling2-vision : la compilation n’a pas produit l’encodeur d’image');
     await writeFile(path.join(work, '.harn-commit'), build);
   }
 
@@ -779,7 +805,9 @@ export async function installInk2(hardware, onLog = () => {}) {
     await step(['pip', 'install', '--python', path.join(venv, 'bin', 'python'), ...INK2.pip]);
     await markReady(venv);
   }
-  const info = { kind: 'ink2', commit: INK2.commit, build, dir: work, engine, venv, python: path.join(venv, 'bin', 'python'),
+  // visionCpu : l'encodeur tourne sur le processeur (NVIDIA), plafonné à 1 024 vecteurs par image
+  // (2000 x 2000 : 20 s sans plafond, 5 s avec, sur 16 fils).
+  const info = { kind: 'ink2', commit: INK2.commit, build, dir: work, engine, vision, visionCpu: nvidia, venv, python: path.join(venv, 'bin', 'python'),
     server: path.join(work, 'outils', 'serveur.py'), builtWith: nvidia ? `nvcc ${hardware.buildTools?.nvcc}, ${target}` : `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
   update((s) => { s.runtimes.ink2 = info; });
   return info;

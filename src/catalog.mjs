@@ -276,13 +276,16 @@ export const MODELS = [
     // en CUDA d'origine sur NVIDIA, porté en HIP sur Radeon (burnoutIA/moteurs, installInk2), sur le
     // checkpoint officiel NVFP4 + MXFP8. 3090 : 94 tok/s à 131k, 89 après 8k de prompt (llama.cpp 54). Deux
     // fois plus rapide que llama.cpp sur une R9700 (67 contre 33 tok/s sans spéculation) et validé
-    // contre lui : les sorties gloutonnes ne divergent que sur des quasi-égalités. Pas de vision.
+    // contre lui : les sorties gloutonnes ne divergent que sur des quasi-égalités.
+    // Vision : l'encodeur de llama.cpp seul (build-vision.sh, mmproj d'Unsloth), dont les vecteurs
+    // prennent la place du token image dans le moteur. Sur la Radeon, en HIP ; sur NVIDIA, sur le
+    // processeur, la 3090 gardant sa mémoire pour 131k (640 x 488 : 0,9 s ; plafond 1 024 vecteurs, 5 s).
     // Les empreintes : celles de Hugging Face (LFS), et celle du gabarit relevée sur le commit
     // ed40e7d du dépôt (un fichier hors LFS, dont Hugging Face ne publie pas l'empreinte).
     id: 'inkling-2-mini-ink2',
     name: 'Inkling 2 Mini',
     variant: 'NVFP4 · moteur sur mesure',
-    tagline: 'Le MoE en boucle de Thinking Machines, servi par le moteur sur mesure de Harn (RTX série 30 et plus, Radeon RDNA4) : 131k de contexte, ~94 tok/s sur une 3090, ~67 sur une R9700, presque deux fois llama.cpp.',
+    tagline: 'Le MoE en boucle de Thinking Machines, servi par le moteur sur mesure de Harn (RTX série 30 et plus, Radeon RDNA4) : 131k de contexte et la vision, ~94 tok/s sur une 3090, ~67 sur une R9700, presque deux fois llama.cpp.',
     engine: 'ink2',
     repo: 'thinkingmachines/Inkling-2-Mini',
     files: [
@@ -291,6 +294,7 @@ export const MODELS = [
       { name: 'tokenizer.json', bytes: 26_178_678, sha256: '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6' },
       { name: 'chat_template.jinja', bytes: 6868, sha256: '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc' },
     ],
+    mmproj: { repo: 'unsloth/Inkling-2-Mini-GGUF', name: 'mmproj-BF16.gguf', bytes: 641_805_760, sha256: '2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7' },
     // 131k : 21,4 Gio sur la carte (poids 16,7, KV f16 des 8 passages en attention globale).
     needs: { vramGiB: 24, ramGiB: 32 },
     contextByVram: [[24, 131072]],
@@ -298,7 +302,7 @@ export const MODELS = [
     quality: 115,
     paramsB: 26,
     reasoning: true,
-    vision: false,
+    vision: true,
     moe: null,
     // generation_config.json : température 1, rien d'autre ; l'effort est dans le prompt.
     sampling: { temperature: 1, top_p: 1, top_k: 0, min_p: 0 },

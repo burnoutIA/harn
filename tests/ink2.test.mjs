@@ -34,6 +34,26 @@ test('fiche : checkpoint officiel aux empreintes figées, moteur à un commit fi
   assert.ok(model.files.every((file) => /^[0-9a-f]{64}$/.test(file.sha256) && file.bytes > 0));
   assert.deepEqual(model.files.map((f) => f.name).sort(), ['chat_template.jinja', 'model-00001-of-00001.safetensors', 'mtp.safetensors', 'tokenizer.json']);
   assert.match(INK2.commit, /^[0-9a-f]{40}$/);
+  // La vision : le mmproj d'Unsloth (empreinte LFS), et llama.cpp au commit que build-vision.sh fige.
+  assert.equal(model.vision, true);
+  assert.deepEqual([model.mmproj.repo, model.mmproj.name], ['unsloth/Inkling-2-Mini-GGUF', 'mmproj-BF16.gguf']);
+  assert.match(model.mmproj.sha256, /^[0-9a-f]{64}$/);
+  assert.match(INK2.llamaCommit, /^[0-9a-f]{40}$/);
+});
+
+test('vision : l’encodeur et le mmproj passés à la façade, plafonnés sur le processeur', () => {
+  const arg = (recipe, flag) => recipe.args[recipe.args.indexOf(flag) + 1];
+  const base = { python: '/r/venv/bin/python', server: '/r/outils/serveur.py', engine: '/r/build/strata-ink2', dir: '/r' };
+  update((s) => { s.runtimes.ink2 = { ...base, vision: '/r/build/inkling2-vision', visionCpu: false }; });
+  const hip = recipeFor(model, INK2_ARMS.plain);
+  assert.equal(arg(hip, '--vision'), '/r/build/inkling2-vision');
+  assert.equal(arg(hip, '--mmproj'), path.join(DIRS.models, model.id, 'mmproj-BF16.gguf'));
+  assert.ok(!hip.args.includes('--image-max-tokens'));
+  update((s) => { s.runtimes.ink2 = { ...base, vision: '/r/build/inkling2-vision', visionCpu: true }; });
+  assert.equal(arg(recipeFor(model, INK2_ARMS.plain), '--image-max-tokens'), '1024');
+  // Installé avant la vision : texte seul.
+  update((s) => { s.runtimes.ink2 = base; });
+  assert.ok(!recipeFor(model, INK2_ARMS.plain).args.includes('--vision'));
 });
 
 test('lancement : la façade OpenAI devant strata-ink2, avec la clé du moteur et l’id Harn', () => {

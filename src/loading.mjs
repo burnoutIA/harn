@@ -204,13 +204,17 @@ export function recipeFor(model, tuning, { port = PORTS.engine } = {}) {
     if (!runtime) throw new Error('Le moteur sur mesure d’Inkling n’est pas installé');
     const endpoint = `http://127.0.0.1:${PORTS.ink2}`;
     const arm = { ...INK2_ARMS.plain, ...tuning };
+    // La vision : l'encodeur compilé avec le moteur et le mmproj de la fiche. Un moteur installé
+    // avant la vision n'a pas d'encodeur : la façade lit alors le texte seul (une image : 400).
+    const mmproj = modelFiles(model.id).mmproj;
+    const vision = runtime.vision && mmproj ? ['--vision', runtime.vision, '--mmproj', mmproj, ...(runtime.visionCpu ? ['--image-max-tokens', '1024'] : [])] : [];
     return {
       modelId: model.id,
       label: displayName(model),
       command: runtime.python,
       args: ['-I', runtime.server, '--model', path.join(DIRS.models, model.id), '--engine', runtime.engine,
         '--host', '127.0.0.1', '--port', String(PORTS.ink2), '--ctx', String(arm.context), '--kv', arm.kv,
-        ...(arm.spec ? ['--spec'] : []), '--api-key-file', ENGINE_KEY_FILE, '--alias', model.id],
+        ...(arm.spec ? ['--spec'] : []), ...vision, '--api-key-file', ENGINE_KEY_FILE, '--alias', model.id],
       cwd: runtime.dir,
       endpoint,
       health: `${endpoint}/health`,
