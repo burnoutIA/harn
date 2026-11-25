@@ -7,7 +7,7 @@ import { describe, startEngine, stopOthers } from './engine.mjs';
 import { alternates, engineSheet, ensureEngine, recordBuildFailure } from './engines.mjs';
 import { withGpu } from './gpu-queue.mjs';
 import { dflashEligible, gpuProfile, mtpPlan } from './levers.mjs';
-import { HYPERQWEN_ARMS, INK2_ARMS, freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
+import { HYPERQWEN_ARMS, INK2_ARMS, STRATA_INKLING_ARMS, freeVram, loadWithHeadroom, recipeFor, runtimeKind, startingTuning } from './loading.mjs';
 import { writeMachineFacts } from './machine-doc.mjs';
 import { downloadFile } from './model-files.mjs';
 import { makePlan, OBJECTIVE } from './planner.mjs';
@@ -176,6 +176,14 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
     let best = await trial('Moteur sur mesure', initial.tuning);
     const other = Object.values(INK2_ARMS).find((arm) => arm.spec !== Boolean(initial.tuning.spec));
     best = better(await trial('Moteur sur mesure', other), best);
+    if (best.error) throw new Error(best.error);
+    return finish(model, results, best);
+  }
+  // Strata pour Inkling : sans brouillon, puis avec DSpark (embarqué dans le pack). Le meilleur des deux à 128k.
+  if (model.engine === 'strata-inkling') {
+    let best = await trial('Strata', initial.tuning);
+    const other = Object.values(STRATA_INKLING_ARMS).find((arm) => arm.drafting !== (initial.tuning.drafting ?? 'off'));
+    best = better(await trial('Strata', other), best);
     if (best.error) throw new Error(best.error);
     return finish(model, results, best);
   }

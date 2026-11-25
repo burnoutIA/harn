@@ -5,7 +5,7 @@ import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
 import { assess } from './planner.mjs';
-import { installGemmaChallenge, installHyperQwen, installInk2, installLfm3, installRadiance, installStrata, installStrataPack } from './runtimes.mjs';
+import { installGemmaChallenge, installHyperQwen, installInk2, installLfm3, installRadiance, installStrata, installStrataInkling, installStrataPack, strataInklingTokenizer } from './runtimes.mjs';
 import { getState, update } from './state.mjs';
 
 // Fichiers d'un modèle : copies locales reprises, téléchargements vérifiés, journal d'installation.
@@ -77,6 +77,14 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
       if (model.engine === 'lfm3') {
         note('Compilation du moteur sur mesure (dans la bulle) et de sa façade OpenAI');
         await installLfm3(getState().hardware, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); });
+      }
+      // Strata pour Inkling : le moteur compilé (dans la bulle), son serveur, et le tokenizer qu'il lit.
+      if (model.engine === 'strata-inkling') {
+        note('Compilation de strata-inkling (dans la bulle) et installation du serveur de Strata');
+        const onLog = (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); };
+        const runtime = await installStrataInkling(getState().hardware, onLog);
+        const file = (name) => paths[name] ?? path.join(dir, name);
+        await strataInklingTokenizer(runtime, file('tokenizer.json'), file('chat_template.jinja'), onLog);
       }
       // Un Flash-Next ajouté depuis Hugging Face : Strata le prépare à partir de ces fichiers.
       if (model.strataPack) {

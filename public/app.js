@@ -767,7 +767,7 @@ function renderSharing() {
 function archWithoutEngine(model) {
   const arch = model.profile?.arch;
   const lists = Object.values(state.engineArchs ?? {});
-  if (!arch || ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine) || !lists.length) return null;
+  if (!arch || ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3', 'strata-inkling'].includes(model.engine) || !lists.length) return null;
   return lists.some((archs) => archs.includes(arch)) ? null : arch;
 }
 
@@ -831,6 +831,7 @@ function modelCard(model) {
   if (model.engine === 'strata') badges.push('<span class="badge">Grand MoE · Strata</span>');
   if (model.engine === 'hyperqwen') badges.push('<span class="badge">vLLM · HyperQwen</span>');
   if (model.engine === 'radiance') badges.push('<span class="badge" title="vLLM pour Radeon RDNA4, dans Podman">vLLM · Radiance</span>');
+  if (model.engine === 'strata-inkling') badges.push('<span class="badge" title="Le moteur Inkling de Strata (Niko1221/Strata) et ses packs .strata, compilé par Harn pour la carte">Strata · Inkling</span>');
   if (['ink2', 'lfm3'].includes(model.engine)) badges.push('<span class="badge" title="Moteur écrit pour ce modèle (burnoutIA/moteurs), compilé par Harn pour la carte">Moteur sur mesure</span>');
   if (model.engine === 'gemma-challenge') badges.push(model.challengeStack === 'qat'
     ? '<span class="badge" title="Accélérations sans perte du Fast Gemma Challenge sur le checkpoint officiel">vLLM · Gemma Challenge</span>'

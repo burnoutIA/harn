@@ -34,6 +34,12 @@ export const INK2_ARMS = {
   plain: { context: 131072, kv: 'f16', spec: false, ink2Arm: '128k · KV f16 · moteur sur mesure' },
   drafter: { context: 131072, kv: 'f16', spec: true, ink2Arm: '128k · KV f16 · drafter MTP · moteur sur mesure' },
 };
+// Strata pour Inkling (strata-inkling, packs .strata) : sans brouillon ou avec DSpark (embarqué
+// dans le pack, blocs adaptatifs). R9700 : sans brouillon gagne partout ; 3090 : DSpark en code.
+export const STRATA_INKLING_ARMS = {
+  plain: { context: 131072, drafting: 'off', strataInklingArm: '128k · sans brouillon · Strata' },
+  dspark: { context: 131072, drafting: 'dspark', strataInklingArm: '128k · DSpark · Strata' },
+};
 // Le moteur sur mesure de LFM3 : un seul réglage, 131k en KV f16 (5,8 Gio sur la carte).
 export const LFM3_TUNING = { context: 131072, kv: 'f16', lfm3Arm: '128k · KV f16 · moteur sur mesure' };
 // Les fiches du moteur du Gemma Challenge : un seul réglage chacune.
@@ -109,6 +115,7 @@ export function startingTuning(model, hardware) {
   if (model.engine === 'radiance') return RADIANCE_TUNING;
   if (model.engine === 'ink2') return INK2_ARMS.plain;
   if (model.engine === 'lfm3') return LFM3_TUNING;
+  if (model.engine === 'strata-inkling') return STRATA_INKLING_ARMS.plain;
   if (model.engine === 'gemma-challenge') return GEMMA_CHALLENGE_TUNING[model.challengeStack];
   const verdict = assess(model, hardware);
   const tuning = defaultTuning(model, verdict.context, hardware, verdict.kv === 'int8' ? 'q8_0' : verdict.kv);
@@ -242,6 +249,35 @@ export function recipeFor(model, tuning, { port = PORTS.engine } = {}) {
       cwd: runtime.dir,
       endpoint,
       health: `${endpoint}/health`,
+      context: arm.context,
+    };
+  }
+  if (model.engine === 'strata-inkling') {
+    // Le serveur de Strata (server.py) lance strata-inkling d'après une config JSON, écrite ici à
+    // chaque lancement pour ce modèle et ce réglage. Sa clé : STRATA_API_KEY, hors de la ligne de
+    // commande. --offline : ni image à aller chercher par URL, ni outils MCP.
+    const runtime = state.runtimes['strata-inkling'];
+    if (!runtime) throw new Error('Strata pour Inkling n’est pas installé');
+    const endpoint = `http://127.0.0.1:${PORTS.strataInkling}`;
+    const arm = { ...STRATA_INKLING_ARMS.plain, ...tuning };
+    const file = (name) => state.models[model.id]?.paths?.[name] ?? path.join(DIRS.models, model.id, name);
+    const args = ['--native', file(model.strataFile), '--max-context', String(arm.context),
+      ...(arm.drafting === 'off' ? ['--draft', 'off'] : []), ...(model.strataVision ? ['--vision', file(model.strataVision)] : [])];
+    const config = { exe: runtime.engine, args, cwd: runtime.dir, tokenizer: path.join(runtime.dir, 'tokenizer'), model_name: model.id, arch: 'inkling2_loop',
+      log: path.join(DIRS.logs, `strata-${model.id}.log`), lib_dirs: runtime.libDirs ?? [], host: '127.0.0.1', port: PORTS.strataInkling,
+      drafting: arm.drafting, parallel: 1, open_browser: false, ...(runtime.backend === 'hip' ? { backend: 'hip' } : {}) };
+    const configFile = path.join(runtime.dir, 'configs', `${model.id}-${arm.drafting}.json`);
+    mkdirSync(path.dirname(configFile), { recursive: true });
+    writeFileSync(configFile, JSON.stringify(config, null, 1));
+    return {
+      modelId: model.id,
+      label: displayName(model),
+      command: runtime.python,
+      args: ['-I', runtime.server, '--engine', 'strata', '--config', configFile, '--port', String(PORTS.strataInkling), '--offline'],
+      cwd: runtime.dir,
+      env: { STRATA_API_KEY: engineKey() },
+      endpoint,
+      health: `${endpoint}/v1/models`,
       context: arm.context,
     };
   }

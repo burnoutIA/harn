@@ -19,7 +19,10 @@ test('moins de 8 Go de VRAM : Bonsai', () => {
 test('sous Linux : Strata proposé comme sous Windows', () => {
   const linux = makePlan({ ...machine(24, 128), os: { platform: 'linux' } });
   const windows = makePlan({ ...machine(24, 128), os: { platform: 'win32' } });
-  assert.equal(linux.upgradeModel, windows.upgradeModel);
+  // Sous Linux, Strata pour Inkling (compilé ici) passe en plus : le SQ-20 y devance le Flash-Next.
+  assert.equal(windows.upgradeModel, 'swift15-flashnext-iq2xs-strata');
+  assert.equal(linux.upgradeModel, 'inkling-2-mini-sq-20');
+  assert.equal(windows.verdicts.find((v) => v.id === 'inkling-2-mini-sq-20').fit, 'no');
   assert.ok(linux.verdicts.some((v) => /strata/.test(v.id) && v.fit !== 'no'));
 });
 
@@ -104,11 +107,14 @@ test('petite carte + beaucoup de RAM : Flash-Next via Strata visé', () => {
 test('24 Go : IQ3_S d’abord, Flash-Next Strata proposé si la RAM suit', () => {
   const plan = makePlan(machine(24, 128));
   assert.equal(plan.firstModel, 'swift15-q27-iq3s-mtp');
-  // Sans mesure, la note globale estimée préfère l'IQ2_XS (bien plus rapide, à peine moins juste).
-  assert.equal(plan.upgradeModel, 'swift15-flashnext-iq2xs-strata');
+  // Sans mesure, la note globale estimée met à égalité l'IQ2_XS (bien plus rapide) et Inkling SQ-20
+  // sous Strata (plus juste) : l'intelligence départage. Entre Flash-Next, l'IQ2_XS passe devant.
+  assert.equal(plan.upgradeModel, 'inkling-2-mini-sq-20');
+  const flash = (p) => p.verdicts.filter((v) => /swift15-flashnext/.test(v.id) && v.fit !== 'no').sort((a, b) => b.rating - a.rating)[0]?.id;
+  assert.equal(flash(plan), 'swift15-flashnext-iq2xs-strata');
   // 32 Go suffisent sur une 3090 (mode faible RAM de Strata : la carte garde 19 Go d'experts) ;
   // avec 16 Go, seul le Coder (moitié des experts) passe encore.
-  assert.equal(makePlan(machine(24, 32)).upgradeModel, 'swift15-flashnext-iq2xs-strata');
+  assert.equal(flash(makePlan(machine(24, 32))), 'swift15-flashnext-iq2xs-strata');
   assert.doesNotMatch(makePlan(machine(24, 16)).upgradeModel ?? '', /swift15-flashnext/);
   assert.equal(makePlan(machine(24, 16)).firstModel, 'swift15-q27-iq3s-mtp');
 });
@@ -209,8 +215,9 @@ test('deux modèles au même nom : on affiche ce qui les distingue', async () =>
 test('« Meilleur choix ici » suit la note globale mesurée, pas l’intelligence seule', () => {
   const profile = (score, tps, context) => ({ iq: { version: 3, score }, bench: { winner: { tps } }, tuning: { context } });
   // Même intelligence mesurée : le plus gros (125B) passe devant le plus rapide (27B).
-  const profiles = { 'swift15-flashnext-iq3xxs-strata': profile(100, 90, 131072), 'swift15-q27-iq2xs-mtp': profile(100, 190, 153600) };
-  const scores = { 'swift15-flashnext-iq3xxs-strata': 100, 'swift15-q27-iq2xs-mtp': 100 };
+  // (Inkling SQ-20 mesuré plus bas, pour que seuls les deux comparés restent en tête.)
+  const profiles = { 'swift15-flashnext-iq3xxs-strata': profile(100, 90, 131072), 'swift15-q27-iq2xs-mtp': profile(100, 190, 153600), 'inkling-2-mini-sq-20': profile(80, 84, 131072) };
+  const scores = { 'swift15-flashnext-iq3xxs-strata': 100, 'swift15-q27-iq2xs-mtp': 100, 'inkling-2-mini-sq-20': 80 };
   assert.equal(makePlan(machine(24, 128), scores, profiles).targetModel, 'swift15-flashnext-iq3xxs-strata');
 });
 

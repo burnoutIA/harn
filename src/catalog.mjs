@@ -310,6 +310,78 @@ export const MODELS = [
     evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 67, note: 'strata-ink2 HIP bf6086a, KV f16, 131k : 68-70 tok/s en contexte court, 64,8 après 7k de prompt (llama.cpp : 33, et 39,5 avec DSpark)' },
   },
   {
+    // Inkling 2 Mini servi par Strata 0.2.21 : son moteur Inkling (strata-inkling, CUDA ou HIP, compilé
+    // ici, installStrataInkling) et ses packs .strata (strata-engine/Inkling-2-Mini-Strata, commit
+    // 04996a1), avec l'encodeur d'image Vision.strata et le brouillon DSpark embarqué. SQ-10 : 10,5 Go,
+    // le même mot que le modèle d'origine dans 92 % des cas (perplexité WikiText-2 6,46 contre 6,14).
+    // Mesuré le 2026-11-25 sur une R9700, sans brouillon : 78 tok/s, 59 après 34k de prompt,
+    // préremplissage ~1 900 tok/s (ink2 : 65, 57, ~470). DSpark n'y gagne rien.
+    id: 'inkling-2-mini-sq-10',
+    name: 'Inkling 2 Mini',
+    variant: 'SQ-10 · Strata',
+    tagline: 'Le MoE en boucle de Thinking Machines dans le pack compact de Strata (10,5 Go), servi par le moteur Inkling de Strata : 131k et la vision, ~78 tok/s et ~1 900 tok/s de lecture des prompts sur une R9700.',
+    engine: 'strata-inkling',
+    repo: 'strata-engine/Inkling-2-Mini-Strata',
+    strataFile: 'Inkling-2-Mini-SQ-10.strata',
+    strataVision: 'Inkling-2-Mini-Vision.strata',
+    files: [
+      { name: 'Inkling-2-Mini-SQ-10.strata', bytes: 10_471_526_400, sha256: 'ac4d452ad03e4930abd9d46f9c5eec22b2f75a1da45a1e49bd24ccd58b065934' },
+      { name: 'Inkling-2-Mini-Vision.strata', bytes: 636_526_592, sha256: '6589eff47f9c20bc3a032faa3d449f10bf4f04a84cc6b2ee8a44d51d2b6fc677' },
+      // Le tokenizer et le gabarit du modèle d'origine (les mêmes que ceux de la fiche ink2), que l'outil
+      // de Strata convertit pour son serveur ; l'empreinte du gabarit relevée au commit 04996a1 du dépôt.
+      { name: 'tokenizer.json', bytes: 26_178_678, sha256: '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6' },
+      { name: 'chat_template.jinja', bytes: 6868, sha256: '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc' },
+    ],
+    // 131k : ~15 Gio sur la carte (pack 9,8, KV f16, encodeur d'image) ; au-delà, Strata garde une
+    // partie du KV global en RAM.
+    needs: { vramGiB: 16, ramGiB: 32 },
+    contextByVram: [[16, 131072]],
+    // Estimation (le banc d'intelligence la remplace) : un peu sous le SQ-20, sans perte.
+    quality: 110,
+    paramsB: 26,
+    reasoning: true,
+    vision: true,
+    moe: null,
+    sampling: { temperature: 1, top_p: 1, top_k: 0, min_p: 0 },
+    reasoningLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    evidence: { gpu: 'AMD Radeon AI PRO R9700', tps4k: 78, note: 'strata-inkling 0.1.67 HIP (Strata 2af30cc), SQ-10, KV f16, 131k, sans brouillon : 77-79 tok/s en court, 59 après 34k ; préremplissage ~1 900 tok/s' },
+  },
+  {
+    // Le pack SQ-20 de Strata : sans perte contre le modèle d'origine (KLD 0, même mot à 100 %), 19,35 Go,
+    // pour une carte de 24 Go. Mesuré le 2026-11-25 sur une 3090 : 84 tok/s sans brouillon (70 après
+    // 34k), et avec DSpark 115 en code, 108 en édition, 77 en prose ; préremplissage ~1 830 tok/s
+    // (ink2 : 93 / 80, ~570). Sur une R9700 : 72 tok/s, préremplissage ~950 (le SQ-10 y est meilleur).
+    // À 131k, la 3090 garde ~63k de KV global sur la carte et le reste en RAM.
+    id: 'inkling-2-mini-sq-20',
+    name: 'Inkling 2 Mini',
+    variant: 'SQ-20 · Strata',
+    tagline: 'Le MoE en boucle de Thinking Machines dans le pack sans perte de Strata (19,35 Go), servi par le moteur Inkling de Strata : 131k et la vision ; sur une 3090, ~115 tok/s en code avec DSpark et ~1 800 tok/s de lecture des prompts.',
+    engine: 'strata-inkling',
+    repo: 'strata-engine/Inkling-2-Mini-Strata',
+    strataFile: 'Inkling-2-Mini-SQ-20.strata',
+    strataVision: 'Inkling-2-Mini-Vision.strata',
+    files: [
+      { name: 'Inkling-2-Mini-SQ-20.strata', bytes: 19_346_685_952, sha256: '0bbfd52344f0dd4779a7807b5f73554a812f24c035e6877b63cd0d499f7e1b97' },
+      { name: 'Inkling-2-Mini-Vision.strata', bytes: 636_526_592, sha256: '6589eff47f9c20bc3a032faa3d449f10bf4f04a84cc6b2ee8a44d51d2b6fc677' },
+      // Le tokenizer et le gabarit du modèle d'origine (les mêmes que ceux de la fiche ink2), que l'outil
+      // de Strata convertit pour son serveur ; l'empreinte du gabarit relevée au commit 04996a1 du dépôt.
+      { name: 'tokenizer.json', bytes: 26_178_678, sha256: '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6' },
+      { name: 'chat_template.jinja', bytes: 6868, sha256: '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc' },
+    ],
+    // 131k sur une 3090 : 23 Go sur la carte, ~2 Go de KV en RAM.
+    needs: { vramGiB: 24, ramGiB: 32 },
+    contextByVram: [[24, 131072]],
+    // Sans perte : le banc d'intelligence du modèle sous llama.cpp, 115 (UD-Q4_K_XL) à 123 (UD-Q8_K_XL).
+    quality: 115,
+    paramsB: 26,
+    reasoning: true,
+    vision: true,
+    moe: null,
+    sampling: { temperature: 1, top_p: 1, top_k: 0, min_p: 0 },
+    reasoningLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    evidence: { gpu: 'NVIDIA GeForce RTX 3090', tps4k: 84, note: 'strata-inkling 0.1.67 CUDA sm_86 (Strata 2af30cc), SQ-20, KV f16, 131k : 84 tok/s sans brouillon, 70 après 34k ; DSpark : 115 en code, 77 en prose ; préremplissage ~1 830 tok/s' },
+  },
+  {
     // LFM3 1.7B de Liquid AI, point de contrôle QAD (distillé pour retrouver en Q4_0 la justesse du
     // BF16), servi par notre moteur écrit de zéro (burnoutIA/moteurs, lfm3/, installLfm3). Décodage
     // +24 à +44 % sur llama.cpp : R9700 ~395 tok/s (279), 3090 514 (366). Validé contre llama.cpp :
@@ -457,9 +529,9 @@ export async function hfSha256(repo, file) {
   const oid = tree.find?.((entry) => entry.path === file)?.lfs?.oid ?? '';
   return SHA256.test(oid) ? oid.toLowerCase() : null;
 }
-// Strata, HyperQwen, Radiance, la pile du Gemma Challenge et les moteurs sur mesure (ink2, lfm3) se lancent par leurs
+// Strata (Flash-Next et Inkling), HyperQwen, Radiance, la pile du Gemma Challenge et les moteurs sur mesure (ink2, lfm3) se lancent par leurs
 // propres scripts, avec leurs propres réglages : ni recette llama-server, ni repli sur moins de contexte au chargement.
-export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3'].includes(model.engine);
+export const ownLauncher = (model) => ['strata', 'hyperqwen', 'radiance', 'gemma-challenge', 'ink2', 'lfm3', 'strata-inkling'].includes(model.engine);
 export const totalBytes = (model) => model.files.reduce((sum, file) => sum + file.bytes, 0) + (model.mmproj?.bytes ?? 0);
 
 export function contextFor(model, vramGiB) {

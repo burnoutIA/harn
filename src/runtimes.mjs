@@ -887,6 +887,115 @@ export async function installLfm3(hardware, onLog = () => {}) {
   return info;
 }
 
+// ── Strata pour Inkling 2 Mini : le moteur officiel strata-inkling et ses packs .strata ──
+// Strata 0.2.21 (Niko1221/Strata, MIT) a un moteur à lui pour Inkling (engine/src/inkling2),
+// CUDA et HIP, qui lit ses packs SQ (SF4 + MX8, DSpark embarqué) et l'encodeur d'image
+// Vision.strata. Il se compile seul (ni ggml ni llama.cpp) : cmake, ~35 s en HIP, ~2 min en CUDA.
+// Mesuré le 2026-11-25 contre ink2, mêmes prompts : R9700 SQ-10 sans brouillon 78 tok/s
+// (ink2 65), 3090 SQ-20 84 sans brouillon (ink2 93) et 115 en code avec DSpark. Le
+// préremplissage passe de ~500 à ~1 900 tok/s sur les deux cartes.
+// Le serveur OpenAI est celui de Strata (terminal/serve/server.py, avec sa config JSON), dans un
+// venv à lui (terminal/requirements.txt, versions figées par Strata). Commit figé, compilé dans
+// la bulle ; le moteur tourne ensuite hors d'elle, lancé par server.py, comme pour le Flash-Next.
+export const STRATA_INKLING = {
+  repo: 'Niko1221/Strata',
+  commit: '2af30ccaa0729177c4725ee2073f72bf550e2f86',
+};
+export async function installStrataInkling(hardware, onLog = () => {}) {
+  if (!LINUX) throw new Error('Strata pour Inkling n’est installé par Harn que sous Linux');
+  const dir = path.join(DIRS.runtime, 'strata-inkling');
+  const src = path.join(dir, `Strata-${STRATA_INKLING.commit.slice(0, 12)}`);
+  const nvidia = hardware?.primary?.vendor === 'nvidia';
+  const target = nvidia ? `sm_${Math.round((hardware.primary.computeCapability ?? 8.6) * 10)}` : rdna4Target(hardware);
+  const buildDir = path.join(src, 'engine', `build-inkling-${target}`);
+  const engine = path.join(buildDir, 'src', 'inkling2', 'strata-inkling');
+  const build = `${STRATA_INKLING.commit}@${target}`;
+  const existing = getState().runtimes['strata-inkling'];
+  const built = async (file) => Boolean(await stat(file).catch(() => null));
+  if (existing?.build === build && (await built(existing.engine)) && (await ready(existing.venv))) return existing;
+  await mkdir(dir, { recursive: true });
+
+  // NVIDIA : nvcc et le g++ que la détection a retenus (nvcc refuse un g++ trop récent), par leur chemin ;
+  // cuBLAS et cudart du toolkit, si le chargeur du système ne les connaît pas.
+  const tools = hardware?.buildTools ?? {};
+  const which = async (name) => (await run('sh', ['-c', `command -v ${name}`])).stdout.trim();
+  const nvcc = nvidia ? (tools.nvccPath?.startsWith('/') ? tools.nvccPath : await which('nvcc').catch(() => '')) : null;
+  const libDirs = nvcc ? [path.join(path.dirname(path.dirname(nvcc)), 'lib64')] : [];
+  if (!((await builtCommit(src)) === build && (await built(engine)))) {
+    const archive = await download({
+      id: 'runtime:strata-inkling',
+      label: `Strata pour Inkling (${STRATA_INKLING.repo} ${STRATA_INKLING.commit.slice(0, 7)})`,
+      url: `https://github.com/${STRATA_INKLING.repo}/archive/${STRATA_INKLING.commit}.tar.gz`,
+      dest: path.join(DIRS.downloads, `strata-${STRATA_INKLING.commit.slice(0, 7)}.tar.gz`),
+    });
+    const unpacked = path.join(dir, `Strata-${STRATA_INKLING.commit}`);
+    for (const target of [src, unpacked]) await rm(target, { recursive: true, force: true });
+    await extract(archive, dir);
+    await rename(unpacked, src);
+    if (hardware.buildTools && !hardware.buildTools.cmake) throw new Error('Strata pour Inkling se compile avec cmake : sudo apt install cmake');
+    const engineSrc = path.join(src, 'engine');
+    const common = ['-S', engineSrc, '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', '-DSTRATA_BUILD_INKLING=ON', '-DSTRATA_BUILD_HY4=OFF', '-DSTRATA_BUILD_TESTS=OFF'];
+    let rocm = null;
+    let configure;
+    let env = process.env;
+    if (nvidia) {
+      if (!tools.nvcc || !tools.hostCompiler || !nvcc) throw new Error('Il faut le toolkit CUDA (nvcc) et un g++ qu’il accepte');
+      const hostCompiler = await which(tools.hostCompiler);
+      configure = [...common, '-DSTRATA_ENABLE_CUDA=ON', '-DSTRATA_ENABLE_HIP=OFF', `-DCMAKE_CUDA_ARCHITECTURES=${target.slice(3)}`,
+        `-DCMAKE_CUDA_COMPILER=${nvcc}`, `-DCMAKE_CUDA_HOST_COMPILER=${hostCompiler}`];
+      env = { ...process.env, PATH: `${path.dirname(nvcc)}:${process.env.PATH}` };
+      onLog(`Configuration de strata-inkling (CUDA ${target}, nvcc ${tools.nvcc}), dans la bulle`);
+    } else {
+      // Le ROCm de Harn ; le moteur garde son chemin (RUNPATH) vers ses bibliothèques. -isystem :
+      // les en-têtes HIP de la distribution (/usr/include/hip) ne doivent pas passer devant.
+      rocm = await ensureRocm(onLog);
+      configure = [...common, '-DSTRATA_ENABLE_HIP=ON', '-DSTRATA_ENABLE_CUDA=OFF', `-DSTRATA_HIP_ARCHS=${target}`, `-DCMAKE_HIP_ARCHITECTURES=${target}`,
+        `-DCMAKE_HIP_COMPILER=${path.join(rocm, 'llvm', 'bin', 'clang++')}`, `-DCMAKE_HIP_COMPILER_ROCM_ROOT=${rocm}`, `-DSTRATA_ROCM_PATH=${rocm}`, `-DCMAKE_PREFIX_PATH=${rocm}`,
+        `-DCMAKE_HIP_FLAGS=-isystem ${path.join(rocm, 'include')} --rocm-path=${rocm} --rocm-device-lib-path=${path.join(rocm, 'amdgcn', 'bitcode')}`,
+        `-DCMAKE_CXX_FLAGS=-isystem ${path.join(rocm, 'include')}`];
+      env = { ...process.env, PATH: `${path.join(rocm, 'bin')}:${path.join(rocm, 'llvm', 'bin')}:${process.env.PATH}`, ROCM_PATH: rocm, HIP_PATH: rocm, HIP_PLATFORM: 'amd' };
+      onLog(`Configuration de strata-inkling (HIP ${target}, ROCm ${ROCM.version}), dans la bulle`);
+    }
+    // Dans la bulle : le système en lecture seule, ROCm en lecture, les seules sources en écriture, sans réseau.
+    const step = (args) => {
+      const boxed = sandboxed('cmake', args, { writable: [src], readable: rocm ? [rocm] : [], cwd: src });
+      const { command, args: full } = niced(boxed.command, boxed.args);
+      return runLogged(command, full, { cwd: src, env, timeout: 60 * 60_000 }, onLog);
+    };
+    await step(configure);
+    onLog('Compilation de strata-inkling');
+    await step(['--build', buildDir, '--target', 'strata-inkling', '-j', String(os.availableParallelism())]);
+    if (!(await built(engine))) throw new Error('strata-inkling : la compilation n’a pas produit le moteur');
+    await writeFile(path.join(src, '.harn-commit'), build);
+  }
+
+  const venv = path.join(dir, 'venv');
+  if (!(await ready(venv))) {
+    await rm(venv, { recursive: true, force: true });
+    const uv = await uvCommand();
+    const step = (args) => { onLog(`uv ${args.join(' ')}`); return runLogged(uv, args, { cwd: dir, timeout: 30 * 60_000 }, onLog); };
+    await step(['venv', '--python', '3.12', venv]);
+    await step(['pip', 'install', '--python', path.join(venv, 'bin', 'python'), '-r', path.join(src, 'terminal', 'requirements.txt')]);
+    await markReady(venv);
+  }
+  const info = { kind: 'strata-inkling', commit: STRATA_INKLING.commit, build, dir, src, engine, libDirs, venv, python: path.join(venv, 'bin', 'python'),
+    server: path.join(src, 'terminal', 'serve', 'server.py'), backend: nvidia ? 'cuda' : 'hip',
+    builtWith: nvidia ? `nvcc ${hardware.buildTools?.nvcc}, ${target}` : `ROCm ${ROCM.version}, ${target}`, installedAt: new Date().toISOString() };
+  update((s) => { s.runtimes['strata-inkling'] = info; });
+  return info;
+}
+// Le tokenizer que server.py lit (vocab.json, merges.txt, gabarit) : converti du tokenizer.json et
+// du gabarit du modèle par l'outil de Strata (bibliothèque standard seule). Le même pour les packs.
+export async function strataInklingTokenizer(runtime, tokenizerJson, template, onLog = () => {}) {
+  const out = path.join(runtime.dir, 'tokenizer');
+  if (await ready(out)) return out;
+  await rm(out, { recursive: true, force: true });
+  await runLogged(runtime.python, ['-I', path.join(runtime.src, 'terminal', 'tools', 'inkling_tokenizer.py'), '--hf-json', tokenizerJson, '--template', template, '--out', out],
+    { cwd: runtime.dir, timeout: 5 * 60_000 }, onLog);
+  await markReady(out);
+  return out;
+}
+
 // ── Gemma Challenge : le moteur des soumissions du Fast Gemma Challenge (Hugging Face, 2026) ──
 // La soumission gemma-slayer w188-ctk49-n64 (511 tok/s vérifiés sur A10G) : son serve.py, ses
 // patchs, son vLLM nightly. Deux fiches s'en servent (model.challengeStack) :

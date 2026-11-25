@@ -42,4 +42,6 @@ export const PORTS = {
   // Les moteurs sur mesure (burnoutIA/moteurs) : leur façade OpenAI.
   ink2: Number(process.env.HARN_INK2_PORT ?? 4755),
   lfm3: Number(process.env.HARN_LFM3_PORT ?? 4756),
+  // Strata pour Inkling 2 Mini (strata-inkling, son serveur OpenAI).
+  strataInkling: Number(process.env.HARN_STRATA_INKLING_PORT ?? 4757),
 };
