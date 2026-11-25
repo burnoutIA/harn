@@ -412,6 +412,9 @@ test('RDNA Boosts : proposé aux Radeon RDNA4 sous Linux, deux façons d’antic
     const [d4, d7, short] = boosts.arms('vulkan');
     assert.deepEqual([d4.spec, d7.spec.n, d4.backend, d4.fork], [{ type: 'dflash', n: 4 }, 7, 'hip', 'rdnaboosts']);
     assert.deepEqual([short.backend, short.kv, short.fork, short.spec.vocab], ['hip', 'f16', 'rdnaboosts', 98304]);
+    // Le KV q8_0 réglé passe en f16 : le contexte rétrécit pour garder le même volume de KV.
+    const per = model.kvBytesPerToken;
+    if (per?.f16 && per.q8_0) assert.equal(short.context, Math.floor(131072 * per.q8_0 / per.f16 / 4096) * 4096);
     const dflashArgs = llamaArgs(model, { model: 'm.gguf', dflash: 'd.gguf' }, d4, r9700);
     assert.deepEqual(dflashArgs.slice(dflashArgs.indexOf('--spec-type'), dflashArgs.indexOf('--spec-type') + 8), ['--spec-type', 'draft-dflash', '--spec-draft-model', 'd.gguf', '--spec-draft-n-max', '4', '-ngld', '999']);
     // Sans brouillon DFlash2 : MTP 3 réduit et MTP adaptatif + n-gramme.

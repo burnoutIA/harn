@@ -1,0 +1,340 @@
+From 0bbbf2bdd0defe7df4938498494e9680f65aa6a2 Mon Sep 17 00:00:00 2001
+From: harn <harn@localhost>
+Date: Wed, 25 Nov 2026 01:47:40 +0100
+Subject: [PATCH] harn: RDNA4 absorbed-MLA decode/verify attention (GLM-4.7
+ Flash)
+
+---
+ ggml/src/ggml-cuda/fattn-mla.cu  | 279 +++++++++++++++++++++++++++++++
+ ggml/src/ggml-cuda/fattn-mla.cuh |   8 +
+ ggml/src/ggml-cuda/fattn.cu      |   7 +
+ 3 files changed, 294 insertions(+)
+ create mode 100644 ggml/src/ggml-cuda/fattn-mla.cu
+ create mode 100644 ggml/src/ggml-cuda/fattn-mla.cuh
+
+diff --git a/ggml/src/ggml-cuda/fattn-mla.cu b/ggml/src/ggml-cuda/fattn-mla.cu
+new file mode 100644
+index 0000000..96102f0
+--- /dev/null
++++ b/ggml/src/ggml-cuda/fattn-mla.cu
+@@ -0,0 +1,279 @@
++// RDNA4 decode/verify attention for the absorbed MLA (Harn, GLM-4.7 Flash).
++//
++// Shape: DKQ 576 (512 latent + 64 RoPE), DV 512, ONE KV head whose V is a view of the first 512 columns of
++// K, 17..32 Q heads (GLM-4.7 Flash: 20), 1..8 query tokens.  With the absorbed MLA every K row serves all the
++// Q heads (~38 flop per byte of K), so decode is compute bound for a vector kernel: the tile kernel runs at
++// ~7 TFLOPS (gfx1201, kv 16384: 101 us per call for an 18.9 MB K read that takes ~30 us at full bandwidth).
++//
++// A block = one KV chunk x one group of 32 Q rows (row r = token*n_head + head, the rows past the last one
++// masked off).  8 warps; warp w computes the partial Sᵀ = K·Qᵀ over the dimensions [64w, 64w+64) (plus 16
++// RoPE dimensions for w < 4) on WMMA, Q*scale held in registers as B fragments, K read straight from global
++// memory as A fragments.  The 8 partial scores go through LDS; the 256 threads then do the online softmax
++// once per 16-row tile (8 threads per Q column) and publish Pᵀ and the rescale factor.  The D layout of Sᵀ
++// (lane l: Q column l%16, KV rows 8*(l/16)+i) is exactly the B layout of Oᵀ += Vᵀ·Pᵀ, so P needs no
++// reshuffle; Vᵀ is the warp's own K slice transposed through a warp-private LDS tile.  A second kernel
++// combines the chunks.  K and the mask are prefetched one tile ahead.
++//
++// gfx1201, against the tile kernel (us per call, 20 heads, f16 K):
++//   kv  4096: n_q 1  30 (36),  n_q 4  50 (103)
++//   kv 16384: n_q 1  36 (101), n_q 4  78 (370)
++//   kv 32768: n_q 1  58 (193), n_q 4 138 (717)     -- n_q 1 at kv 32768 reads K at ~650 GB/s.
++// GGML_CUDA_FA_MLA=0 turns it off.
++
++#include "fattn-mla.cuh"
++
++#include <cstdlib>
++
++namespace {
++
++constexpr int MLA_DK = 576, MLA_DV = 512, MLA_QG = 32, MLA_NW = 8, MLA_KT = 16;
++constexpr int MLA_BLOCKS = 64; // one block per CU: more blocks only add per-block fixed cost (measured)
++
++struct mla_args {
++    const float * Q; int q_tok, q_head;      // strides in elements
++    const half * K; int k_row;               // stride in elements
++    const half * mask; int m_row;            // stride in elements, row = token
++    half * part; float2 * meta;              // [chunk][group][32][512], [chunk][group][32] (m, l)
++    int n_kv, nq, nh, chunk, ngroups;
++    float scale;                             // multiplied by log2(e)
++};
++
++#if defined(RDNA4)
++typedef _Float16 mla_h8 __attribute__((ext_vector_type(8)));
++typedef _Float16 mla_h2 __attribute__((ext_vector_type(2)));
++typedef float    mla_f8 __attribute__((ext_vector_type(8)));
++#define MLA_WMMA(a, b, c) __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, c)
++#endif // defined(RDNA4)
++
++__global__ void __launch_bounds__(MLA_NW * 32, 1) mla_partial(const mla_args a) {
++#if defined(RDNA4)
++    const int lane = threadIdx.x % 32, w = threadIdx.x / 32;
++    const int c = blockIdx.x, g = blockIdx.y;
++    const int kv_lo = c * a.chunk, kv_hi = min(a.n_kv, kv_lo + a.chunk);
++    const int rows = a.nq * a.nh;
++    const _Float16 * K    = (const _Float16 *) a.K;
++    const _Float16 * mask = (const _Float16 *) a.mask;
++
++    // LDS: Q*scale in f16 first (36 KiB), then the loop buffers in the same place.
++    __shared__ __attribute__((aligned(16))) char smem[MLA_QG * MLA_DK * 2];
++    float (*sp)[2][32][8]       = (float (*)[2][32][8]) smem;                 // partial Sᵀ per warp (16 KiB)
++    _Float16 (*vt)[64][MLA_KT]  = (_Float16 (*)[64][MLA_KT]) (smem + 16384);  // the warp's Vᵀ (16 KiB)
++    _Float16 (*pl)[32][8]       = (_Float16 (*)[32][8]) (smem + 32768);       // Pᵀ in B layout (1 KiB)
++    float * al                  = (float *) (smem + 33792);                   // rescale per Q column
++    _Float16 (*qs)[MLA_DK]      = (_Float16 (*)[MLA_DK]) smem;
++
++    for (int e = 4 * threadIdx.x; e < MLA_QG * MLA_DK; e += 4 * MLA_NW * 32) {
++        const int j = e / MLA_DK, d = e % MLA_DK, r = g * MLA_QG + j;
++        float4 v = {0.0f, 0.0f, 0.0f, 0.0f};
++        if (r < rows) v = *(const float4 *) (a.Q + (r / a.nh) * a.q_tok + (r % a.nh) * a.q_head + d);
++        qs[j][d + 0] = (_Float16) (v.x * a.scale); qs[j][d + 1] = (_Float16) (v.y * a.scale);
++        qs[j][d + 2] = (_Float16) (v.z * a.scale); qs[j][d + 3] = (_Float16) (v.w * a.scale);
++    }
++    __syncthreads();
++    // Q as B fragments (Q column lane%16, dimensions 8*(lane/16)+i).  Zero-initialized: the warps without
++    // a RoPE step must not feed undefined fragments to the WMMA.
++    const int nks = w < 4 ? 5 : 4;
++    mla_h8 qb[5][2] = {};
++    for (int s = 0; s < 5; s++) {
++        const int d0 = s < 4 ? 64 * w + 16 * s : MLA_DV + 16 * w;
++        for (int qt = 0; qt < 2; qt++) {
++            if (s < nks) qb[s][qt] = *(const mla_h8 *) &qs[qt * 16 + lane % 16][d0 + 8 * (lane / 16)];
++        }
++    }
++    __syncthreads();
++
++    // Softmax phase: thread t holds Q column jb = t/8 and the KV rows 2*(t%8), 2*(t%8)+1 of the tile.
++    const int jb = threadIdx.x / 8, kb = 2 * (threadIdx.x % 8);
++    const int rb = g * MLA_QG + jb;
++    const int tokb = rb < rows ? rb / a.nh : 0;
++    const int qtb = jb / 16, lnb = jb % 16 + 16 * (kb / 8), ib = kb % 8;  // position in the D / B layouts
++    float mb = -1e30f, lb = 0.0f;  // finite floor: a fully masked tile gives p = 0 and alpha = 1, no NaN
++
++    mla_f8 o[4][2] = {};
++
++    auto load = [&](const int kv0, mla_h8 * ka, mla_h2 & mk) {
++        const _Float16 * krow = K + (size_t) (kv0 + lane % 16) * a.k_row + 8 * (lane / 16);
++        for (int s = 0; s < 5; s++) {
++            if (s < nks) ka[s] = *(const mla_h8 *) (krow + (s < 4 ? 64 * w + 16 * s : MLA_DV + 16 * w));
++        }
++        mk = *(const mla_h2 *) (mask + (size_t) tokb * a.m_row + kv0 + kb);
++    };
++    mla_h8 ka[5] = {}, ka_n[5] = {};
++    mla_h2 mk = {}, mk_n = {};
++    if (kv_lo < kv_hi) load(kv_lo, ka, mk);
++
++    for (int kv0 = kv_lo; kv0 < kv_hi; kv0 += MLA_KT) {
++        if (kv0 + MLA_KT < kv_hi) load(kv0 + MLA_KT, ka_n, mk_n);
++        mla_f8 st[2] = {};
++        for (int s = 0; s < 5; s++) {
++            if (s < nks) { st[0] = MLA_WMMA(ka[s], qb[s][0], st[0]); st[1] = MLA_WMMA(ka[s], qb[s][1], st[1]); }
++        }
++        for (int qt = 0; qt < 2; qt++) *(mla_f8 *) sp[w][qt][lane] = st[qt];
++        for (int s = 0; s < 4; s++) for (int i = 0; i < 8; i++) vt[w][16 * s + 8 * (lane / 16) + i][lane % 16] = ka[s][i];
++        __syncthreads();
++
++        {
++            float x0 = (float) mk[0] * 1.4426950408889634f, x1 = (float) mk[1] * 1.4426950408889634f;
++            for (int ww = 0; ww < MLA_NW; ww++) {
++                const float2 v = *(const float2 *) &sp[ww][qtb][lnb][ib];
++                x0 += v.x; x1 += v.y;
++            }
++            float mt = fmaxf(x0, x1);
++            for (int o2 = 1; o2 < 8; o2 <<= 1) mt = fmaxf(mt, __shfl_xor(mt, o2, 32));
++            const float mn = fmaxf(mb, mt);
++            const float p0 = __builtin_amdgcn_exp2f(x0 - mn), p1 = __builtin_amdgcn_exp2f(x1 - mn);
++            float rs = p0 + p1;
++            for (int o2 = 1; o2 < 8; o2 <<= 1) rs += __shfl_xor(rs, o2, 32);
++            const float alpha = __builtin_amdgcn_exp2f(mb - mn);
++            lb = lb * alpha + rs;
++            mb = mn;
++            mla_h2 ph; ph[0] = (_Float16) p0; ph[1] = (_Float16) p1;
++            *(mla_h2 *) &pl[qtb][lnb][ib] = ph;
++            if (kb == 0) al[jb] = alpha;
++        }
++        __syncthreads();
++
++        const mla_h8 pb0 = *(const mla_h8 *) pl[0][lane], pb1 = *(const mla_h8 *) pl[1][lane];
++        const float a0 = al[lane % 16], a1 = al[16 + lane % 16];
++        for (int t = 0; t < 4; t++) {
++            o[t][0] *= a0; o[t][1] *= a1;
++            const mla_h8 va = *(const mla_h8 *) &vt[w][16 * t + lane % 16][8 * (lane / 16)];
++            o[t][0] = MLA_WMMA(va, pb0, o[t][0]);
++            o[t][1] = MLA_WMMA(va, pb1, o[t][1]);
++        }
++        for (int s = 0; s < 5; s++) ka[s] = ka_n[s];
++        mk = mk_n;
++    }
++
++    // Normalized Oᵀ in f16: lane l -> Q column lane%16, dimensions 64w + 16t + 8*(lane/16) + i.
++    __syncthreads();
++    if (kb == 0) al[jb] = lb > 0.0f ? 1.0f / lb : 0.0f;
++    const size_t base = ((size_t) c * a.ngroups + g) * MLA_QG;
++    if (kb == 0) a.meta[base + jb] = make_float2(mb, lb);
++    __syncthreads();
++    for (int qt = 0; qt < 2; qt++) {
++        const int j = qt * 16 + lane % 16;
++        const float inv = al[j];
++        for (int t = 0; t < 4; t++) {
++            mla_h8 v;
++            for (int i = 0; i < 8; i++) v[i] = (_Float16) (o[t][qt][i] * inv);
++            *(mla_h8 *) ((_Float16 *) a.part + (base + j) * MLA_DV + 64 * w + 16 * t + 8 * (lane / 16)) = v;
++        }
++    }
++#else
++    GGML_UNUSED(a);
++    NO_DEVICE_CODE;
++#endif // defined(RDNA4)
++}
++
++// Chunk combination: one Q row x 128 output dimensions per block, the chunk weights first.
++__global__ void __launch_bounds__(64) mla_combine(const half * part, const float2 * meta, float * dst, const int nchunks, const int ngroups) {
++    const int r = blockIdx.x, g = r / MLA_QG, j = r % MLA_QG;
++    __shared__ float wgt[1024];
++    __shared__ float red[64];
++    float M = -INFINITY;
++    for (int c = threadIdx.x; c < nchunks; c += 64) M = fmaxf(M, meta[((size_t) c * ngroups + g) * MLA_QG + j].x);
++    red[threadIdx.x] = M; __syncthreads();
++    for (int o = 32; o > 0; o >>= 1) { if (threadIdx.x < o) red[threadIdx.x] = fmaxf(red[threadIdx.x], red[threadIdx.x + o]); __syncthreads(); }
++    M = red[0]; __syncthreads();
++    float den = 0.0f;
++    for (int c = threadIdx.x; c < nchunks; c += 64) {
++        const float2 ml = meta[((size_t) c * ngroups + g) * MLA_QG + j];
++        const float x = ml.y > 0.0f ? exp2f(ml.x - M) * ml.y : 0.0f;
++        wgt[c] = x; den += x;
++    }
++    red[threadIdx.x] = den; __syncthreads();
++    for (int o = 32; o > 0; o >>= 1) { if (threadIdx.x < o) red[threadIdx.x] += red[threadIdx.x + o]; __syncthreads(); }
++    const float inv = red[0] > 0.0f ? 1.0f / red[0] : 0.0f;
++    float2 acc = {0.0f, 0.0f};
++    const int d = 128 * blockIdx.y + 2 * threadIdx.x;
++    const half2 * p = (const half2 *) (part + ((size_t) g * MLA_QG + j) * MLA_DV + d);
++    const size_t step = (size_t) ngroups * MLA_QG * MLA_DV / 2;
++#pragma unroll 8
++    for (int c = 0; c < nchunks; c++) {
++        const float2 h = __half22float2(p[c * step]);
++        const float x = wgt[c];
++        acc.x += x * h.x; acc.y += x * h.y;
++    }
++    *(float2 *) (dst + (size_t) r * MLA_DV + d) = make_float2(acc.x * inv, acc.y * inv);
++}
++
++} // namespace
++
++bool ggml_cuda_flash_attn_ext_mla_applies(const int cc, const ggml_tensor * dst) {
++    static const bool enabled = [] {
++        const char * e = getenv("GGML_CUDA_FA_MLA");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    if (!enabled || !GGML_CUDA_CC_IS_RDNA4(cc) || !amd_wmma_available(cc)) {
++        return false;
++    }
++    const ggml_tensor * Q    = dst->src[0];
++    const ggml_tensor * K    = dst->src[1];
++    const ggml_tensor * V    = dst->src[2];
++    const ggml_tensor * mask = dst->src[3];
++    // Only the packed mask (no sinks, no kv_rows / derived forms).
++    if (mask == nullptr || dst->src[4] != nullptr || dst->src[5] != nullptr || dst->src[6] != nullptr) {
++        return false;
++    }
++    float max_bias = 0.0f, logit_softcap = 0.0f;
++    memcpy(&max_bias,      (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
++    if (max_bias != 0.0f || logit_softcap != 0.0f) {
++        return false;
++    }
++    if (Q->type != GGML_TYPE_F32 || K->type != GGML_TYPE_F16 || V->type != GGML_TYPE_F16 || mask->type != GGML_TYPE_F16 ||
++            dst->type != GGML_TYPE_F32) {
++        return false;
++    }
++    if (Q->ne[0] != MLA_DK || K->ne[0] != MLA_DK || V->ne[0] != MLA_DV || K->ne[2] != 1 || K->ne[3] != 1 || Q->ne[3] != 1) {
++        return false;
++    }
++    // V must be the view of K's first 512 columns: the kernel reads V from K.
++    if (V->data != K->data || V->nb[1] != K->nb[1] || V->ne[1] != K->ne[1]) {
++        return false;
++    }
++    const int64_t nh = Q->ne[2];
++    if (nh <= 16 || nh > 32 || Q->ne[1] < 1 || Q->ne[1] > 8 || K->ne[1] % MLA_KT != 0 || mask->ne[0] != K->ne[1] || mask->ne[1] < Q->ne[1] ||
++            mask->ne[2] != 1 || mask->ne[3] != 1) {
++        return false;
++    }
++    // Alignment: float4 Q reads, 16-byte K rows, 4-byte mask pairs; the output is contiguous [DV, nh, n_q].
++    if (Q->nb[0] != 4 || Q->nb[1] % 16 != 0 || Q->nb[2] % 16 != 0 || K->nb[0] != 2 || K->nb[1] % 16 != 0 ||
++            ((uintptr_t) K->data) % 16 != 0 || mask->nb[0] != 2 || mask->nb[1] % 4 != 0 || !ggml_is_contiguous(dst) ||
++            dst->ne[0] != MLA_DV || dst->ne[1] != nh || dst->ne[2] != Q->ne[1]) {
++        return false;
++    }
++    return true;
++}
++
++void ggml_cuda_flash_attn_ext_mla(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q    = dst->src[0];
++    const ggml_tensor * K    = dst->src[1];
++    const ggml_tensor * mask = dst->src[3];
++
++    float scale = 1.0f;
++    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
++
++    const int nh = Q->ne[2], nq = Q->ne[1], n_kv = K->ne[1];
++    const int rows = nq * nh, ngroups = (rows + MLA_QG - 1) / MLA_QG;
++    int nchunks = std::max(1, MLA_BLOCKS / ngroups);
++    const int chunk = ((n_kv + nchunks - 1) / nchunks + MLA_KT - 1) / MLA_KT * MLA_KT;
++    nchunks = (n_kv + chunk - 1) / chunk;
++    GGML_ASSERT(nchunks <= 1024);
++
++    ggml_cuda_pool_alloc<half>   part(ctx.pool(), (size_t) nchunks * ngroups * MLA_QG * MLA_DV);
++    ggml_cuda_pool_alloc<float2> meta(ctx.pool(), (size_t) nchunks * ngroups * MLA_QG);
++
++    const mla_args a = {
++        (const float *) Q->data, (int) (Q->nb[1] / 4), (int) (Q->nb[2] / 4),
++        (const half *) K->data, (int) (K->nb[1] / 2),
++        (const half *) mask->data, (int) (mask->nb[1] / 2),
++        part.get(), meta.get(),
++        n_kv, nq, nh, chunk, ngroups, scale * 1.4426950408889634f,
++    };
++    cudaStream_t stream = ctx.stream();
++    mla_partial<<<dim3(nchunks, ngroups), MLA_NW * 32, 0, stream>>>(a);
++    mla_combine<<<dim3(rows, MLA_DV / 128), 64, 0, stream>>>(part.get(), meta.get(), (float *) dst->data, nchunks, ngroups);
++    CUDA_CHECK(cudaGetLastError());
++}
+diff --git a/ggml/src/ggml-cuda/fattn-mla.cuh b/ggml/src/ggml-cuda/fattn-mla.cuh
+new file mode 100644
+index 0000000..ddbc646
+--- /dev/null
++++ b/ggml/src/ggml-cuda/fattn-mla.cuh
+@@ -0,0 +1,8 @@
++#pragma once
++
++#include "common.cuh"
++
++// RDNA4 decode/verify attention for the absorbed MLA with one KV head (GLM-4.7 Flash: DKQ 576, DV 512,
++// V a view of the first 512 columns of K, 20 Q heads).  See fattn-mla.cu.
++bool ggml_cuda_flash_attn_ext_mla_applies(int cc, const ggml_tensor * dst);
++void ggml_cuda_flash_attn_ext_mla(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index 35ae560..61fcb9c 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -1,5 +1,6 @@
+ #include "common.cuh"
+ #include "fattn-common.cuh"
++#include "fattn-mla.cuh"
+ #include "fattn-mma-f16.cuh"
+ #include "fattn-tile.cuh"
+ #include "fattn-vec.cuh"
+@@ -961,6 +962,12 @@ thread_local ggml_cuda_fa_had_req ggml_cuda_fa_had;
+ 
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
++    // RDNA4 absorbed-MLA decode/verify (GLM-4.7 Flash), see fattn-mla.cu.  The op stays a TILE op for the
++    // allocation and support queries: the path needs no F16 staging (K is F16) and accepts a subset of it.
++    if (ggml_cuda_flash_attn_ext_mla_applies(ggml_cuda_info().devices[ggml_cuda_get_device()].cc, dst)) {
++        ggml_cuda_flash_attn_ext_mla(ctx, dst);
++        return;
++    }
+     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+         case BEST_FATTN_KERNEL_NONE:
+             GGML_ABORT("fatal error");
+-- 
+2.53.0
+

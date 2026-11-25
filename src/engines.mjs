@@ -71,6 +71,12 @@ const BUILTIN = {
     ref: '64f2e8862d4d208354ea0a3d0f29b53967a9f4e5', base: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad',
     tree: '345e62faed5199208404b625c1e55c49ec5ac9e7', archsFrom: { repo: 'ggml-org/llama.cpp', ref: '4f9dfa0e360c2bbc3afdf11cbc6384f54a62c8ad' },
     isolated: true, eligible: rdna4Linux, ngram: true,
+    // Correctif de Harn (src/assets/rdnaboosts) : l'attention de décodage et de vérification de la MLA absorbée
+    // (GLM-4.7 Flash : têtes 576/512, une tête KV pour 20 têtes Q) en WMMA, au lieu du noyau tile vectoriel qui
+    // relit K 5 fois. Noyau seul, kv 16k : 101 → 36 µs (1 token), 370 → 78 µs (4 tokens). Hellfire Q5_K_M,
+    // décodage à 13k / 27k : 83 / 64 → 98 / 87 tok/s sans spéculation, 71 / 49 → 100 / 96 avec MTP3.
+    // GGML_CUDA_FA_MLA=0 le coupe.
+    patches: ['mla-decode.patch'],
     // Bloc 0092 du fork de Harn : avec --spec-draft-mtp-vocab, le brouillon MTP garde tout le vocabulaire en notant
     // chaque token sur une copie 2 bits (Q2_0) de la tête de sortie, puis recalcule exactement les 64 meilleurs
     // (idée reprise de vllm-radiance). Uncensored Q4_K_M, 10 graines : MTP3 code 88,8 → 88,7, prose 48,2 → 53,4 ;
@@ -87,7 +93,13 @@ const BUILTIN = {
     // - MTP 3 sur un brouillon réduit aux 98 304 premiers tokens : 92 / 59 / 85 ;
     // - MTP adaptatif jusqu'à 9 + n-gramme : 116 / 51 / 126 (la profondeur monte trop en prose).
     arms: (tuning, model) => {
-      const base = { ...tuning, backend: 'hip', kv: 'f16', kvV: undefined };
+      // Le KV passe en f16 : le contexte réglé pour du q8_0 rétrécit d'autant, sinon le moteur ne tient
+      // plus sur la carte (GLM-4.7 Flash Q5_K_M, 2026-11-24 : 198k en f16 = 10,9 Go de KV en plus des
+      // 21 Go de poids, les trois essais du fork morts au chargement). L'étape KV du banc reteste q8_0.
+      const per = model.kvBytesPerToken;
+      const context = tuning.kv !== 'f16' && per?.[tuning.kv] && per.f16
+        ? Math.floor(tuning.context * per[tuning.kv] / per.f16 / 4096) * 4096 : tuning.context;
+      const base = { ...tuning, context, backend: 'hip', kv: 'f16', kvV: undefined };
       const mtp = { ...base, spec: { type: 'mtp', n: 3, pMin: 0, vocab: 98304 } };
       if (model.dflash) return [{ ...base, spec: { type: 'dflash', n: 4 } }, { ...base, spec: { type: 'dflash', n: 7 } }, ...(model.mtp && !tuning.noNextn ? [mtp] : [])];
       if (!model.mtp || tuning.noNextn) return [{ ...base, spec: tuning.spec }];
