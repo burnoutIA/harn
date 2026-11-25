@@ -15,7 +15,7 @@ import { installLlama } from './runtimes.mjs';
 import { iqScores } from './scores.mjs';
 import { settleGpuChange } from './gpu-profiles.mjs';
 import { getState, update } from './state.mjs';
-import { HEADROOM_MIN_MIB, USAGE_WEIGHTS, isBetter, measure } from './tuner.mjs';
+import { HEADROOM_MIN_MIB, NOISE, USAGE_WEIGHTS, isBetter, measure } from './tuner.mjs';
 
 // Le banc : une variable à la fois, le plus rapide gagne.
 const sameTuning = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -30,6 +30,18 @@ const DSPARK_MIB = 1800;
 // La charge longue (~94k tokens lus) demande ce contexte.
 const LONG_CONTEXT = 100 * 1024;
 // Le plus grand contexte (≥ 100k) qui laisse la marge une fois `extraMiB` ajoutés en VRAM.
+// Strata-Inkling : DSpark devine bien le code et mal la prose (3090, SQ-20 : code 81 → 125 tok/s,
+// prose 85 → 76, soit −11 %, refusé par la règle générale d'isBetter). Harn sert surtout du code :
+// DSpark l'emporte s'il gagne en moyenne pondérée et en code, sans recul de plus de 15 % ailleurs.
+export function prefersDspark(dspark, plain) {
+  if (!dspark?.ok || dspark.error || !plain || plain.error) return false;
+  const theirs = new Map((plain.workloads ?? []).map((w) => [w.workload, w.tps]));
+  const code = dspark.workloads?.find((w) => w.workload === 'code');
+  if (!code || !theirs.has('code')) return false;
+  return dspark.tps > plain.tps * (1 + NOISE) && code.tps > theirs.get('code') * (1 + NOISE)
+    && dspark.workloads.every((w) => !theirs.has(w.workload) || w.tps >= theirs.get(w.workload) * 0.85);
+}
+
 function roomFor(model, best, extraMiB) {
   if (best.headroomMiB == null || !model.kvBytesPerToken) return null;
   const perToken = model.kvBytesPerToken[best.tuning.kv] / 2 ** 20;
@@ -183,7 +195,11 @@ async function tuneModelInner(modelId, { startFrom = null, engine = null, onProg
   if (model.engine === 'strata-inkling') {
     let best = await trial('Strata', initial.tuning);
     const other = Object.values(STRATA_INKLING_ARMS).find((arm) => arm.drafting !== (initial.tuning.drafting ?? 'off'));
-    best = better(await trial('Strata', other), best);
+    const first = best;
+    const second = await trial('Strata', other);
+    const [plain, dspark] = first.tuning.drafting === 'dspark' ? [second, first] : [first, second];
+    best = better(second, first);
+    if (best === plain && prefersDspark(dspark, plain)) best = dspark;
     if (best.error) throw new Error(best.error);
     return finish(model, results, best);
   }

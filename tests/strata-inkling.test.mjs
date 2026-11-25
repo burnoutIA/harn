@@ -4,6 +4,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { modelById, ownLauncher } from '../src/catalog.mjs';
+import { prefersDspark } from '../src/bench.mjs';
 import { describe } from '../src/engine.mjs';
 import { shapeRequest } from '../src/gateway.mjs';
 import { STRATA_INKLING_ARMS, recipeFor, startingTuning } from '../src/loading.mjs';
@@ -73,4 +74,15 @@ test('lancement : server.py de Strata avec une config écrite pour ce modèle et
 test('passerelle : le niveau de réflexion passe par chat_template_kwargs, que le dialecte Inkling de Strata lit', () => {
   assert.equal(shapeRequest({ messages: [], reasoning_effort: 'none' }, sq20).chat_template_kwargs.reasoning_effort, 'none');
   assert.equal(shapeRequest({ messages: [] }, sq20).chat_template_kwargs.reasoning_effort, 'medium');
+});
+
+test('banc : DSpark gardé quand il gagne en code, même si la prose recule un peu', () => {
+  const arm = (tps, code, prose) => ({ ok: true, tps, workloads: [{ workload: 'code', tps: code }, { workload: 'prose', tps: prose }] });
+  // 3090, SQ-20, 2026-11-25 : refusé par isBetter (prose −11 %).
+  assert.ok(prefersDspark(arm(94.6, 124.7, 76.15), arm(83.4, 81.5, 85.45)));
+  // R9700 : DSpark perd partout.
+  assert.ok(!prefersDspark(arm(63, 63.1, 63), arm(69.1, 67.7, 72.75)));
+  // Gain en code mais prose effondrée.
+  assert.ok(!prefersDspark(arm(95, 130, 60), arm(83, 81, 85)));
+  assert.ok(!prefersDspark({ ok: false, error: 'mort' }, arm(83, 81, 85)));
 });
