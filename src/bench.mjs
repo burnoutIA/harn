@@ -401,6 +401,13 @@ async function strataArms(model, baseTuning) {
   // 0,35 a battu la valeur calibrée (0,00) sur la 3090 de référence ; ailleurs, on mesure.
   const pcie = config.args[config.args.indexOf('--pcie-frac') + 1];
   if (pcie !== '0.35') variants.push(['pcie-frac 0.35', (args) => setArg(args, '--pcie-frac', '0.35')]);
+  // Mode faible RAM : setup.py choisit parfois les experts mappés (relus depuis le SSD) alors que
+  // ceux que la carte ne garde pas tiennent en RAM. 3090 + 30 Go, Swift IQ2_XS, Strata 0.2.21 :
+  // prompt de 4k lu à 250 tok/s mappé, 1 750-2 260 résident ; code 92 → 120-131 tok/s. Le moteur
+  // repasse de lui-même en mappé quand les experts manquants ne tiennent pas (docs/DETAILS.md).
+  if (config.args.includes('--mmap-experts') && !config.args.includes('--resident-budget-gib')) {
+    variants.push(['experts résidents', (args) => args.map((arg) => (arg === '--mmap-experts' ? '--resident-experts' : arg))]);
+  }
 
   const arms = [];
   for (const [label, change] of variants) {
