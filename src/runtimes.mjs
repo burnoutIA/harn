@@ -436,40 +436,25 @@ export async function buildHip(sheet, hardware, onLog = () => {}) {
 // l'identifiant de commit, lui, désigne un contenu unique.)
 // v0.2.11 : moteur HIP pour les Radeon (gfx1100/1101/1200/1201), compilé par setup.sh avec la ROCm
 // des wheels TheRock d'AMD posée dans son .venv (sans sudo).
-const STRATA_COMMIT = 'c3b3f5035506f3e966f1b4b7b188aeaabae92f1d';
+// v0.2.21 (2026-11-25) : l'application vit dans terminal/ (setup.py, serve/, tools/, .venv, configs,
+// depuis la 0.2.16), iq_pack lit les GGUF seul (plus de gguf-py de llama.cpp). R9700, Swift IQ2_XS,
+// mêmes fichiers et même pack : code 136 → 144 tok/s, 28k 92 → 106, prompt 2 970 → 3 355 tok/s.
+const STRATA_COMMIT = '2af30ccaa0729177c4725ee2073f72bf550e2f86';
 // Le commit déplié dans Strata-main : un autre (installation antérieure) est remplacé en entier.
 const strataMark = (repoDir) => path.join(repoDir, '.harn-commit');
+// Là où vivent setup.py, serve/, tools/, le .venv et les configs : terminal/ depuis la 0.2.16.
+const strataApp = async (repoDir) => ((await stat(path.join(repoDir, 'terminal', 'setup.py')).catch(() => null)) ? path.join(repoDir, 'terminal') : repoDir);
+const strataPython = (appDir) => (LINUX ? path.join(appDir, '.venv', 'bin', 'python') : path.join(appDir, '.venv', 'Scripts', 'python.exe'));
 
-export async function installStrata(model, contextSize, onLog = () => {}, { ggufDir = null } = {}) {
-  const dir = path.join(DIRS.runtime, 'strata');
-  const repoDir = path.join(dir, 'Strata-main');
-  // Windows : START-HERE.bat ; Linux : setup.sh, mêmes options. Sous Linux, l'archive en .tar.gz :
-  // le tar GNU ne sait pas ouvrir un zip.
+async function runStrataSetup(repoDir, appDir, model, contextSize, onLog, ggufDir) {
   const script = LINUX ? 'setup.sh' : 'START-HERE.bat';
-  const ext = LINUX ? 'tar.gz' : 'zip';
-  const current = (await readFile(strataMark(repoDir), 'utf8').catch(() => '')).trim();
-  if (current !== STRATA_COMMIT || !(await stat(path.join(repoDir, script)).catch(() => null))) {
-    const zip = await download({
-      id: 'runtime:strata',
-      label: `Strata (runtime MoE, ${STRATA_COMMIT.slice(0, 7)})`,
-      url: `https://github.com/Niko1221/Strata/archive/${STRATA_COMMIT}.${ext}`,
-      dest: path.join(DIRS.downloads, `strata-${STRATA_COMMIT.slice(0, 7)}.${ext}`),
-    });
-    // L'archive d'un commit se déplie dans Strata-<commit> : ramenée au nom attendu partout.
-    const unpacked = path.join(dir, `Strata-${STRATA_COMMIT}`);
-    await rm(repoDir, { recursive: true, force: true });
-    await rm(unpacked, { recursive: true, force: true });
-    await extract(zip, dir);
-    await rename(unpacked, repoDir);
-    await writeFile(strataMark(repoDir), `${STRATA_COMMIT}\n`);
-  }
   const args = [
     '--setup', '--family', model.strataFamily ?? 'swift', '--model', model.strataModel, '--context', String(contextSize),
     '--vision', 'cpu', '--data-dir', path.join(DIRS.models, 'strata-data'), '--yes', '--no-start', '--no-browser',
     // Fichiers déjà présents sur la machine : Strata les utilise au lieu de retélécharger 70 Go.
     ...(ggufDir ? ['--gguf-dir', ggufDir] : []),
   ];
-  if (LINUX && !(await stat(path.join(repoDir, '.venv', 'bin', 'python')).catch(() => null)) && !(await linuxPython())?.ok) {
+  if (LINUX && !(await stat(strataPython(appDir)).catch(() => null)) && !(await linuxPython())?.ok) {
     throw new Error('Python 3.10+ avec venv manque : sudo apt install python3-venv (Ubuntu, Debian), puis relancer Harn');
   }
   onLog(`${script} ${args.join(' ')}`);
@@ -486,9 +471,63 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
     child.stderr.on('data', (chunk) => onLog(String(chunk)));
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`L’installeur de Strata s’est arrêté (code ${code})`))));
   });
-  const config = (await readdir(repoDir)).find((name) => name.startsWith(`strata-${model.strataFamily ?? 'swift'}`) && name.endsWith('.json') && name.toLowerCase().includes(model.strataModel.toLowerCase()));
-  const info = { kind: 'strata', commit: STRATA_COMMIT, dir: repoDir, config, python: LINUX ? path.join(repoDir, '.venv', 'bin', 'python') : path.join(repoDir, '.venv', 'Scripts', 'python.exe'), installedAt: new Date().toISOString() };
+  // setup.py nomme sa config strata-<famille>-<taille>.json (en minuscules depuis la 0.2.16).
+  const config = (await readdir(appDir)).find((name) => name.startsWith(`strata-${model.strataFamily ?? 'swift'}`) && name.endsWith('.json') && name.toLowerCase().includes(model.strataModel.toLowerCase()));
+  if (!config) throw new Error('L’installeur de Strata n’a pas écrit de config pour ce modèle');
+  const info = { kind: 'strata', commit: STRATA_COMMIT, dir: appDir, config, python: strataPython(appDir), installedAt: new Date().toISOString() };
   update((s) => { s.runtimes[`strata-${model.strataModel}`] = info; });
+  return info;
+}
+
+// others : les autres Flash-Next installés ({ model, context }), remis sur le nouveau Strata quand
+// le commit change (leurs configs vivaient dans l'ancien dossier, remplacé en entier). Leurs poids
+// et leurs packs restent dans models/strata-data : setup.py les retrouve sans rien retélécharger.
+// beforeReplace : arrêter un moteur Strata qui tournerait encore depuis l'ancien dossier.
+export async function installStrata(model, contextSize, onLog = () => {}, { ggufDir = null, others = [], beforeReplace = async () => {} } = {}) {
+  const dir = path.join(DIRS.runtime, 'strata');
+  const repoDir = path.join(dir, 'Strata-main');
+  // Windows : START-HERE.bat ; Linux : setup.sh, mêmes options. Sous Linux, l'archive en .tar.gz :
+  // le tar GNU ne sait pas ouvrir un zip.
+  const script = LINUX ? 'setup.sh' : 'START-HERE.bat';
+  const ext = LINUX ? 'tar.gz' : 'zip';
+  const current = (await readFile(strataMark(repoDir), 'utf8').catch(() => '')).trim();
+  const upgrade = current !== STRATA_COMMIT || !(await stat(path.join(repoDir, script)).catch(() => null));
+  // Les Flash-Next ajoutés (iq_pack) : leur premier fichier, lu dans leur config avant qu'elle parte.
+  const packs = [];
+  if (upgrade) {
+    for (const { model: other, context } of others.filter((o) => o.model.strataPack)) {
+      const runtime = getState().runtimes[`strata-${other.strataModel}`];
+      const config = runtime && JSON.parse((await readFile(path.join(runtime.dir, runtime.config), 'utf8').catch(() => '{}')).replace(/^\uFEFF/, ''));
+      const at = config?.args?.indexOf('--native') ?? -1;
+      if (at >= 0) packs.push({ model: other, context, firstShard: config.args[at + 1] });
+    }
+    const zip = await download({
+      id: 'runtime:strata',
+      label: `Strata (runtime MoE, ${STRATA_COMMIT.slice(0, 7)})`,
+      url: `https://github.com/Niko1221/Strata/archive/${STRATA_COMMIT}.${ext}`,
+      dest: path.join(DIRS.downloads, `strata-${STRATA_COMMIT.slice(0, 7)}.${ext}`),
+    });
+    await beforeReplace();
+    // L'archive d'un commit se déplie dans Strata-<commit> : ramenée au nom attendu partout.
+    const unpacked = path.join(dir, `Strata-${STRATA_COMMIT}`);
+    await rm(repoDir, { recursive: true, force: true });
+    await rm(unpacked, { recursive: true, force: true });
+    await extract(zip, dir);
+    await rename(unpacked, repoDir);
+    await writeFile(strataMark(repoDir), `${STRATA_COMMIT}\n`);
+  }
+  const appDir = await strataApp(repoDir);
+  const info = await runStrataSetup(repoDir, appDir, model, contextSize, onLog, ggufDir);
+  if (upgrade) {
+    for (const { model: other, context } of others.filter((o) => !o.model.strataPack && o.model.id !== model.id)) {
+      onLog(`Strata ${STRATA_COMMIT.slice(0, 7)} : remise en place de ${other.strataModel} (fichiers déjà là)`);
+      await runStrataSetup(repoDir, appDir, other, context, onLog, null);
+    }
+    for (const { model: other, context, firstShard } of packs) {
+      onLog(`Strata ${STRATA_COMMIT.slice(0, 7)} : nouveau pack pour ${other.id}`);
+      await installStrataPack(other, firstShard, context, onLog);
+    }
+  }
   return info;
 }
 
@@ -498,12 +537,14 @@ export async function installStrata(model, contextSize, onLog = () => {}, { gguf
 // pas réécrits), et le moteur se lance avec une config calquée sur celle d'un modèle déjà installé.
 // Il faut donc qu'un Strata tourne déjà ici : moteur, Python, tête MTP (docs/ORCA.md de Strata).
 const STRATA_ARCH = 'qwen4exp';
+// Avant la 0.2.16, iq_pack lisait les GGUF avec le gguf-py de llama.cpp ; depuis, avec le sien.
 const ggufPy = (dir) => path.join(dir, 'third_party', 'llama.cpp', 'gguf-py');
+const ggufEnv = async (dir) => ((await stat(ggufPy(dir)).catch(() => null)) ? { STRATA_GGUF_PY: ggufPy(dir) } : {});
 
 export async function strataBase() {
   for (const runtime of Object.values(getState().runtimes ?? {})) {
     if (runtime?.kind !== 'strata' || runtime.pack) continue;
-    const ready = await Promise.all([runtime.python, path.join(runtime.dir, runtime.config), path.join(runtime.dir, 'tools', 'iq_pack.py'), ggufPy(runtime.dir), path.join(DIRS.models, 'strata-data', 'mtp', 'rt')].map((file) => stat(file).then(() => true, () => false)));
+    const ready = await Promise.all([runtime.python, path.join(runtime.dir, runtime.config), path.join(runtime.dir, 'tools', 'iq_pack.py'), path.join(DIRS.models, 'strata-data', 'mtp', 'rt')].map((file) => stat(file).then(() => true, () => false)));
     if (ready.every(Boolean)) return runtime;
   }
   return null;
@@ -518,7 +559,7 @@ export async function installStrataPack(model, firstShard, contextSize, onLog = 
   if (!base) throw new Error('Strata n’est pas installé sur cette machine : installez d’abord un Flash-Next du catalogue (il apporte le moteur et sa tête MTP)');
   const pack = path.join(DIRS.models, 'strata-data', 'packs', model.id);
   onLog(`iq_pack.py --gguf ${firstShard} --out ${pack} --compat-bf16`);
-  await runLogged(base.python, [path.join('tools', 'iq_pack.py'), '--gguf', firstShard, '--out', pack, '--compat-bf16'], { cwd: base.dir, env: { ...process.env, STRATA_GGUF_PY: ggufPy(base.dir) }, timeout: 60 * 60_000 }, onLog);
+  await runLogged(base.python, [path.join('tools', 'iq_pack.py'), '--gguf', firstShard, '--out', pack, '--compat-bf16'], { cwd: base.dir, env: { ...process.env, ...(await ggufEnv(base.dir)) }, timeout: 60 * 60_000 }, onLog);
   if (!(await stat(path.join(pack, 'tokenizer', 'vocab.json')).catch(() => null))) throw new Error('Strata a préparé le modèle sans son tokenizer : ce fichier n’est pas pris en charge');
 
   const template = JSON.parse((await readFile(path.join(base.dir, base.config), 'utf8')).replace(/^\uFEFF/, ''));

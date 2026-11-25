@@ -102,7 +102,8 @@ const STRATA_AMD = /R9700|RX 9060|RX 9070|RX 7[789]00/i;
 // Strata : RTX 5070 (672 Go/s, 12 Go) à 128k : IQ2_XS 63, IQ3_XXS 49 tok/s (README Strata).
 // Coder IQ1_M : 55 tok/s à 4k sur la même carte, ramenés à 128k comme l'IQ2_XS (63 / 79) : 44.
 // Plus de VRAM = plus d'experts en cache. 3090 : 49 × 1,22 × 1,41 = 85 (mesuré 86 à 100k).
-const STRATA_REF = { IQ2_XS: 63, IQ3_XXS: 49, IQ1_M: 44 };
+// IQ3_S : ~0,8 × l'IQ2_XS au même Strata (R9700, 0.2.21 : code 110 contre 144, prose 72 contre 84).
+const STRATA_REF = { IQ2_XS: 63, IQ3_XXS: 49, IQ3_S: 46, IQ1_M: 44 };
 function strataTps(model, profile, hardware) {
   const bandwidth = Math.min(1.8, Math.max(0.5, profile.bandwidth / 672)) ** 0.6;
   const cache = (Math.min(hardware.vramGiB, 32) / 12) ** 0.5;

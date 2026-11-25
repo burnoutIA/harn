@@ -165,6 +165,33 @@ export const MODELS = [
     reasoningLevels: ['low', 'medium', 'high'],
     evidence: { gpu: 'RTX 3090', tps4k: 107.5, tps24k: 117.6, tps100k: 86.2, note: 'Strata 0.1.38, --pcie-frac 0.35, KV int8' },
   },
+  {
+    id: 'swift15-flashnext-iq3s-strata',
+    name: 'Swift 1.5 Qwen3.8 Flash-Next',
+    variant: 'GSQ-RCO · IQ3_S · Strata',
+    tagline: 'La taille la plus juste du Flash-Next (3,5 bits, au niveau du modèle complet d’après Strata), pour un PC de 64 Go de RAM ou plus.',
+    engine: 'strata',
+    strataModel: 'IQ3_S',
+    // arena_gb de setup.py (Strata 0.2.21) ; ram_gb y vaut 62.
+    arenaGB: 50.3,
+    repo: 'ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF',
+    files: [
+      { name: 'Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf', bytes: 44_900_816_736 },
+      { name: 'Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf', bytes: 38_842_920_384 },
+    ],
+    needs: { vramGiB: 11.5, ramGiB: 62, nvidiaCc: 7.5 },
+    contextByVram: [[15, 65536], [20, 131072]],
+    quality: 99,
+    paramsB: 125,
+    sparse: true,
+    reasoning: true,
+    vision: true,
+    sampling: { temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0 },
+    reasoningLevels: ['low', 'medium', 'high'],
+    // R9700, 128k, réflexion coupée : code 110, édition 99, prose 72, 28k 80 tok/s, prompt ~3 350 tok/s
+    // (l'IQ2_XS au même Strata : 144 / 144 / 84 / 106).
+    evidence: { gpu: 'Radeon AI PRO R9700', tps4k: 110, note: 'Strata 0.2.21, réglages de l’installeur, code' },
+  },
 
   {
     id: 'flashnext-coder-iq1m-strata',

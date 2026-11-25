@@ -133,6 +133,14 @@ test('Strata en mode faible RAM : 5060 Ti 16 Go + 32 Go, experts en partie sur l
   assert.equal(makePlan(machine(12, 32)).verdicts.find((v) => v.id === 'flashnext-coder-iq1m-strata').fit, 'full');
 });
 
+test('Strata IQ3_S : sur 128 Go, pas sur 32 Go avec une carte de 24 Go', () => {
+  const iq3s = (plan) => plan.verdicts.find((v) => v.id === 'swift15-flashnext-iq3s-strata');
+  assert.equal(iq3s(makePlan(machine(24, 128))).fit, 'full');
+  assert.equal(iq3s(makePlan(machine(24, 32))).fit, 'no');
+  // Plus lent que l'IQ2_XS au même Strata.
+  assert.ok(iq3s(makePlan(machine(24, 128))).tps < makePlan(machine(24, 128)).verdicts.find((v) => v.id === 'swift15-flashnext-iq2xs-strata').tps);
+});
+
 test('Strata exige NVIDIA', () => {
   const plan = makePlan(machine(24, 128, 'amd'));
   assert.equal(plan.verdicts.find((v) => v.id === 'swift15-flashnext-iq3xxs-strata').fit, 'no');

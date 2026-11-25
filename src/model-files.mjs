@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { appendFile, mkdir as makeDir, readFile } from 'node:fs/promises';
-import { displayName, downloadUrl, hfSha256 } from './catalog.mjs';
+import { MODELS, displayName, downloadUrl, hfSha256 } from './catalog.mjs';
 import { download } from './download.mjs';
 import { adoptLocalCopy, findLocalCopies } from './local-files.mjs';
 import { DIRS } from './paths.mjs';
@@ -48,7 +48,17 @@ export async function installModelFiles(model, { ggufDir: forcedDir = null } = {
       const shards = model.files.map((file) => local[file.name]).filter(Boolean);
       const ggufDir = forcedDir ?? (shards.length === model.files.length && new Set(shards.map((p) => path.dirname(p))).size === 1 ? path.dirname(shards[0]) : null);
       note(ggufDir ? `Fichiers déjà présents dans ${ggufDir} : réutilisés, pas de téléchargement` : 'Installation de Strata et téléchargement du modèle');
-      await installStrata(model, context, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); }, { ggufDir });
+      // Un nouveau commit de Strata remplace son dossier : les autres Flash-Next installés y sont
+      // remis, et un moteur Strata encore chargé est arrêté avant.
+      const state = getState();
+      const others = MODELS.filter((m) => m.engine === 'strata' && m.id !== model.id && state.models[m.id]?.installedAt)
+        .map((m) => ({ model: m, context: assess(m, state.hardware).context }));
+      const beforeReplace = async () => {
+        const { stopEngine } = await import('./engine.mjs');
+        const loaded = Object.keys(getState().engines ?? {}).filter((id) => MODELS.find((m) => m.id === id)?.engine === 'strata');
+        for (const id of loaded) await stopEngine(id);
+      };
+      await installStrata(model, context, (line) => { log(line); update((s) => { s.models[model.id].log = String(line).slice(-400); }); }, { ggufDir, others, beforeReplace });
     } else {
       for (const file of files) {
         // Une copie déjà sur le disque est reprise telle quelle : c'est le fichier de l'utilisateur,
